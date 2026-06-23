@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened-runtime entitlements for the NOTARIZED (non-sandboxed) build.
+     Deliberately NOT sandboxed: the agentic terminal needs system-wide shell/file
+     access, which App Sandbox forbids (see PRODUCT.md §1). These entitlements let the
+     embedded CPython + native dylibs (libportaudio) run under the hardened runtime. -->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key><true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <key>com.apple.security.cs.disable-library-validation</key><true/>
+    <key>com.apple.security.device.audio-input</key><true/>
+    <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>
