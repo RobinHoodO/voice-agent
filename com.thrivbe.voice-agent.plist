@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.thrivbe.voice-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/robinsverd/Thrivbe-AI/projects/voice-agent/run.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/robinsverd/Thrivbe-AI/projects/voice-agent/agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/robinsverd/Thrivbe-AI/projects/voice-agent/agent.log</string>
+</dict>
+</plist>

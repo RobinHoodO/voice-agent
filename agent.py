@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""Thrivbe Voice Agent — a standalone macOS menubar app you talk to.
+
+Lives in the top menu bar (🎙). Hold Right-Option to record, release to get a
+spoken answer. Click the icon → "Start talking" is kept as a fallback. It reads
+whatever app/selection you're pointing at, can run
+terminal commands in the Thrivbe workspace, and holds a conversation.
+
+Brain: DeepSeek V3 via OpenRouter.  Ears: OpenAI STT.  Voice: ElevenLabs (→ say fallback).
+"""
+import os, sys, subprocess, tempfile, json, threading, time, re
+
+import rumps
+import rumps.rumps as rumps_core
+from openai import OpenAI
+from pynput import keyboard
+
+# --- diagnostics: log to a fixed file so we can see state even in a .app bundle
+LOG_PATH = "/tmp/voice-agent.log"
+def LOG(msg):
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+def accessibility_trusted():
+    """True if macOS grants this process the Accessibility right pynput needs."""
+    try:
+        from ApplicationServices import AXIsProcessTrusted
+        return bool(AXIsProcessTrusted())
+    except Exception as e:
+        LOG(f"AX check failed: {e}")
+        return None
+
+
+def patch_rumps_status_item():
+    """Make rumps 0.4 use the modern NSStatusBarButton API on current macOS."""
+
+    def set_status_bar_title(self):
+        title = self._app["_title"] or self._app["_name"] or ""
+        button = self.nsstatusitem.button()
+        if button is not None:
+            button.setTitle_(title)
+            return
+        self.nsstatusitem.setTitle_(title)
+
+    def set_status_bar_icon(self):
+        image = self._app["_icon_nsimage"]
+        button = self.nsstatusitem.button()
+        if button is not None:
+            button.setImage_(image)
+            if image is None:
+                button.setTitle_(self._app["_title"] or self._app["_name"] or "")
+            return
+        self.nsstatusitem.setImage_(image)
+        self.fallbackOnName()
+
+    rumps_core.NSApp.setStatusBarTitle = set_status_bar_title
+    rumps_core.NSApp.setStatusBarIcon = set_status_bar_icon
+
+
+patch_rumps_status_item()
+
+# --- config -----------------------------------------------------------------
+WORKSPACE = "/Users/robinsverd/Thrivbe-AI"
+
+def detect_mic():
+    """avfoundation device indices drift when audio gear connects/disconnects.
+    Find the MacBook mic by name (fallback: first audio device)."""
+    out = subprocess.run(["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                         capture_output=True, text=True).stderr
+    devices, in_audio = [], False
+    for line in out.splitlines():
+        if "audio devices" in line:
+            in_audio = True; continue
+        if "video devices" in line:
+            in_audio = False; continue
+        m = re.search(r"\]\s*\[(\d+)\]\s+(.+)$", line)
+        if in_audio and m:
+            devices.append((m.group(1), m.group(2).strip()))
+    for idx, name in devices:
+        if "MacBook" in name and "Microphone" in name:
+            return f":{idx}"
+    return f":{devices[0][0]}" if devices else ":0"
+
+MIC = detect_mic()                           # e.g. ":0" — MacBook mic, auto-detected
+STT_MODEL = "gpt-4o-mini-transcribe"
+LLM_MODEL = "openai/gpt-4o-mini"             # fast, reliable on OpenRouter — low-latency voice replies
+ELEVEN_VOICE = "21m00Tcm4TlvDq8ikWAM"        # Rachel
+
+def load_env():
+    path = os.path.join(WORKSPACE, ".env")
+    for line in open(path, encoding="utf-8") if os.path.exists(path) else []:
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+load_env()
+
+openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+router = OpenAI(api_key=os.environ.get("OPENROUTER_API") or os.environ["OPENROUTER_API_KEY"],
+                base_url="https://openrouter.ai/api/v1")
+
+SYSTEM = f"""You are Robin's voice assistant, anchored in his Thrivbe workspace at {WORKSPACE}.
+You answer OUT LOUD, so keep replies SHORT and conversational — 1-3 sentences, no markdown, no lists, no emoji.
+You receive the UI element directly under Robin's MOUSE CURSOR (role, title, value, selected text). That is what he is pointing at — answer about THAT.
+Answer directly and fast. Only use run_shell when Robin explicitly asks you to read a file, search, or do something on disk — never to "explore" on your own. If asked to do something, do it, then say briefly what you did."""
+
+TOOLS = [{"type": "function", "function": {
+    "name": "run_shell",
+    "description": "Run a shell command in the Thrivbe workspace. Read files Robin points at, search, or act.",
+    "parameters": {"type": "object",
+        "properties": {"command": {"type": "string"}}, "required": ["command"]}}}]
+
+
+# --- macOS context grab -----------------------------------------------------
+def osa(script):
+    try:
+        return subprocess.run(["osascript", "-e", script],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return ""
+
+def _ax(el, attr):
+    """Read one AX attribute (attr is a plain string like 'AXValue')."""
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue
+        err, val = AXUIElementCopyAttributeValue(el, attr, None)
+        return val if err == 0 else None
+    except Exception:
+        return None
+
+def _collect_text(el, out, depth=0):
+    """Walk the element's subtree, gathering visible text (value/title/desc)."""
+    if depth > 8 or len(out) >= 60:
+        return
+    for attr in ("AXSelectedText", "AXValue", "AXTitle", "AXDescription"):
+        v = _ax(el, attr)
+        if v is not None:
+            s = str(v).strip()
+            if len(s) >= 2 and not s.startswith("AX") and s not in out:
+                out.append(s)
+    kids = _ax(el, "AXChildren")
+    if kids:
+        for k in list(kids)[:25]:
+            _collect_text(k, out, depth + 1)
+
+def _selected_text():
+    """Whatever Robin has highlighted, via the focused element (fast, no Cmd-C)."""
+    try:
+        from ApplicationServices import AXUIElementCreateSystemWide
+        focused = _ax(AXUIElementCreateSystemWide(), "AXFocusedUIElement")
+        if focused is not None:
+            sel = _ax(focused, "AXSelectedText")
+            if sel:
+                return str(sel).strip()
+    except Exception as e:
+        LOG(f"selection read failed: {e}")
+    return ""
+
+def grab_context():
+    """Context for the brain: (1) text Robin has MARKED/selected, and
+    (2) the CONTENT under the mouse cursor. Both via AX — fast, no Cmd-C."""
+    app = osa('tell application "System Events" to name of first process whose frontmost is true')
+    parts = []
+
+    selected = _selected_text()
+    if selected:
+        parts.append(f"Robin has MARKED this text (prioritise it):\n{selected[:3500]}")
+
+    try:
+        from Quartz import CGEventCreate, CGEventGetLocation
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide, AXUIElementCopyElementAtPosition)
+        loc = CGEventGetLocation(CGEventCreate(None))
+        err, el = AXUIElementCopyElementAtPosition(
+            AXUIElementCreateSystemWide(), loc.x, loc.y, None)
+        if err == 0 and el is not None:
+            texts = []
+            _collect_text(el, texts)
+            blob = "\n".join(texts)[:3500]
+            if blob.strip():
+                parts.append(f"Content under the mouse cursor:\n{blob}")
+    except Exception as e:
+        LOG(f"cursor context failed: {e}")
+
+    if parts:
+        return f"App: {app}\n\n" + "\n\n".join(parts)
+    return f"Frontmost app: {app} (no marked text or readable content under cursor)"
+
+
+# --- audio ------------------------------------------------------------------
+class Recorder:
+    def __init__(self):
+        self.proc = None
+        self.wav = None
+
+    def start(self):
+        self.wav = tempfile.mktemp(suffix=".wav")
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-y", "-f", "avfoundation", "-i", MIC, "-ac", "1", "-ar", "16000", self.wav],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def stop(self):
+        if not self.proc:
+            return None
+        try:
+            self.proc.communicate(input=b"q", timeout=5)
+        except Exception:
+            self.proc.terminate()
+        self.proc = None
+        return self.wav
+
+def transcribe(wav):
+    if not wav or not os.path.exists(wav) or os.path.getsize(wav) < 2000:
+        return ""
+    with open(wav, "rb") as f:
+        return openai_client.audio.transcriptions.create(model=STT_MODEL, file=f).text.strip()
+
+def speak(text, use_eleven):
+    text = text.replace("*", "").replace("#", "").replace("`", "")  # strip markdown for the voice
+    if use_eleven and os.environ.get("ELEVENLABS_API_KEY"):
+        try:
+            import urllib.request
+            # Stream: play audio as chunks arrive (first sound ~1s) instead of
+            # waiting for the whole file. Flash model = lowest TTS latency.
+            url = (f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE}/stream"
+                   "?optimize_streaming_latency=3")
+            body = json.dumps({"text": text, "model_id": "eleven_flash_v2_5"}).encode()
+            req = urllib.request.Request(url, data=body, method="POST", headers={
+                "xi-api-key": os.environ["ELEVENLABS_API_KEY"],
+                "Content-Type": "application/json", "Accept": "audio/mpeg"})
+            player = subprocess.Popen(
+                ["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "pipe:0"],
+                stdin=subprocess.PIPE)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                for chunk in iter(lambda: resp.read(4096), b""):
+                    player.stdin.write(chunk)
+            player.stdin.close()
+            player.wait()
+            return
+        except Exception as e:
+            LOG(f"eleven stream failed -> say: {e}")
+    subprocess.run(["say", text])
+
+
+# --- brain (DeepSeek via OpenRouter, OpenAI-style tool loop) -----------------
+def run_shell(command):
+    print(f"  $ {command}")
+    try:
+        r = subprocess.run(command, shell=True, cwd=WORKSPACE,
+                           capture_output=True, text=True, timeout=30)
+        return (r.stdout + r.stderr)[:6000] or "(no output)"
+    except Exception as e:
+        return f"error: {e}"
+
+def think(history, user_text, context):
+    history.append({"role": "user",
+                    "content": f"[What I'm looking at:\n{context}\n]\n\n{user_text}"})
+    empties = 0
+    for _ in range(8):
+        resp = router.chat.completions.create(
+            model=LLM_MODEL, max_tokens=1024, temperature=0.3,
+            messages=[{"role": "system", "content": SYSTEM}] + history, tools=TOOLS)
+        msg = resp.choices[0].message
+        if msg.tool_calls:
+            history.append(msg.model_dump(exclude_none=True))
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments or "{}")
+                out = run_shell(args.get("command", ""))
+                history.append({"role": "tool", "tool_call_id": tc.id, "content": out})
+            empties = 0
+            continue
+        content = (msg.content or "").strip()
+        if content:
+            history.append({"role": "assistant", "content": content})
+            return content
+        # DeepSeek/OpenRouter occasionally returns a blank completion — retry,
+        # don't pollute history with the empty turn.
+        empties += 1
+        if empties >= 3:
+            break
+    return "I didn't catch that — could you say it again?"
+
+
+# --- menubar app ------------------------------------------------------------
+class VoiceAgent(rumps.App):
+    def __init__(self):
+        super().__init__("🎙", quit_button=None)
+        self.rec = Recorder()
+        self.recording = False
+        self.recording_source = None
+        self.busy = False
+        self.use_eleven = True
+        self.status = "idle"
+        self.history = []
+        self.talk_item = rumps.MenuItem("🔴 Start talking", callback=self.toggle_talk)
+        self.menu = [
+            self.talk_item,
+            None,
+            rumps.MenuItem("Voice: ElevenLabs", callback=self.toggle_voice),
+            rumps.MenuItem("Reset conversation", callback=self.reset),
+            None,
+            rumps.MenuItem("Quit", callback=rumps.quit_application),
+        ]
+        # reflect status into the menubar icon from the main thread
+        rumps.Timer(self._tick, 0.3).start()
+        self.hotkey_listener = keyboard.Listener(
+            on_press=self._on_key_press,
+            on_release=self._on_key_release,
+        )
+        self.hotkey_listener.start()
+        trusted = accessibility_trusted()
+        LOG(f"STARTED. accessibility_trusted={trusted}  log={LOG_PATH}")
+        if trusted is False:
+            LOG("NOT TRUSTED — grant 'Thrivbe Voice' in Accessibility + Input Monitoring, then relaunch.")
+            rumps.notification("Thrivbe Voice", "Permission needed",
+                               "Enable 'Thrivbe Voice' in Accessibility + Input Monitoring, then relaunch.")
+        print("Hotkey ready: hold Right-Option to talk, release to send.")
+
+    ICONS = {"idle": "🎙", "listening": "🔴", "thinking": "💭", "speaking": "🗣"}
+
+    def _tick(self, _):
+        self.title = self.ICONS.get(self.status, "🎙")
+        talk_title = "⏹ Stop & send" if self.recording else "🔴 Start talking"
+        if self.talk_item.title != talk_title:
+            self.talk_item.title = talk_title
+
+    def toggle_voice(self, item):
+        self.use_eleven = not self.use_eleven
+        item.title = f"Voice: {'ElevenLabs' if self.use_eleven else 'macOS say'}"
+
+    def reset(self, _):
+        self.history = []
+        rumps.notification("Voice Agent", "", "Conversation reset")
+
+    def toggle_talk(self, _):
+        """Fallback click-to-talk menu action."""
+        if not self.recording:
+            self._start_recording("menu")
+        else:
+            self._stop_and_send(self.recording_source)
+
+    def _on_key_press(self, key):
+        if key == keyboard.Key.alt_r:
+            LOG("Right-Option PRESSED")
+            self._start_recording("hotkey")
+
+    def _on_key_release(self, key):
+        if key == keyboard.Key.alt_r:
+            LOG("Right-Option RELEASED -> send")
+            self._stop_and_send("hotkey")
+
+    def _start_recording(self, source):
+        if self.busy or self.recording:
+            return False
+        self.recording = True
+        self.recording_source = source
+        self.status = "listening"
+        self.rec.start()
+        print(f"Recording started by {source}.")
+        return True
+
+    def _stop_and_send(self, source):
+        if self.busy or not self.recording:
+            return False
+        if source and self.recording_source != source:
+            return False
+        self.recording = False
+        self.recording_source = None
+        print("Recording stopped; transcribing.")
+        threading.Thread(target=self._turn, daemon=True).start()
+        return True
+
+    def _turn(self):
+        self.busy = True
+        try:
+            wav = self.rec.stop()
+            size = os.path.getsize(wav) if wav and os.path.exists(wav) else 0
+            LOG(f"turn: wav={wav} size={size} bytes")
+            self.status = "thinking"
+            text = transcribe(wav)
+            LOG(f"turn: transcript={text!r}")
+            if not text:
+                LOG("turn: empty transcript — likely no mic audio (grant Microphone to Thrivbe Voice)")
+                self.status = "idle"
+                return
+            ctx = grab_context()
+            answer = think(self.history, text, ctx)
+            LOG(f"turn: answer={answer!r}")
+            self.status = "speaking"
+            speak(answer, self.use_eleven)
+            LOG("turn: spoke answer")
+        except Exception as e:
+            LOG(f"turn ERROR: {e!r}")
+            speak("Sorry, something went wrong.", self.use_eleven)
+        finally:
+            self.busy = False
+            self.status = "idle"
+
+
+if __name__ == "__main__":
+    VoiceAgent().run()

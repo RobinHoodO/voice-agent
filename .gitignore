@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv.backup*/
+
+# py2app build artifacts
+build/
+dist/
+*.app/
+
+# Logs & scratch
+*.log
+*.wav
+ff_err.txt
+
+# macOS
+.DS_Store
+
+# Secrets (keys are loaded from the workspace .env at runtime; never commit env files)
+.env
+.env.*

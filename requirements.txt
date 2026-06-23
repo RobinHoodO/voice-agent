@@ -1,0 +1,7 @@
+rumps
+openai
+pynput
+py2app
+pyobjc-framework-Cocoa
+pyobjc-framework-Quartz
+pyobjc-framework-ApplicationServices
