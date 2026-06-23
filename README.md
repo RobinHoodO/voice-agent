@@ -25,8 +25,9 @@ In live mode the agent is a **proactive, system-wide agentic terminal**:
   activated venvs persist between commands. Starts in your home folder and can act
   anywhere on the Mac. Self-healing: a command that runs >20s is killed and the
   shell resets (it's steered to use Spotlight `mdfind`, never `find ~`).
-- **Skill / agent activation** — it can shell out to `claude -p "..."` to run any
-  Thrivbe skill or delegate a bigger task (long jobs are backgrounded).
+- **Skill / agent activation** — it can shell out to `pi -p --model deepseek-v4-flash "..."`
+  (a headless AI agent with file/bash tools + your skills) to run a skill or delegate a
+  bigger task (long jobs are backgrounded).
 - **Cross-session memory** — a `remember` tool appends durable notes to
   `.voice-memory.log`; the recent tail is reloaded on each session start, so it
   remembers across restarts.
@@ -116,12 +117,13 @@ holds one long-lived `zsh` (`Shell` in `realtime.py`):
 ### Activating skills and other agents
 
 Because the persistent shell has your real `PATH` and shell functions, the agent can
-run **`claude -p "<instruction>"`** — a full headless Claude Code agent with every
-Thrivbe skill and sub-agent available. That's how a quick voice request can fan out
-into real work ("run the front skill to draft a reply"). Since `claude -p` can take
-minutes and a blocking shell call would freeze the conversation, the system prompt
-tells it to background long delegations (`claude -p "..." > /tmp/voice-task.txt 2>&1 &`)
-and read the file back when you ask how it went.
+run **`pi -p --model deepseek-v4-flash "<instruction>"`** — a headless `pi` agent
+(read/bash/edit/write tools + your `~/.claude/skills`) running on DeepSeek V4 Flash.
+That's how a quick voice request can fan out into real work ("run the front skill to
+draft a reply"). Since a delegation can take a while and a blocking shell call would
+freeze the conversation, the system prompt tells it to background long jobs
+(`pi -p --model deepseek-v4-flash "..." > /tmp/voice-task.txt 2>&1 &`) and read the
+file back when you ask how it went.
 
 ### Cross-session memory
 
