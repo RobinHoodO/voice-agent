@@ -32,6 +32,11 @@ URL = f"wss://api.openai.com/v1/realtime?model={MODEL}"
 SR = 24000          # Realtime PCM16 sample rate (fixed by the API)
 VOICE = "alloy"     # OpenAI voice — live mode does NOT use ElevenLabs
 BLOCK = 2400        # mic frames per callback = 100ms at 24kHz
+# ponytail: pin live audio by device-name substring. Using a BT headset as the MIC
+# forces macOS into low-quality HFP/call mode (quiet playback), so capture from the
+# built-in mic and play to the headset — it stays in full-quality A2DP. None -> default.
+MIC_NAME = "MacBook"      # input: built-in MacBook mic
+OUT_NAME = "OpenComm"     # output: Shokz headset (substring of "OpenComm2 by Shokz_II")
 
 WORKSPACE = "/Users/robinsverd/Thrivbe-AI"
 SKILLS_DIR = f"{WORKSPACE}/skills"
@@ -154,10 +159,16 @@ class Shell:
             lines.append(clean)
 
     def close(self) -> None:
+        # Kill the whole process group, not just the shell — otherwise a backgrounded
+        # child (e.g. a `pi ... &` delegation) orphans and keeps running after the
+        # session ends. Ending a live session must reclaim everything it spawned.
         try:
-            self.p.terminate()
+            os.killpg(os.getpgid(self.p.pid), signal.SIGKILL)
         except Exception:
-            pass
+            try:
+                self.p.terminate()
+            except Exception:
+                pass
 
 
 def _load_memory_tail(n: int = 30) -> str:
@@ -210,6 +221,20 @@ def _log(msg: str) -> None:
         LOG(msg)
     except Exception:
         pass
+
+
+def _find_device(substr: str, want_input: bool):
+    """Index of the first device whose name contains substr (case-insensitive) and has
+    the right direction; None (= system default) if not found."""
+    import sounddevice as sd
+    try:
+        for i, d in enumerate(sd.query_devices()):
+            ch = d["max_input_channels"] if want_input else d["max_output_channels"]
+            if ch > 0 and substr.lower() in d["name"].lower():
+                return i
+    except Exception as e:
+        _log(f"device lookup failed: {e!r}")
+    return None
 
 
 class LiveSession:
@@ -306,7 +331,10 @@ class LiveSession:
                         "format": {"type": "audio/pcm", "rate": SR},
                         # create_response:false so we can inject fresh cursor context
                         # AFTER the user stops talking, then trigger the response ourselves.
-                        "turn_detection": {"type": "server_vad", "silence_duration_ms": 700,
+                        # threshold raised (default 0.5) so a sensitive/bone-conduction mic
+                        # doesn't false-trigger barge-in and cancel replies mid-sentence.
+                        "turn_detection": {"type": "server_vad", "threshold": 0.6,
+                                           "prefix_padding_ms": 300, "silence_duration_ms": 700,
                                            "create_response": False},
                         "transcription": {"model": "whisper-1"},
                     },
@@ -322,8 +350,16 @@ class LiveSession:
         t = ev.get("type", "")
         if t in ("session.updated", "input_audio_buffer.speech_started",
                  "input_audio_buffer.speech_stopped", "response.created",
-                 "response.done", "error"):
+                 "error"):
             _log(f"ev {t}" + (f" {ev.get('error')}" if t == "error" else ""))
+        if t == "response.created":
+            self._audio_n = 0
+        elif t == "response.done":
+            resp = ev.get("response") or {}
+            status = resp.get("status")
+            details = resp.get("status_details")
+            _log(f"ev response.done status={status} audio_deltas={getattr(self, '_audio_n', 0)} "
+                 f"details={details}")
         if t == "input_audio_buffer.speech_started":
             self._flush_out()                       # barge-in: stop talking
             if self._speaking:
@@ -334,6 +370,9 @@ class LiveSession:
             await self._inject_context_and_respond()
         elif t == "response.output_audio.delta":
             self._out_q.put(base64.b64decode(ev["delta"]))
+            self._audio_n = getattr(self, "_audio_n", 0) + 1
+            if self._audio_n == 1:
+                _log("first audio delta -> speaking")
             if not self._speaking:
                 self._speaking = True
                 self.on_state("speaking")
@@ -414,14 +453,15 @@ class LiveSession:
     # ----- audio -----
     def _start_audio(self) -> None:
         import sounddevice as sd
+        mic = _find_device(MIC_NAME, want_input=True)
         try:
-            dev = sd.query_devices(kind="input")
-            _log(f"audio input device: {dev.get('name')!r} default_sr={dev.get('default_samplerate')}")
+            name = sd.query_devices(mic if mic is not None else None, kind="input").get("name")
+            _log(f"audio input device: {name!r} (idx={mic}, pinned to {MIC_NAME!r})")
         except Exception as e:
             _log(f"query input device failed: {e!r}")
         self._in_stream = sd.RawInputStream(
             samplerate=SR, channels=1, dtype="int16",
-            blocksize=BLOCK, callback=self._mic_cb)
+            blocksize=BLOCK, callback=self._mic_cb, device=mic)
         self._in_stream.start()
         _log("audio input stream started")
         self._player_thread = threading.Thread(target=self._player, daemon=True)
@@ -438,12 +478,23 @@ class LiveSession:
 
     def _player(self) -> None:
         import sounddevice as sd
+        out = _find_device(OUT_NAME, want_input=False)
         try:
-            self._out_stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16")
+            name = sd.query_devices(out if out is not None else None, kind="output").get("name")
+            _log(f"audio output device: {name!r} (idx={out}, prefer {OUT_NAME!r})")
+        except Exception as e:
+            _log(f"query output device failed: {e!r}")
+        try:
+            self._out_stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16", device=out)
             self._out_stream.start()
         except Exception as e:
-            _log(f"player init failed: {e!r}")
-            return
+            _log(f"player init failed: {e!r} — falling back to default output")
+            try:
+                self._out_stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16")
+                self._out_stream.start()
+            except Exception as e2:
+                _log(f"player default init also failed: {e2!r}")
+                return
         while self._running:
             try:
                 chunk = self._out_q.get(timeout=0.1)
