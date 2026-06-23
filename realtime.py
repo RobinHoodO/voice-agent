@@ -19,6 +19,7 @@ import os
 import queue
 import re
 import select
+import signal
 import subprocess
 import threading
 import time
@@ -42,6 +43,8 @@ MEMORY = f"{WORKSPACE}/projects/voice-agent/.voice-memory.log"
 LIVE_SYSTEM = f"""You are Robin's hands-free voice agent on his Mac. You answer OUT LOUD, so keep replies SHORT and conversational — 1-3 sentences, no markdown, no lists, no emoji.
 
 You have a PERSISTENT shell (run_shell) that starts in Robin's home folder and stays alive for the whole conversation — cd, environment variables, and activated venvs carry between commands. You can act anywhere on the Mac, not just the Thrivbe workspace. Be proactive: when Robin asks you to do something, just do it with run_shell, then say briefly what you did. Don't ask permission for ordinary file/system tasks.
+
+SPEED MATTERS — commands run while Robin waits in silence, and anything over ~20s is killed. To find files or folders use `mdfind` (Spotlight, instant), e.g. `mdfind -name tripwire` or `mdfind "kMDItemKind=='Folder' && kMDItemFSName=='*tripwire*'c"`. NEVER run a recursive `find ~`, `find /`, or `ls -R ~` — they scan the whole disk and time out. Projects usually live under ~/Thrivbe-AI/projects, ~/Thrivbe-AI/clients, or ~/Thrivbe-AI/lab — look there first.
 
 Each turn you also get the UI element under Robin's mouse cursor (role, title, value, selected text) — that's what he's pointing at.
 
@@ -85,14 +88,29 @@ class Shell:
     """
 
     def __init__(self) -> None:
+        self._spawn()
+
+    def _spawn(self) -> None:
+        # start_new_session=True puts the shell + its children in their own process
+        # group, so a runaway command can be killed wholesale on timeout (_respawn).
         self.p = subprocess.Popen(
             ["/bin/zsh"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
-            cwd=os.path.expanduser("~"))
+            cwd=os.path.expanduser("~"), start_new_session=True)
         self.p.stdin.write("source ~/.zshrc 2>/dev/null\n")
         self.p.stdin.flush()
         self._drain(0.6)
+
+    def _respawn(self) -> None:
+        """A timed-out command leaves the shell blocked (zsh runs input serially), so
+        the next command would queue behind it and desync. Nuke the whole process group
+        (kills the runaway child too) and start fresh. Cost: cwd/env reset to home."""
+        try:
+            os.killpg(os.getpgid(self.p.pid), signal.SIGKILL)
+        except Exception:
+            pass
+        self._spawn()
 
     def _drain(self, timeout: float) -> None:
         """Discard buffered startup banner / rc noise."""
@@ -101,11 +119,11 @@ class Shell:
             if not r or self.p.stdout.readline() == "":
                 break
 
-    def run(self, cmd: str, timeout: float = 60) -> str:
+    def run(self, cmd: str, timeout: float = 20) -> str:
         if not cmd:
             return "(no command)"
         if self.p.poll() is not None:
-            return "error: shell has exited"
+            self._respawn()
         mark = f"__VA_{uuid.uuid4().hex}__"
         try:
             self.p.stdin.write(f'{cmd}\nprint -r -- "{mark}$?"\n')
@@ -116,7 +134,10 @@ class Shell:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return ("".join(lines)[:6000]) + "\n(timed out — still running)"
+                self._respawn()   # kill the wedged command, reset to a clean shell
+                partial = "".join(lines)[:4000]
+                return (partial + f"\n(timed out after {int(timeout)}s and was killed. "
+                        "Use a faster command — e.g. `mdfind` for files, not `find ~`.)")
             r, _, _ = select.select([self.p.stdout], [], [], remaining)
             if not r:
                 continue
