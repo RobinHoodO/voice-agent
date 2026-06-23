@@ -10,6 +10,15 @@ Brain: DeepSeek V3 via OpenRouter.  Ears: OpenAI STT.  Voice: ElevenLabs (→ sa
 """
 import os, sys, subprocess, tempfile, json, threading, time, re
 
+# py2app puts the frozen python312.zip ahead of Contents/Resources on sys.path,
+# so `import realtime/pill` would load STALE zipped copies. Put our own dir first
+# so loose Resources/*.py win — this also lets us deploy edits with cp + relaunch
+# (no rebuild, no TCC re-grant).
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+except Exception:
+    pass
+
 import rumps
 import rumps.rumps as rumps_core
 from openai import OpenAI
@@ -97,6 +106,9 @@ def load_env():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 load_env()
+# A Finder/launchd-started .app inherits a minimal PATH without Homebrew, so
+# ffmpeg/ffplay/say would not resolve. Restore it for push-to-talk + TTS.
+os.environ["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:" + os.environ.get("PATH", "")
 
 openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 router = OpenAI(api_key=os.environ.get("OPENROUTER_API") or os.environ["OPENROUTER_API_KEY"],
@@ -295,9 +307,18 @@ class VoiceAgent(rumps.App):
         self.use_eleven = True
         self.status = "idle"
         self.history = []
+        # live conversation mode (Realtime API) — set from the hotkey thread,
+        # reconciled onto the main thread in _tick (AppKit isn't thread-safe).
+        self.live_on = False
+        self.live = None
+        self.pill = None
+        self._pill_shown = False
+        self._press_t = 0.0
+        self._last_tap = 0.0
         self.talk_item = rumps.MenuItem("🔴 Start talking", callback=self.toggle_talk)
         self.menu = [
             self.talk_item,
+            rumps.MenuItem("🎧 Live conversation (double-tap ⌥)", callback=lambda _: self.toggle_live()),
             None,
             rumps.MenuItem("Voice: ElevenLabs", callback=self.toggle_voice),
             rumps.MenuItem("Reset conversation", callback=self.reset),
@@ -326,6 +347,27 @@ class VoiceAgent(rumps.App):
         talk_title = "⏹ Stop & send" if self.recording else "🔴 Start talking"
         if self.talk_item.title != talk_title:
             self.talk_item.title = talk_title
+        self._reconcile_pill()
+
+    def _reconcile_pill(self):
+        """Show/hide/update the floating pill — main-thread only (called from _tick)."""
+        pill_state = self.status if self.status in ("listening", "thinking", "speaking") else "listening"
+        if self.live_on:
+            if self.pill is None:
+                try:
+                    from pill import Pill
+                    self.pill = Pill()
+                except Exception as e:
+                    LOG(f"pill init failed: {e!r}")
+                    return
+            if not self._pill_shown:
+                self.pill.show(pill_state)
+                self._pill_shown = True
+            else:
+                self.pill.set_state(pill_state)
+        elif self.pill is not None and self._pill_shown:
+            self.pill.hide()
+            self._pill_shown = False
 
     def toggle_voice(self, item):
         self.use_eleven = not self.use_eleven
@@ -342,15 +384,102 @@ class VoiceAgent(rumps.App):
         else:
             self._stop_and_send(self.recording_source)
 
+    # Right-Option does double duty: a long press (>=250ms) is push-to-talk;
+    # two quick taps within 400ms toggle live conversation mode.
+    TAP_MAX = 0.25      # press shorter than this = a "tap"
+    DOUBLE_GAP = 0.40   # two taps within this = double-tap
+
     def _on_key_press(self, key):
-        if key == keyboard.Key.alt_r:
-            LOG("Right-Option PRESSED")
-            self._start_recording("hotkey")
+        # NOTHING here may raise — a thrown callback kills the whole pynput
+        # listener (no more hotkey at all). Hence the broad guard.
+        try:
+            if key != keyboard.Key.alt_r:
+                return
+            self._press_t = time.monotonic()
+            if self.live_on:
+                return
+            # Defer recording start: only a real HOLD (key still down after
+            # TAP_MAX) records. Taps never touch ffmpeg, so double-tap is safe.
+            self._hold_timer = threading.Timer(self.TAP_MAX, self._begin_hold_recording)
+            self._hold_timer.daemon = True
+            self._hold_timer.start()
+        except Exception as e:
+            LOG(f"key press error: {e!r}")
+
+    def _begin_hold_recording(self):
+        try:
+            if not self.live_on:
+                self._start_recording("hotkey")
+        except Exception as e:
+            LOG(f"begin-hold-recording error: {e!r}")
 
     def _on_key_release(self, key):
-        if key == keyboard.Key.alt_r:
-            LOG("Right-Option RELEASED -> send")
-            self._stop_and_send("hotkey")
+        try:
+            if key != keyboard.Key.alt_r:
+                return
+            now = time.monotonic()
+            held = now - self._press_t
+            t = getattr(self, "_hold_timer", None)
+            if t is not None:
+                t.cancel()
+            if self.recording and self.recording_source == "hotkey":
+                # the hold timer fired → this was push-to-talk, send it
+                LOG("Right-Option HOLD released -> send")
+                self._stop_and_send("hotkey")
+                return
+            if held < self.TAP_MAX:
+                # a tap (no recording started) → double-tap detection
+                if now - self._last_tap < self.DOUBLE_GAP:
+                    self._last_tap = 0.0
+                    LOG("Right-Option DOUBLE-TAP -> toggle live")
+                    self.toggle_live()
+                else:
+                    self._last_tap = now
+        except Exception as e:
+            LOG(f"key release error: {e!r}")
+
+    def _cancel_recording(self):
+        """Stop a recording without sending it (used to discard a tap)."""
+        self.recording = False
+        self.recording_source = None
+        self.status = "idle"
+        try:
+            self.rec.stop()
+        except Exception:
+            pass
+
+    def toggle_live(self):
+        """Start/stop the Realtime live session. Called from the hotkey thread or
+        menu — touches no AppKit (the pill is reconciled on the main thread in _tick)."""
+        if self.live_on:
+            LOG("LIVE: stopping")
+            self.live_on = False
+            if self.live:
+                self.live.stop()
+                self.live = None
+            self.status = "idle"
+            return
+        # starting: make sure push-to-talk isn't mid-turn
+        if self.recording:
+            self._cancel_recording()
+        if self.busy:
+            LOG("LIVE: busy with a push-to-talk turn — not starting")
+            return
+        LOG("LIVE: starting")
+        try:
+            import realtime
+            self.live = realtime.LiveSession(on_state=self._on_live_state)
+            self.live_on = True
+            self.status = "listening"
+            self.live.start()
+        except Exception as e:
+            LOG(f"LIVE start failed: {e!r}")
+            self.live_on = False
+            self.status = "idle"
+
+    def _on_live_state(self, state):
+        """Called from the realtime thread — only mutate plain attributes here."""
+        self.status = state
 
     def _start_recording(self, source):
         if self.busy or self.recording:
@@ -401,4 +530,9 @@ class VoiceAgent(rumps.App):
 
 
 if __name__ == "__main__":
+    # realtime.py does `from agent import grab_context, run_shell, SYSTEM, LOG`.
+    # When this file runs as __main__, alias it as `agent` so that import resolves
+    # to THIS already-initialised module instead of re-importing (which would
+    # re-run detect_mic/load_env and build a second OpenAI client).
+    sys.modules.setdefault("agent", sys.modules[__name__])
     VoiceAgent().run()

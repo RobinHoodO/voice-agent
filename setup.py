@@ -22,6 +22,13 @@ OPTIONS = {
         "openai",
         "pynput",
         "rumps",
+        "sounddevice",
+        "websockets",
+        "numpy",
+        # ships libportaudio.dylib as package data — sounddevice loads it at
+        # runtime; as a "package" py2app copies the dir verbatim (incl. the dylib)
+        # instead of zipping just the .py, which would drop the binary.
+        "_sounddevice_data",
     ],
     "includes": [
         "AppKit",
@@ -32,10 +39,15 @@ OPTIONS = {
         "pynput._util.darwin",
         "pynput.keyboard._darwin",
         "urllib.request",
+        # live conversation mode — lazily imported, so name them explicitly
+        "realtime",
+        "pill",
+        "asyncio",
+        "base64",
+        "queue",
     ],
     "excludes": [
         "matplotlib",
-        "numpy",
         "pytest",
         "tkinter",
     ],

@@ -5,3 +5,7 @@ py2app
 pyobjc-framework-Cocoa
 pyobjc-framework-Quartz
 pyobjc-framework-ApplicationServices
+# live conversation mode (Realtime API)
+sounddevice
+numpy
+websockets
