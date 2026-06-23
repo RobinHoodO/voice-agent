@@ -223,9 +223,18 @@ Live mode (top of `realtime.py`):
 - `MEMORY` — path of the cross-session memory log
 
 ## Config / secrets
-Keys load at runtime from the workspace `.env` (`~/Thrivbe-AI/.env`): needs
-`OPENAI_API_KEY` (STT + Realtime), `OPENROUTER_API` (push-to-talk brain), and
-`ELEVENLABS_API_KEY` (push-to-talk voice). Secrets are never committed.
+Per-user settings live in `~/Library/Application Support/ThrivbeVoice/config.json`
+(`config.py`); **API keys are stored in the macOS Keychain** (service `ThrivbeVoice`),
+not on disk. Enter them via the menu (**Set OpenAI key…**, etc.) or first-run setup.
+Only the **OpenAI** key is required; OpenRouter (PTT brain) and ElevenLabs (PTT voice)
+are optional. Dev fallback: keys are also read from `~/Thrivbe-AI/.env` if present, so
+the original workspace setup keeps working with no re-entry.
+
+First launch runs **onboarding** (paste OpenAI key → deep-links the Microphone /
+Accessibility / Input Monitoring panes). Re-run any time via **Run setup again…**.
+
+> Productizing this (App Store reality, distribution, licensing, full onboarding/
+> settings, monetization) is planned in **[PRODUCT.md](PRODUCT.md)**.
 
 ## Notes
 - `run_shell` runs arbitrary commands as you (workspace cwd in push-to-talk,

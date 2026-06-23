@@ -25,39 +25,47 @@ import threading
 import time
 import uuid
 
+import config
+
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")   # strip terminal escape codes from shell output
 
 MODEL = "gpt-realtime"   # GA Realtime model (the old beta shape is disabled on this account)
 URL = f"wss://api.openai.com/v1/realtime?model={MODEL}"
 SR = 24000          # Realtime PCM16 sample rate (fixed by the API)
-VOICE = "alloy"     # OpenAI voice — live mode does NOT use ElevenLabs
+VOICE = "alloy"     # default OpenAI voice (overridable via config live.voice)
 BLOCK = 2400        # mic frames per callback = 100ms at 24kHz
 # ponytail: pin live audio by device-name substring. Using a BT headset as the MIC
-# forces macOS into low-quality HFP/call mode (quiet playback), so capture from the
-# built-in mic and play to the headset — it stays in full-quality A2DP. None -> default.
-MIC_NAME = "MacBook"      # input: built-in MacBook mic
-OUT_NAME = "OpenComm"     # output: Shokz headset (substring of "OpenComm2 by Shokz_II")
+# forces macOS into low-quality HFP/call mode (quiet playback), so by default capture
+# from the built-in mic and play to a headset if present. config.audio overrides these.
+MIC_NAME = "MacBook"      # default input: built-in MacBook mic
+OUT_NAME = "OpenComm"     # default output preference: Shokz headset (else system default)
 
-WORKSPACE = "/Users/robinsverd/Thrivbe-AI"
-SKILLS_DIR = f"{WORKSPACE}/skills"
-# Cross-session memory: matches *.log → already gitignored; stays in the workspace.
-MEMORY = f"{WORKSPACE}/projects/voice-agent/.voice-memory.log"
+MEMORY = config.MEMORY_PATH   # per-user, out of any project folder
 
-# Live mode is a proactive, system-wide agentic terminal (looser than push-to-talk's
-# SYSTEM in agent.py, which stays narrow). Built into the session instructions.
-LIVE_SYSTEM = f"""You are Robin's hands-free voice agent on his Mac. You answer OUT LOUD, so keep replies SHORT and conversational — 1-3 sentences, no markdown, no lists, no emoji.
+# Live mode is a proactive, system-wide agentic terminal. The workspace/delegation
+# blocks are added per-session from config so it isn't hardwired to one user's setup.
+LIVE_SYSTEM = """You are a hands-free voice agent running on the user's Mac. You answer OUT LOUD, so keep replies SHORT and conversational — 1-3 sentences, no markdown, no lists, no emoji.
 
-You have a PERSISTENT shell (run_shell) that starts in Robin's home folder and stays alive for the whole conversation — cd, environment variables, and activated venvs carry between commands. You can act anywhere on the Mac, not just the Thrivbe workspace. Be proactive: when Robin asks you to do something, just do it with run_shell, then say briefly what you did. Don't ask permission for ordinary file/system tasks.
+You have a PERSISTENT shell (run_shell) that starts in the user's home folder and stays alive for the whole conversation — cd, environment variables, and activated venvs carry between commands. You can act anywhere on the Mac. Be proactive: when asked to do something, just do it with run_shell, then say briefly what you did. Don't ask permission for ordinary file/system tasks.
 
-SPEED MATTERS — commands run while Robin waits in silence, and anything over ~20s is killed. To find files or folders use `mdfind` (Spotlight, instant), e.g. `mdfind -name tripwire` or `mdfind "kMDItemKind=='Folder' && kMDItemFSName=='*tripwire*'c"`. NEVER run a recursive `find ~`, `find /`, or `ls -R ~` — they scan the whole disk and time out. Projects usually live under ~/Thrivbe-AI/projects, ~/Thrivbe-AI/clients, or ~/Thrivbe-AI/lab — look there first.
+SPEED MATTERS — commands run while the user waits in silence, and anything that runs too long is killed. To find files or folders use `mdfind` (Spotlight, instant), e.g. `mdfind -name report`. NEVER run a recursive `find ~`, `find /`, or `ls -R ~` — they scan the whole disk and time out.
 
-Each turn you also get the UI element under Robin's mouse cursor (role, title, value, selected text) — that's what he's pointing at.
+Each turn you also get the UI element under the user's mouse cursor (role, title, value, selected text) — that's what they're pointing at.
 
-Thrivbe context: the workspace is at {WORKSPACE}; its operating contract is {WORKSPACE}/CLAUDE.md and skills live under {SKILLS_DIR}/<category>/ and ~/.claude/skills/. Read any of these with run_shell when relevant — don't assume, look.
+MEMORY: when the user tells you a durable fact, preference, or task worth keeping, call the remember tool with a short note. The 'What you remember from before' block below is your memory from past sessions."""
 
-To run a skill or hand off a bigger coding/research task, shell out to: pi -p --model deepseek-v4-flash "<instruction>"  (a headless AI agent with read/bash/edit/write tools and Robin's skills). It can take a while, which would freeze our chat — so for anything slow, background it: pi -p --model deepseek-v4-flash "..." > /tmp/voice-task.txt 2>&1 &  then read /tmp/voice-task.txt when Robin asks how it went.
 
-MEMORY: when Robin tells you a durable fact, preference, or task worth keeping, call the remember tool with a short note. The 'What you remember from before' block below is your memory from past sessions."""
+def _delegation_line(cfg: dict) -> str:
+    live = cfg.get("live") or {}
+    mode = live.get("delegate", "pi")
+    if mode == "off":
+        return ""
+    cmd = ('claude -p "<instruction>"' if mode == "claude"
+           else 'pi -p --model %s "<instruction>"' % live.get("pi_model", "deepseek-v4-flash"))
+    return ("To run a skill or hand off a bigger coding/research task, shell out to: " + cmd +
+            " (a headless AI agent with file/bash tools). It can take a while and would freeze "
+            "this chat, so background slow jobs with `> /tmp/voice-task.txt 2>&1 &` and read that "
+            "file when asked how it went.")
 
 # Realtime tool schema is flat (name/parameters at top level), unlike the
 # chat-completions nested {"function": {...}} shape in agent.py.
@@ -187,6 +195,7 @@ def _remember(note: str) -> str:
     if not note:
         return "nothing to remember"
     try:
+        config.ensure_dirs()
         with open(MEMORY, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M')} | {note}\n")
         return "noted"
@@ -194,25 +203,36 @@ def _remember(note: str) -> str:
         return f"error: {e}"
 
 
-def _build_live_instructions(ctx: str) -> str:
-    """LIVE_SYSTEM + the session's standing context: skill categories, the CLAUDE.md
-    pointer (in LIVE_SYSTEM), the memory tail, and what's under the cursor right now."""
-    try:
-        skills = ", ".join(sorted(os.listdir(SKILLS_DIR)))
-    except Exception:
-        skills = "(unavailable)"
-    blocks = [LIVE_SYSTEM, f"Skill categories available: {skills}"]
+def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
+    """LIVE_SYSTEM + per-session context from config: optional workspace + its skills,
+    the delegation line, the memory tail, and what's under the cursor right now."""
+    cfg = cfg or config.load()
+    blocks = [LIVE_SYSTEM]
+    ws = (cfg.get("live") or {}).get("workspace")
+    if ws:
+        ws = os.path.expanduser(ws)
+        blocks.append(f"Workspace: {ws} — its operating contract may be {ws}/CLAUDE.md. "
+                      f"Read files there with run_shell when relevant.")
+        try:
+            cats = ", ".join(sorted(os.listdir(os.path.join(ws, "skills"))))
+            blocks.append(f"Skill categories in the workspace: {cats}")
+        except Exception:
+            pass
+    deleg = _delegation_line(cfg)
+    if deleg:
+        blocks.append(deleg)
     mem = _load_memory_tail()
     if mem:
         blocks.append(f"What you remember from before:\n{mem}")
     if ctx:
-        blocks.append(f"What Robin is looking at right now:\n{ctx}")
+        blocks.append(f"What the user is looking at right now:\n{ctx}")
     return "\n\n".join(blocks)
 
 
 def _headers() -> dict:
-    # GA Realtime: plain bearer auth, no OpenAI-Beta header.
-    return {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
+    # GA Realtime: plain bearer auth, no OpenAI-Beta header. Key from Keychain
+    # (config), falling back to env in dev.
+    return {"Authorization": f"Bearer {config.secret('openai') or ''}"}
 
 
 def _log(msg: str) -> None:
@@ -255,6 +275,7 @@ class LiveSession:
         self._speaking = False
         self._shell: Shell | None = None             # persistent zsh for this session
         self._fn_names: dict = {}                     # call_id -> tool name (from output_item.added)
+        self._cfg: dict = {}                          # snapshot of config for this session
 
     # ----- lifecycle (called from main thread) -----
     def start(self) -> None:
@@ -300,6 +321,7 @@ class LiveSession:
         async with websockets.connect(URL, additional_headers=_headers(),
                                       max_size=None) as ws:
             self._ws = ws
+            self._cfg = config.load()
             try:
                 self._shell = Shell()
             except Exception as e:
@@ -319,7 +341,12 @@ class LiveSession:
 
     async def _configure(self, ws) -> None:
         ctx = await self._loop.run_in_executor(None, _grab_context)
-        instructions = _build_live_instructions(ctx)
+        live = self._cfg.get("live") or {}
+        instructions = _build_live_instructions(ctx, self._cfg)
+        voice = live.get("voice") or VOICE
+        # Respect the agentic-shell toggle (off-by-default is the product safety default).
+        tools = TOOLS if live.get("agentic_shell", True) else [
+            t for t in TOOLS if t.get("name") != "run_shell"]
         await ws.send(json.dumps({
             "type": "session.update",
             "session": {
@@ -338,9 +365,9 @@ class LiveSession:
                                            "create_response": False},
                         "transcription": {"model": "whisper-1"},
                     },
-                    "output": {"format": {"type": "audio/pcm", "rate": SR}, "voice": VOICE},
+                    "output": {"format": {"type": "audio/pcm", "rate": SR}, "voice": voice},
                 },
-                "tools": TOOLS,
+                "tools": tools,
                 "tool_choice": "auto",
             },
         }))
@@ -427,7 +454,8 @@ class LiveSession:
         if self._shell is None:
             return "error: shell not started"
         _log(f"live $ {command}")
-        return self._shell.run(command)
+        timeout = float((self._cfg.get("live") or {}).get("shell_timeout") or 20)
+        return self._shell.run(command, timeout=timeout)
 
     async def _pump_mic(self) -> None:
         n = 0
@@ -453,10 +481,11 @@ class LiveSession:
     # ----- audio -----
     def _start_audio(self) -> None:
         import sounddevice as sd
-        mic = _find_device(MIC_NAME, want_input=True)
+        want_mic = (self._cfg.get("audio") or {}).get("input_device") or MIC_NAME
+        mic = _find_device(want_mic, want_input=True)
         try:
             name = sd.query_devices(mic if mic is not None else None, kind="input").get("name")
-            _log(f"audio input device: {name!r} (idx={mic}, pinned to {MIC_NAME!r})")
+            _log(f"audio input device: {name!r} (idx={mic}, pinned to {want_mic!r})")
         except Exception as e:
             _log(f"query input device failed: {e!r}")
         self._in_stream = sd.RawInputStream(
@@ -478,10 +507,11 @@ class LiveSession:
 
     def _player(self) -> None:
         import sounddevice as sd
-        out = _find_device(OUT_NAME, want_input=False)
+        want_out = (self._cfg.get("audio") or {}).get("output_device") or OUT_NAME
+        out = _find_device(want_out, want_input=False)
         try:
             name = sd.query_devices(out if out is not None else None, kind="output").get("name")
-            _log(f"audio output device: {name!r} (idx={out}, prefer {OUT_NAME!r})")
+            _log(f"audio output device: {name!r} (idx={out}, prefer {want_out!r})")
         except Exception as e:
             _log(f"query output device failed: {e!r}")
         try:

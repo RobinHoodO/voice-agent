@@ -42,6 +42,7 @@ OPTIONS = {
         # live conversation mode — lazily imported, so name them explicitly
         "realtime",
         "pill",
+        "config",
         "asyncio",
         "base64",
         "queue",

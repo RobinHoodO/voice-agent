@@ -24,10 +24,13 @@ import rumps.rumps as rumps_core
 from openai import OpenAI
 from pynput import keyboard
 
-# --- diagnostics: log to a fixed file so we can see state even in a .app bundle
-LOG_PATH = "/tmp/voice-agent.log"
+import config
+
+# --- diagnostics: log to the app's own log dir (out of /tmp for the product)
+LOG_PATH = config.LOG_PATH
 def LOG(msg):
     try:
+        config.ensure_dirs()
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except Exception:
@@ -72,7 +75,8 @@ def patch_rumps_status_item():
 patch_rumps_status_item()
 
 # --- config -----------------------------------------------------------------
-WORKSPACE = "/Users/robinsverd/Thrivbe-AI"
+# Push-to-talk's shell cwd + context root. Per-user: config live.workspace, else $HOME.
+WORKSPACE = os.path.expanduser(config.get("live.workspace") or "~")
 
 def detect_mic():
     """avfoundation device indices drift when audio gear connects/disconnects.
@@ -95,11 +99,13 @@ def detect_mic():
 
 MIC = detect_mic()                           # e.g. ":0" — MacBook mic, auto-detected
 STT_MODEL = "gpt-4o-mini-transcribe"
-LLM_MODEL = "openai/gpt-4o-mini"             # fast, reliable on OpenRouter — low-latency voice replies
-ELEVEN_VOICE = "21m00Tcm4TlvDq8ikWAM"        # Rachel
+LLM_MODEL = config.get("ptt.brain_model") or "openai/gpt-4o-mini"   # push-to-talk brain (OpenRouter)
+ELEVEN_VOICE = config.get("ptt.eleven_voice") or "21m00Tcm4TlvDq8ikWAM"
 
 def load_env():
-    path = os.path.join(WORKSPACE, ".env")
+    # Dev fallback only: in Robin's workspace this seeds keys from ~/Thrivbe-AI/.env
+    # so config.secret()'s env fallback finds them. Shipped copies use the Keychain.
+    path = os.path.join(os.path.expanduser("~/Thrivbe-AI"), ".env")
     for line in open(path, encoding="utf-8") if os.path.exists(path) else []:
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
@@ -110,8 +116,10 @@ load_env()
 # ffmpeg/ffplay/say would not resolve. Restore it for push-to-talk + TTS.
 os.environ["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:" + os.environ.get("PATH", "")
 
-openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-router = OpenAI(api_key=os.environ.get("OPENROUTER_API") or os.environ["OPENROUTER_API_KEY"],
+# Keys from Keychain (config), env fallback in dev. Empty key won't crash at
+# construction — only on use — so a not-yet-onboarded user still launches cleanly.
+openai_client = OpenAI(api_key=config.secret("openai") or "")
+router = OpenAI(api_key=config.secret("openrouter") or config.secret("openai") or "",
                 base_url="https://openrouter.ai/api/v1")
 
 SYSTEM = f"""You are Robin's voice assistant, anchored in his Thrivbe workspace at {WORKSPACE}.
@@ -232,7 +240,8 @@ def transcribe(wav):
 
 def speak(text, use_eleven):
     text = text.replace("*", "").replace("#", "").replace("`", "")  # strip markdown for the voice
-    if use_eleven and os.environ.get("ELEVENLABS_API_KEY"):
+    eleven_key = config.secret("elevenlabs")
+    if use_eleven and eleven_key:
         try:
             import urllib.request
             # Stream: play audio as chunks arrive (first sound ~1s) instead of
@@ -241,7 +250,7 @@ def speak(text, use_eleven):
                    "?optimize_streaming_latency=3")
             body = json.dumps({"text": text, "model_id": "eleven_flash_v2_5"}).encode()
             req = urllib.request.Request(url, data=body, method="POST", headers={
-                "xi-api-key": os.environ["ELEVENLABS_API_KEY"],
+                "xi-api-key": eleven_key,
                 "Content-Type": "application/json", "Accept": "audio/mpeg"})
             player = subprocess.Popen(
                 ["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "pipe:0"],
@@ -304,8 +313,9 @@ class VoiceAgent(rumps.App):
         self.recording = False
         self.recording_source = None
         self.busy = False
-        self.use_eleven = True
+        self.use_eleven = config.get("ptt.voice_engine", "elevenlabs") == "elevenlabs"
         self.status = "idle"
+        self._setup_checked = False
         self.history = []
         # live conversation mode (Realtime API) — set from the hotkey thread,
         # reconciled onto the main thread in _tick (AppKit isn't thread-safe).
@@ -318,13 +328,20 @@ class VoiceAgent(rumps.App):
         self._ctrl_clean = False     # True while a Control press has no other key with it
         self._last_ctrl_tap = 0.0
         self.talk_item = rumps.MenuItem("🔴 Start talking", callback=self.toggle_talk)
+        self.voice_item = rumps.MenuItem(
+            f"Voice: {'ElevenLabs' if self.use_eleven else 'macOS say'}", callback=self.toggle_voice)
         self.menu = [
             self.talk_item,
             rumps.MenuItem("🎧 Live conversation (double-tap Control)", callback=lambda _: self.toggle_live()),
             None,
-            rumps.MenuItem("Voice: ElevenLabs", callback=self.toggle_voice),
-            rumps.MenuItem("Reset conversation", callback=self.reset),
+            self.voice_item,
             None,
+            rumps.MenuItem("Set OpenAI key…", callback=lambda _: self._set_key("openai", "OpenAI API key (sk-…)")),
+            rumps.MenuItem("Set OpenRouter key…", callback=lambda _: self._set_key("openrouter", "OpenRouter API key (optional)")),
+            rumps.MenuItem("Set ElevenLabs key…", callback=lambda _: self._set_key("elevenlabs", "ElevenLabs API key (optional)")),
+            rumps.MenuItem("Run setup again…", callback=lambda _: self._onboard(force=True)),
+            None,
+            rumps.MenuItem("Reset conversation", callback=self.reset),
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
         # reflect status into the menubar icon from the main thread
@@ -345,6 +362,9 @@ class VoiceAgent(rumps.App):
     ICONS = {"idle": "🎙", "listening": "🔴", "thinking": "💭", "speaking": "🗣"}
 
     def _tick(self, _):
+        if not self._setup_checked:        # first-run onboarding, once the app loop is live
+            self._setup_checked = True
+            self._onboard()
         self.title = self.ICONS.get(self.status, "🎙")
         talk_title = "⏹ Stop & send" if self.recording else "🔴 Start talking"
         if self.talk_item.title != talk_title:
@@ -374,10 +394,47 @@ class VoiceAgent(rumps.App):
     def toggle_voice(self, item):
         self.use_eleven = not self.use_eleven
         item.title = f"Voice: {'ElevenLabs' if self.use_eleven else 'macOS say'}"
+        config.set_("ptt.voice_engine", "elevenlabs" if self.use_eleven else "say")
 
     def reset(self, _):
         self.history = []
         rumps.notification("Voice Agent", "", "Conversation reset")
+
+    # --- onboarding / settings (product setup) ------------------------------
+    def _set_key(self, name, prompt):
+        """Prompt for an API key and store it in the Keychain (main-thread only)."""
+        try:
+            w = rumps.Window(message=prompt, title="Thrivbe Voice", default_text="",
+                             ok="Save", cancel="Cancel", dimensions=(360, 24))
+            r = w.run()
+            if r.clicked and r.text.strip():
+                ok = config.set_secret(name, r.text.strip())
+                rumps.notification("Thrivbe Voice", "Saved" if ok else "Failed",
+                                   f"{name} key {'stored in Keychain' if ok else 'could not be saved'}")
+                return ok
+        except Exception as e:
+            LOG(f"set_key error: {e!r}")
+        return False
+
+    def _onboard(self, force=False):
+        """First-run setup: get the OpenAI key, then deep-link the permission panes.
+        Skipped silently once complete (and for Robin, since .env seeds the key)."""
+        try:
+            cfg = config.load()
+            done = cfg.get("onboarding_complete") and config.has_required_keys()
+            if done and not force:
+                return
+            if force or not config.secret("openai"):
+                self._set_key("openai",
+                              "Welcome! Paste your OpenAI API key (sk-…). Get one at platform.openai.com/api-keys")
+            # deep-link the permission panes the app needs
+            for pane in ("Privacy_ListenEvent", "Privacy_Accessibility", "Privacy_Microphone"):
+                subprocess.run(["open", f"x-apple.systempreferences:com.apple.preference.security?{pane}"])
+            rumps.notification("Thrivbe Voice", "Grant 3 permissions",
+                               "Enable Thrivbe Voice in Input Monitoring, Accessibility & Microphone, then relaunch.")
+            config.set_("onboarding_complete", True)
+        except Exception as e:
+            LOG(f"onboard error: {e!r}")
 
     def toggle_talk(self, _):
         """Fallback click-to-talk menu action."""
