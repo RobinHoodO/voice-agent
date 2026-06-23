@@ -314,11 +314,13 @@ class VoiceAgent(rumps.App):
         self.pill = None
         self._pill_shown = False
         self._press_t = 0.0
-        self._last_tap = 0.0
+        self._ctrl_press_t = 0.0
+        self._ctrl_clean = False     # True while a Control press has no other key with it
+        self._last_ctrl_tap = 0.0
         self.talk_item = rumps.MenuItem("🔴 Start talking", callback=self.toggle_talk)
         self.menu = [
             self.talk_item,
-            rumps.MenuItem("🎧 Live conversation (double-tap ⌥)", callback=lambda _: self.toggle_live()),
+            rumps.MenuItem("🎧 Live conversation (double-tap Control)", callback=lambda _: self.toggle_live()),
             None,
             rumps.MenuItem("Voice: ElevenLabs", callback=self.toggle_voice),
             rumps.MenuItem("Reset conversation", callback=self.reset),
@@ -389,17 +391,28 @@ class VoiceAgent(rumps.App):
     TAP_MAX = 0.25      # press shorter than this = a "tap"
     DOUBLE_GAP = 0.40   # two taps within this = double-tap
 
+    def _is_ctrl(self, key):
+        return key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
+
     def _on_key_press(self, key):
         # NOTHING here may raise — a thrown callback kills the whole pynput
         # listener (no more hotkey at all). Hence the broad guard.
         try:
+            if self._is_ctrl(key):
+                self._ctrl_press_t = time.monotonic()
+                self._ctrl_clean = True       # so far no other key with this Control
+                return
+            # Any non-Control key cancels a pending Control double-tap and marks
+            # the current Control press "dirty" (it's part of a shortcut, e.g. ⌃C).
+            self._ctrl_clean = False
+            self._last_ctrl_tap = 0.0
             if key != keyboard.Key.alt_r:
                 return
+            # Right-Option = push-to-talk. Defer the record start so only a real
+            # HOLD (>=TAP_MAX) touches ffmpeg.
             self._press_t = time.monotonic()
             if self.live_on:
                 return
-            # Defer recording start: only a real HOLD (key still down after
-            # TAP_MAX) records. Taps never touch ffmpeg, so double-tap is safe.
             self._hold_timer = threading.Timer(self.TAP_MAX, self._begin_hold_recording)
             self._hold_timer.daemon = True
             self._hold_timer.start()
@@ -415,26 +428,26 @@ class VoiceAgent(rumps.App):
 
     def _on_key_release(self, key):
         try:
+            if self._is_ctrl(key):
+                now = time.monotonic()
+                held = now - self._ctrl_press_t
+                # a clean, quick Control tap (no other key) — count toward double-tap
+                if self._ctrl_clean and held < self.TAP_MAX:
+                    if now - self._last_ctrl_tap < self.DOUBLE_GAP:
+                        self._last_ctrl_tap = 0.0
+                        LOG("Control DOUBLE-TAP -> toggle live")
+                        self.toggle_live()
+                    else:
+                        self._last_ctrl_tap = now
+                return
             if key != keyboard.Key.alt_r:
                 return
-            now = time.monotonic()
-            held = now - self._press_t
             t = getattr(self, "_hold_timer", None)
             if t is not None:
                 t.cancel()
             if self.recording and self.recording_source == "hotkey":
-                # the hold timer fired → this was push-to-talk, send it
                 LOG("Right-Option HOLD released -> send")
                 self._stop_and_send("hotkey")
-                return
-            if held < self.TAP_MAX:
-                # a tap (no recording started) → double-tap detection
-                if now - self._last_tap < self.DOUBLE_GAP:
-                    self._last_tap = 0.0
-                    LOG("Right-Option DOUBLE-TAP -> toggle live")
-                    self.toggle_live()
-                else:
-                    self._last_tap = now
         except Exception as e:
             LOG(f"key release error: {e!r}")
 

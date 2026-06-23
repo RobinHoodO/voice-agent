@@ -182,6 +182,7 @@ class LiveSession:
     async def _inject_context_and_respond(self) -> None:
         self.on_state("thinking")
         ctx = await self._loop.run_in_executor(None, _grab_context)
+        _log(f"context injected ({len(ctx)} chars): {ctx[:160]!r}")
         await self._ws.send(json.dumps({
             "type": "conversation.item.create",
             "item": {"type": "message", "role": "user",
