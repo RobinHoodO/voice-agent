@@ -105,15 +105,21 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
         # no output, no .done — so the auto-wake never fires).
         runner = (f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null > {shlex.quote(out)} 2>&1; '
                   f'touch {shlex.quote(done)}')
-        cmd = f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown"
-        # Optionally open a Terminal window tailing this task's output, so the user can
-        # watch the delegated agent work live. json.dumps gives a valid AppleScript string
-        # literal; the inner path is shell-quoted (it lives under "Application Support",
-        # which has a space). Best-effort — appended after the job is already detached.
         if live.get("show_task_terminals"):
-            tail = f"tail -f {shlex.quote(out)}"
-            osa = f'tell application "Terminal" to do script {json.dumps(tail)}'
-            cmd += f"; osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
+            # Run pi DIRECTLY in its own Terminal window so the user watches the real
+            # session — NOT a `tail -f` of <out>, because pi -p writes only its final
+            # answer at the end, so tailing the file looks frozen until it finishes.
+            # `tee` mirrors the output into <out> so the menubar watcher still auto-wakes
+            # and speaks the result; `touch <done>` signals completion. json.dumps makes a
+            # valid AppleScript string literal; inner paths are shell-quoted (they live
+            # under "Application Support", which has a space).
+            term = (f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null 2>&1 '
+                    f'| tee {shlex.quote(out)}; touch {shlex.quote(done)}')
+            osa = f'tell application "Terminal" to do script {json.dumps(term)}'
+            cmd = f"osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
+        else:
+            # Headless: detached, no window. </dev/null so it doesn't block on stdin.
+            cmd = f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown"
         # Return the out-path too so the caller can open a live log window on it.
         return (cmd, out)
     except Exception as e:
