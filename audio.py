@@ -76,10 +76,23 @@ class AudioMixin:
             _log(f"audio input device: {name!r} (idx={mic}, pinned to {want_mic!r})")
         except Exception as e:
             _log(f"query input device failed: {e!r}")
-        self._in_stream = sd.RawInputStream(
-            samplerate=SR, channels=1, dtype="int16",
-            blocksize=BLOCK, callback=self._mic_cb, device=mic)
-        self._in_stream.start()
+        try:
+            self._in_stream = sd.RawInputStream(
+                samplerate=SR, channels=1, dtype="int16",
+                blocksize=BLOCK, callback=self._mic_cb, device=mic)
+            self._in_stream.start()
+        except Exception as e:
+            # Device lost / in use / permission denied — fall back to the system default
+            # (mirrors the player's fallback) rather than killing the session silently.
+            _log(f"mic open failed (device={mic}): {e!r} — trying default input")
+            try:
+                self._in_stream = sd.RawInputStream(
+                    samplerate=SR, channels=1, dtype="int16",
+                    blocksize=BLOCK, callback=self._mic_cb)
+                self._in_stream.start()
+            except Exception as e2:
+                _log(f"mic open failed on default too: {e2!r}")
+                raise RuntimeError(f"microphone unavailable: {e2}") from e2
         _log("audio input stream started")
         self._player_thread = threading.Thread(target=self._player, daemon=True)
         self._player_thread.start()

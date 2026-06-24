@@ -22,3 +22,19 @@ def test_live_session_instantiates_with_mixin_and_orchestration():
 def test_realtime_shim_reexports_livesession():
     # agent.py does `import realtime; realtime.LiveSession(...)` — must keep working.
     assert realtime.LiveSession is live_session.LiveSession
+
+
+def test_mic_task_done_callback_swallows_errors():
+    # Phase 2.4: a crashed mic pump must be logged, never re-raised from the callback.
+    s = live_session.LiveSession()
+
+    class _Boom:
+        def exception(self):
+            return RuntimeError("mic pump died")
+
+    s._on_mic_task_done(_Boom())   # must not raise
+
+
+def test_notify_never_raises_headless():
+    # Phase 2.3: surfacing failures must degrade silently when rumps isn't available.
+    live_session.LiveSession()._notify("connection lost")
