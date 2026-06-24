@@ -71,6 +71,63 @@ def _selected_text():
     return ""
 
 
+def _cursor_loc():
+    """Current mouse location in global (top-left origin) coordinates."""
+    from Quartz import CGEventCreate, CGEventGetLocation
+    loc = CGEventGetLocation(CGEventCreate(None))
+    return loc.x, loc.y
+
+
+def _ax_window_under_cursor():
+    """The AX window element directly under the mouse cursor (NOT the focused window —
+    on a multi-monitor setup the user looks at whatever their cursor is over, which can be
+    a different display/app than the frontmost one). Climbs from the hit element to its
+    enclosing AXWindow. Returns (window_element_or_None, title)."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide, AXUIElementCopyElementAtPosition)
+        x, y = _cursor_loc()
+        err, el = AXUIElementCopyElementAtPosition(
+            AXUIElementCreateSystemWide(), x, y, None)
+        if err != 0 or el is None:
+            return None, ""
+        cur = el
+        for _ in range(12):
+            if _ax(cur, "AXRole") == "AXWindow":
+                return cur, (_ax(cur, "AXTitle") or "")
+            parent = _ax(cur, "AXParent")
+            if parent is None:
+                break
+            cur = parent
+        win = _ax(el, "AXWindow")
+        return win, (_ax(win, "AXTitle") or "" if win is not None else "")
+    except Exception as e:
+        _log(f"window-under-cursor failed: {e}")
+        return None, ""
+
+
+def _window_under_cursor_bounds():
+    """'x,y,w,h' of the topmost normal window under the cursor (CGWindowList is front-to-back),
+    or '' if none. Display-agnostic — the cursor's window wins regardless of which app is frontmost."""
+    try:
+        import Quartz
+        x, y = _cursor_loc()
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID) or []
+        for w in wins:
+            if w.get("kCGWindowLayer", 0) != 0:
+                continue
+            b = w.get("kCGWindowBounds") or {}
+            bx, by = b.get("X", 0) or 0, b.get("Y", 0) or 0
+            bw, bh = b.get("Width", 0) or 0, b.get("Height", 0) or 0
+            if bx <= x < bx + bw and by <= y < by + bh:
+                return f"{int(bx)},{int(by)},{int(bw)},{int(bh)}"
+    except Exception as e:
+        _log(f"window-under-cursor bounds failed: {e}")
+    return ""
+
+
 def grab_context():
     """Text context for the agent, each part independently toggleable in Settings:
       • read_cursor_context  → MARKED selection + CONTENT under the mouse cursor
@@ -102,17 +159,16 @@ def grab_context():
 
     if config.get("privacy.read_window_context", False):
         try:
-            from ApplicationServices import AXUIElementCreateSystemWide
-            fapp = _ax(AXUIElementCreateSystemWide(), "AXFocusedApplication")
-            win = _ax(fapp, "AXFocusedWindow") if fapp is not None else None
+            # The window under the CURSOR, not the frontmost window — on multi-monitor the
+            # user is looking at whatever their cursor is over, possibly another display/app.
+            win, title = _ax_window_under_cursor()
             if win is not None:
-                title = _ax(win, "AXTitle") or ""
                 wt = []
                 _collect_text(win, wt, max_depth=12, max_items=200, child_cap=40)
                 blob = "\n".join(wt)[:6000]
                 if blob.strip():
-                    label = f"{app}" + (f" — {title}" if title else "")
-                    parts.append(f"The full window I'm in ({label}) — larger context:\n{blob}")
+                    label = title or "window under cursor"
+                    parts.append(f"The full window under my cursor ({label}) — larger context:\n{blob}")
         except Exception as e:
             _log(f"window context failed: {e}")
 
@@ -122,8 +178,12 @@ def grab_context():
 
 
 def _focused_window_region():
-    """'x,y,w,h' of the frontmost app's largest on-screen window (for screencapture -R),
-    or '' to fall back to the full screen. Uses CGWindowList so no AXValue geometry math."""
+    """'x,y,w,h' for screencapture -R: the window UNDER THE CURSOR if there is one (so the
+    screenshot follows the cursor across displays), else the frontmost app's largest
+    on-screen window, else '' (full screen). Uses CGWindowList so no AXValue geometry math."""
+    cursor_region = _window_under_cursor_bounds()
+    if cursor_region:
+        return cursor_region
     try:
         from AppKit import NSWorkspace
         import Quartz
