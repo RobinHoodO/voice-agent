@@ -1,40 +1,33 @@
-# Thrivbe Voice Agent (macOS menubar)
+# Thrivbe Voice (macOS menubar)
 
-A standalone macOS **menubar app** you talk to. Lives in the top menu bar (🎙).
-Two ways to talk to it:
+A standalone macOS **menubar app** you talk to — one hands-free, agentic voice
+conversation. **Double-tap Control** to start/stop it; a small glowing glass **orb**
+appears at the bottom-center of your screen while it's live. It speaks back in an
+OpenAI voice (speech-to-speech, low latency — no separate TTS), reads what's under
+your cursor, can run an agentic shell, and remembers across sessions.
 
-| Mode | Trigger | Engine | Voice |
-|------|---------|--------|-------|
-| **Push-to-talk** | hold **Right-Option** | brain `openai/gpt-4o-mini` (OpenRouter) · ears `gpt-4o-mini-transcribe` | **ElevenLabs** `eleven_flash_v2_5` (Rachel) → macOS `say` fallback |
-| **Live conversation** | double-tap **Control** | **OpenAI Realtime API** (`gpt-realtime`, speech-to-speech) | OpenAI voice **`alloy`** (the model speaks directly — no separate TTS) |
+- **Engine:** OpenAI **Realtime API** (`gpt-realtime`), speech-to-speech.
+- **The only key you need:** an OpenAI API key (stored in your macOS Keychain).
 
-Click **🎙 → Start talking** is also there as a click-to-talk fallback.
+## Live conversation (the whole app)
 
-Both modes read whatever you're pointing at (the UI element under your mouse
-cursor + any selected text, via macOS Accessibility) and can run shell commands.
+Double-tap **Control** to start/stop a hands-free, barge-in-able conversation.
+Server-side VAD handles turn-taking; talk over it to interrupt. A frosted-glass
+**orb** shows state by colour + a slow breathing glow — mint = listening,
+periwinkle = thinking, amber = speaking (bottom-center, no text).
 
-## Live conversation mode (agentic terminal)
-
-Double-tap **Control** to start/stop a hands-free, barge-in-able conversation. A
-minimal pill appears bottom-center showing state (listening / thinking /
-speaking). Server-side VAD handles turn-taking; talk over it to interrupt.
-
-In live mode the agent is a **proactive, system-wide agentic terminal**:
+The agent is a **proactive, system-wide agentic terminal**:
 
 - **Persistent shell** — one zsh stays alive for the session; `cd`, env vars, and
-  activated venvs persist between commands. Starts in your home folder and can act
-  anywhere on the Mac. Self-healing: a command that runs >20s is killed and the
-  shell resets (it's steered to use Spotlight `mdfind`, never `find ~`).
-- **Skill / agent activation** — it can shell out to `pi -p --model deepseek-v4-flash "..."`
-  (a headless AI agent with file/bash tools + your skills) to run a skill or delegate a
-  bigger task (long jobs are backgrounded).
-- **Cross-session memory** — a `remember` tool appends durable notes to
-  `.voice-memory.log`; the recent tail is reloaded on each session start, so it
-  remembers across restarts.
-- **Workspace-aware** — knows about `~/Thrivbe-AI/CLAUDE.md` and the skills dirs.
-
-> Live mode speaks in an OpenAI voice (`alloy`), **not** ElevenLabs — speech-to-speech
-> is the whole point of the low latency. Push-to-talk keeps ElevenLabs.
+  activated venvs persist. Starts in your home folder, acts anywhere on the Mac.
+  Self-healing: a command over ~20s is killed and the shell resets (steered to
+  Spotlight `mdfind`, never `find ~`). **Off by default** — enable via the
+  **Agentic shell** menu toggle.
+- **Skill / agent activation** — shells out to `pi -p --model deepseek-v4-flash "..."`
+  (a headless AI agent with file/bash tools + your skills); long jobs backgrounded.
+- **Cross-session memory** — a `remember` tool appends notes to a memory log; the
+  recent tail is reloaded each session start, so it remembers across restarts.
+- **Cursor-aware** — each turn it sees the UI element + selected text under your mouse.
 
 ## How it works (architecture)
 
@@ -50,9 +43,9 @@ Three things run at once and must not block each other:
 - **Main thread (rumps):** owns the menu bar and the floating pill. AppKit is not
   thread-safe, so the pill is only ever touched here, reconciled every 0.3s from a
   plain `self.status` string the other threads write.
-- **Hotkey thread (pynput):** a global key listener. Double-tap Control toggles live
-  mode; hold Right-Option is push-to-talk. Every callback is wrapped in try/except —
-  an exception in a key callback would kill the whole listener (no more hotkey).
+- **Hotkey thread (pynput):** a global key listener — a double-tap of Control toggles
+  the live session. Every callback is wrapped in try/except, since an exception in a
+  key callback would kill the whole listener (no more hotkey).
 - **Live-session thread (`realtime.py`):** when live mode starts, a daemon thread
   spins up its own asyncio event loop and opens the Realtime WebSocket. All the
   socket I/O, audio, and tool calls live here. Audio in/out each get their own
@@ -134,13 +127,13 @@ folded into the session instructions under "What you remember from before" — s
 talk to it, close it, and reopen it tomorrow, it still knows. The same startup blob
 also lists the available skill categories and points it at `~/Thrivbe-AI/CLAUDE.md`.
 
-### What stays separate
+### Audio devices
 
-Push-to-talk is untouched by all of this — it's the narrow, safe path: hold
-Right-Option → record → transcribe → one `gpt-4o-mini` turn (with its own
-workspace-scoped `run_shell`) → ElevenLabs reply. The agentic loosening (persistent
-shell, system-wide reach, proactive behavior, memory, skill delegation) lives only in
-live mode (`realtime.py`).
+Pick your mic and speaker from the menu (**🎙 Microphone** / **🔊 Speaker**) — it lists
+every device, checkmarks the current choice, and applies on the next live session.
+Tip: don't use a Bluetooth headset as the *mic* — macOS drops it into low-quality
+"call mode" and playback gets quiet. The smart default captures from the built-in mic
+and plays to a headset if one is present.
 
 ## Build it
 
@@ -163,8 +156,8 @@ cd /Users/robinsverd/Thrivbe-AI/projects/voice-agent
 ./run.sh
 ```
 A 🎙 appears in your menu bar. The icon shows state: 🎙 idle · 🔴 listening ·
-💭 thinking · 🗣 speaking. Menu has: click-to-talk fallback, live-conversation
-toggle, voice toggle, reset conversation, quit.
+💭 thinking · 🗣 speaking. Menu has: live-conversation toggle, agentic-shell toggle,
+🎙 Microphone / 🔊 Speaker pickers, Set OpenAI key, Run setup again, Quit.
 
 ### Deploying code changes without a rebuild
 A rebuild changes the bundle's signature and **resets all TCC permissions**. For
@@ -196,10 +189,11 @@ osascript -e 'quit app "Thrivbe Voice"'
 ### Test
 
 1. Confirm the 🎙 menu bar icon is visible.
-2. Hold **Right-Option**. The icon should change to 🔴.
-3. Say a short question.
-4. Release **Right-Option**. The icon should change to 💭, then 🗣 while it speaks.
-5. If the hotkey does nothing, re-check Accessibility and Input Monitoring for **Thrivbe Voice**.
+2. **Double-tap Control.** The glass orb should appear at the bottom-center (mint).
+3. Say a short question, then pause → orb goes periwinkle (thinking), then amber while
+   it speaks back out loud.
+4. Double-tap Control again to end; the orb fades out.
+5. If nothing happens, re-check Input Monitoring + Accessibility for **Thrivbe Voice**.
 
 ## Always-on (auto-start at login, self-healing)
 ```
@@ -210,38 +204,29 @@ Logs → `projects/voice-agent/agent.log`. Unload: `launchctl unload ...plist`.
 The launch agent opens `Thrivbe Voice.app`; do not launch `agent.py` directly
 for normal menu-bar use.
 
-## Knobs
-Push-to-talk (top of `agent.py`):
-- `MIC` — avfoundation device (auto-detected by name; list with
-  `ffmpeg -f avfoundation -list_devices true -i ""`)
-- `LLM_MODEL` — `openai/gpt-4o-mini`; any OpenRouter model works
-- `ELEVEN_VOICE` — ElevenLabs voice id
-
-Live mode (top of `realtime.py`):
+## Knobs (top of `realtime.py`)
 - `MODEL` — `gpt-realtime` (GA Realtime model)
-- `VOICE` — OpenAI voice id (`alloy`)
+- `VOICE` — default OpenAI voice id (`alloy`); overridable via `config live.voice`
+- `MIC_NAME` / `OUT_NAME` — default device name-substrings when none is picked
 - `MEMORY` — path of the cross-session memory log
+
+Per-session behaviour (mic/speaker, voice, delegation, shell timeout, agentic-shell)
+comes from config — see below — not from constants.
 
 ## Config / secrets
 Per-user settings live in `~/Library/Application Support/ThrivbeVoice/config.json`
-(`config.py`); **API keys are stored in the macOS Keychain** (service `ThrivbeVoice`),
-not on disk. Enter them via the menu (**Set OpenAI key…**, etc.) or first-run setup.
-Only the **OpenAI** key is required; OpenRouter (PTT brain) and ElevenLabs (PTT voice)
-are optional. Dev fallback: keys are also read from `~/Thrivbe-AI/.env` if present, so
-the original workspace setup keeps working with no re-entry.
+(`config.py`); the **OpenAI API key is stored in the macOS Keychain** (service
+`ThrivbeVoice`), not on disk. Enter it via the menu (**Set OpenAI key…**) or first-run
+setup. OpenAI is the only key needed. Dev fallback: the key is also read from
+`~/Thrivbe-AI/.env` if present, so the original workspace setup keeps working.
 
 First launch runs **onboarding** (paste OpenAI key → deep-links the Microphone /
 Accessibility / Input Monitoring panes). Re-run any time via **Run setup again…**.
 
-> Productizing this (App Store reality, distribution, licensing, full onboarding/
-> settings, monetization) is planned in **[PRODUCT.md](PRODUCT.md)**.
+> Productizing this (App Store reality, distribution, licensing, monetization) is
+> planned in **[PRODUCT.md](PRODUCT.md)**; tester install steps in **[INSTALL.md](INSTALL.md)**.
 
 ## Notes
-- `run_shell` runs arbitrary commands as you (workspace cwd in push-to-talk,
-  system-wide persistent shell in live mode). Single-user personal tool — add a
-  confirmation gate before exposing it anywhere multi-user.
-- Push-to-talk on OpenRouter can return a blank completion — handled with a retry
-  in `think()`.
-
-## Deliberately skipped (add when the core feels right)
-- Wake word — the push-to-talk / double-tap triggers are more reliable.
+- `run_shell` runs arbitrary commands as you via the system-wide persistent shell.
+  It's **off by default** (the Agentic shell toggle gates it) — a real safety boundary
+  for a tool you might hand to other people.
