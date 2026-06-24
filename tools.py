@@ -105,8 +105,17 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
         # no output, no .done — so the auto-wake never fires).
         runner = (f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null > {shlex.quote(out)} 2>&1; '
                   f'touch {shlex.quote(done)}')
+        cmd = f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown"
+        # Optionally open a Terminal window tailing this task's output, so the user can
+        # watch the delegated agent work live. json.dumps gives a valid AppleScript string
+        # literal; the inner path is shell-quoted (it lives under "Application Support",
+        # which has a space). Best-effort — appended after the job is already detached.
+        if live.get("show_task_terminals"):
+            tail = f"tail -f {shlex.quote(out)}"
+            osa = f'tell application "Terminal" to do script {json.dumps(tail)}'
+            cmd += f"; osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
         # Return the out-path too so the caller can open a live log window on it.
-        return (f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown", out)
+        return (cmd, out)
     except Exception as e:
         _log(f"delegate build failed: {e!r}")
         return None

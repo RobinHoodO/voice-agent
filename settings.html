@@ -178,6 +178,11 @@
         <div class="desc">Let the agent run commands, read files, and drive apps on your Mac. Powerful — leave off unless you want it acting, not just answering.</div>
       </div><span class="sw" id="t_shell" onclick="toggle('live.agentic_shell',this)"></span></div>
 
+      <div class="row"><div class="ic">🖥️</div><div class="body">
+        <div class="lbl">Show background task terminals</div>
+        <div class="desc">When the agent hands a slow job to a background agent, open a Terminal window tailing its live output so you can follow along.</div>
+      </div><span class="sw" id="t_tasks_term" onclick="toggle('live.show_task_terminals',this)"></span></div>
+
       <div class="row"><div class="ic">🖥</div><div class="body">
         <div class="lbl">Activity window</div>
         <div class="desc">Open a window that shows what the agent hears, says, and runs during a live conversation.</div>
@@ -372,6 +377,7 @@
     setSwitch('t_winctx', s.window_context);
     setSwitch('t_shot', s.window_screenshot);
     setSwitch('t_shell', s.agentic_shell);
+    setSwitch('t_tasks_term', s.show_task_terminals);
     setSwitch('t_term', s.activity_window);
     setSwitch('t_login', s.open_at_login);
     setSwitch('liveNow', s.live_on);

@@ -79,6 +79,7 @@ DEFAULTS = {
         "shell_timeout": 20,
         "delegate": "pi",                 # "pi" | "claude" | "off"
         "pi_model": "deepseek-v4-flash",
+        "show_task_terminals": False,     # open a Terminal tailing each delegated task's output
         "workspace": None,                # optional context/home folder; None = $HOME
         "custom_prompt": "",              # user/agent-authored persona+context, reloaded every session
         "memory": {                       # conversation recall + learning — see memory.py
