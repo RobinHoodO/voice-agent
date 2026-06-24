@@ -1,0 +1,5 @@
+#!/bin/sh
+# Run the test suite before each commit. Enable once with:
+#   git config core.hooksPath .githooks
+# ponytail: a 4-line gate, not the pre-commit framework — solo beta doesn't need it.
+exec .venv/bin/python -m pytest -q

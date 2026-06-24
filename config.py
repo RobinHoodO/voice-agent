@@ -198,9 +198,9 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         # deep-merge surfaces new keys without clobbering user values
         merged = _deep_merge(DEFAULTS, {"live": {"voice": "echo"}})
-        assert merged["live"]["voice"] == "echo"
-        assert merged["live"]["agentic_shell"] is True
-        assert merged["ptt"]["voice_engine"] == "elevenlabs"
+        assert merged["live"]["voice"] == "echo"                  # override applied
+        assert merged["live"]["agentic_shell"] is False           # sibling default not clobbered
+        assert merged["live"]["memory"]["recall_count"] == 5      # nested default preserved
         # secret round-trip (uses a throwaway account so it can't touch real keys)
         tname = "selftest-tmp"
         assert set_secret(tname, "hunter2"), "Keychain write failed"

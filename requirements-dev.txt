@@ -1,0 +1,4 @@
+# Dev/test-only deps (not bundled into the .app)
+-r requirements.txt
+pytest
+pytest-cov
