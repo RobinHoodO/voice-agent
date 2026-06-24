@@ -12,6 +12,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 import uuid
 
 import config
@@ -46,6 +47,7 @@ class LiveSession(AudioMixin):
         self._in_stream = None
         self._out_stream = None
         self._player_thread: threading.Thread | None = None
+        self._mic_task: asyncio.Future | None = None  # the mic->ws pump (kept so crashes surface)
         self._running = False
         self._speaking = False
         self._shell: Shell | None = None             # persistent zsh for this session
@@ -78,14 +80,47 @@ class LiveSession(AudioMixin):
             except Exception:
                 pass
 
+    def _notify(self, msg: str) -> None:
+        """Best-effort user-visible notification (so failures aren't silent)."""
+        try:
+            import rumps
+            rumps.notification("Thrivbe Voice", "", msg)
+        except Exception:
+            pass
+
+    def _on_mic_task_done(self, task) -> None:
+        """Surface a crashed mic pump instead of letting asyncio swallow it."""
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+        if exc:
+            _log(f"mic pump crashed: {exc!r}")
+
     # ----- session thread -----
     def _run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        backoff = 1.0
         try:
-            self._loop.run_until_complete(self._session())
-        except Exception as e:
-            _log(f"realtime session error: {e!r}")
+            while self._running:
+                try:
+                    self._loop.run_until_complete(self._session())
+                    backoff = 1.0          # connected at least once → reset backoff
+                except Exception as e:
+                    _log(f"realtime session error: {e!r}")
+                self._teardown_audio()     # close this attempt's streams/shell before any retry
+                if not self._running:
+                    break                  # user asked to stop — clean exit
+                # Unexpected drop while still live: back off and reconnect, so the daemon
+                # doesn't go silently deaf on a network blip / idle timeout / server close.
+                self.on_state("reconnecting")
+                self._notify(f"Connection lost — reconnecting in {int(backoff)}s")
+                _log(f"session dropped; reconnecting in {backoff:.0f}s")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
         finally:
             self._teardown_audio()
             self._running = False
@@ -175,7 +210,8 @@ class LiveSession(AudioMixin):
                 _log(f"persistent shell start failed: {e!r}")
             await self._configure(ws)
             self._start_audio()
-            asyncio.ensure_future(self._pump_mic())
+            self._mic_task = asyncio.ensure_future(self._pump_mic())
+            self._mic_task.add_done_callback(self._on_mic_task_done)
             self.on_state("listening")
             _log("realtime session open — listening")
             if self._announce:
