@@ -55,6 +55,7 @@ class AudioMixin:
                 break
             if data is None or self._ws is None:
                 continue
+            self._update_level(data)   # metering off the PortAudio callback thread
             try:
                 await self._ws.send(json.dumps({
                     "type": "input_audio_buffer.append",
@@ -98,23 +99,28 @@ class AudioMixin:
         self._player_thread.start()
 
     def _mic_cb(self, indata, frames, t, status) -> None:
-        # PortAudio thread — hand bytes to the asyncio loop without blocking.
+        # PortAudio realtime thread — do the MINIMUM here (copy bytes, hand to the loop).
+        # numpy RMS metering moved to _pump_mic so heavy work never runs on this thread,
+        # where a stall risks input glitches.
         if self._loop and self._running and self._mic_q is not None:
             data = bytes(indata)
-            try:
-                import numpy as np
-                s = np.frombuffer(data, dtype=np.int16)
-                if s.size:
-                    rms = float(np.sqrt(np.mean(s.astype(np.float32) ** 2)))
-                    lvl = min(1.0, rms / 4000.0)
-                    # fast attack, slow decay — feels like it's catching your words
-                    self.level = lvl if lvl > self.level else self.level * 0.85 + lvl * 0.15
-            except Exception:
-                pass
             try:
                 self._loop.call_soon_threadsafe(self._mic_q.put_nowait, data)
             except Exception:
                 pass
+
+    def _update_level(self, data: bytes) -> None:
+        """Mic amplitude 0..1 for the wave pill. Runs off the audio callback thread."""
+        try:
+            import numpy as np
+            s = np.frombuffer(data, dtype=np.int16)
+            if s.size:
+                rms = float(np.sqrt(np.mean(s.astype(np.float32) ** 2)))
+                lvl = min(1.0, rms / 4000.0)
+                # fast attack, slow decay — feels like it's catching your words
+                self.level = lvl if lvl > self.level else self.level * 0.85 + lvl * 0.15
+        except Exception:
+            pass
 
     def _player(self) -> None:
         import sounddevice as sd

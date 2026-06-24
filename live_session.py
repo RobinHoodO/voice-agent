@@ -43,7 +43,7 @@ class LiveSession(AudioMixin):
         self._thread: threading.Thread | None = None
         self._ws = None
         self._mic_q: asyncio.Queue | None = None      # mic bytes -> ws (loop thread)
-        self._out_q: queue.Queue = queue.Queue()      # model bytes -> speaker (player thread)
+        self._out_q: queue.Queue = queue.Queue(maxsize=256)  # model audio -> speaker; bounded (drop-oldest)
         self._in_stream = None
         self._out_stream = None
         self._player_thread: threading.Thread | None = None
@@ -284,7 +284,7 @@ class LiveSession(AudioMixin):
         elif t == "input_audio_buffer.speech_stopped":
             await self._inject_context_and_respond()
         elif t == "response.output_audio.delta":
-            self._out_q.put(base64.b64decode(ev["delta"]))
+            self._enqueue_audio(base64.b64decode(ev["delta"]))
             self._audio_n = getattr(self, "_audio_n", 0) + 1
             if self._audio_n == 1:
                 _log("first audio delta -> speaking")
@@ -336,10 +336,16 @@ class LiveSession(AudioMixin):
         self.on_state("thinking")
         # Grab text context and the screenshot concurrently so the silent gap before the
         # reply stays as short as possible (each toggle may no-op and return fast).
-        ctx, shot = await asyncio.gather(
-            self._loop.run_in_executor(None, _grab_context),
-            self._loop.run_in_executor(None, _grab_screenshot),
-        )
+        # Cap the grab: it sits in the silent gap between "you stopped talking" and the
+        # reply, so a slow AppleScript/screenshot must not stall the turn.
+        try:
+            ctx, shot = await asyncio.wait_for(asyncio.gather(
+                self._loop.run_in_executor(None, _grab_context),
+                self._loop.run_in_executor(None, _grab_screenshot),
+            ), timeout=2.0)
+        except asyncio.TimeoutError:
+            _log("context grab timed out (>2s) — replying without screen context")
+            ctx, shot = "", ""
         _log(f"context injected ({len(ctx)} chars, screenshot={'yes' if shot else 'no'})")
         if shot:
             # Separate item so a rejected image never blocks the text context.
@@ -425,6 +431,21 @@ class LiveSession(AudioMixin):
             "item": {"type": "function_call_output", "call_id": call_id, "output": out},
         }))
         await self._ws.send(json.dumps({"type": "response.create"}))
+
+    def _enqueue_audio(self, chunk: bytes) -> None:
+        # Bounded playback queue: if the model outruns the speaker, drop the OLDEST
+        # chunk instead of letting the queue (and latency) grow without bound.
+        try:
+            self._out_q.put_nowait(chunk)
+        except queue.Full:
+            try:
+                self._out_q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._out_q.put_nowait(chunk)
+            except queue.Full:
+                pass
 
     def _run_in_shell(self, command: str) -> str:
         if self._shell is None:
