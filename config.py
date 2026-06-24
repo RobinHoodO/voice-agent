@@ -38,7 +38,7 @@ DEFAULTS = {
     "onboarding_complete": False,
     "live": {
         "voice": "alloy",
-        "agentic_shell": True,
+        "agentic_shell": False,           # off by default — running shell is opt-in (menu toggle)
         "shell_timeout": 20,
         "delegate": "pi",                 # "pi" | "claude" | "off"
         "pi_model": "deepseek-v4-flash",

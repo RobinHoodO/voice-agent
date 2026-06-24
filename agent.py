@@ -330,11 +330,14 @@ class VoiceAgent(rumps.App):
         self.talk_item = rumps.MenuItem("🔴 Start talking", callback=self.toggle_talk)
         self.voice_item = rumps.MenuItem(
             f"Voice: {'ElevenLabs' if self.use_eleven else 'macOS say'}", callback=self.toggle_voice)
+        self.shell_item = rumps.MenuItem("Agentic shell (runs commands)", callback=self.toggle_shell)
+        self.shell_item.state = 1 if config.get("live.agentic_shell", False) else 0
         self.menu = [
             self.talk_item,
             rumps.MenuItem("🎧 Live conversation (double-tap Control)", callback=lambda _: self.toggle_live()),
             None,
             self.voice_item,
+            self.shell_item,
             None,
             rumps.MenuItem("Set OpenAI key…", callback=lambda _: self._set_key("openai", "OpenAI API key (sk-…)")),
             rumps.MenuItem("Set OpenRouter key…", callback=lambda _: self._set_key("openrouter", "OpenRouter API key (optional)")),
@@ -395,6 +398,14 @@ class VoiceAgent(rumps.App):
         self.use_eleven = not self.use_eleven
         item.title = f"Voice: {'ElevenLabs' if self.use_eleven else 'macOS say'}"
         config.set_("ptt.voice_engine", "elevenlabs" if self.use_eleven else "say")
+
+    def toggle_shell(self, item):
+        on = not bool(item.state)
+        item.state = 1 if on else 0
+        config.set_("live.agentic_shell", on)
+        rumps.notification("Thrivbe Voice", f"Agentic shell {'ON' if on else 'OFF'}",
+                           "Restart live conversation to apply." if on else
+                           "Live mode will only answer, not run commands.")
 
     def reset(self, _):
         self.history = []
