@@ -28,10 +28,9 @@ MEMORY_PATH = os.path.join(SUPPORT_DIR, "memory.log")
 LOG_PATH = os.path.join(LOG_DIR, "agent.log")
 
 # Secret name -> env var(s) to fall back on when the Keychain has no entry (dev mode).
+# Live mode only needs OpenAI (Realtime + transcription).
 _ENV_FALLBACK = {
     "openai": ["OPENAI_API_KEY"],
-    "openrouter": ["OPENROUTER_API", "OPENROUTER_API_KEY"],
-    "elevenlabs": ["ELEVENLABS_API_KEY"],
 }
 
 DEFAULTS = {
@@ -44,13 +43,8 @@ DEFAULTS = {
         "pi_model": "deepseek-v4-flash",
         "workspace": None,                # optional context/home folder; None = $HOME
     },
-    "ptt": {
-        "voice_engine": "elevenlabs",     # "elevenlabs" | "say"
-        "eleven_voice": "21m00Tcm4TlvDq8ikWAM",
-        "brain_model": "openai/gpt-4o-mini",
-    },
-    "audio": {"input_device": None, "output_device": None},   # null = system default / smart pick
-    "hotkeys": {"live": "double_ctrl", "ptt": "alt_r"},
+    "audio": {"input_device": None, "output_device": None},   # device-name substring; null = smart default
+    "hotkeys": {"live": "double_ctrl"},
     "privacy": {"read_cursor_context": True},
 }
 

@@ -1,30 +1,50 @@
 #!/usr/bin/env python3
-"""Floating always-on-top state pill for live conversation mode.
+"""Floating state ORB for live conversation mode — a bright "Liquid Glass" presence.
 
-A small borderless NSPanel near the top-center of the screen showing the live
-state (listening / thinking / speaking). AppKit is not thread-safe — every
-method here MUST be called on the main (rumps) thread. agent.py drives it from
-its 0.3s Timer tick, never from the realtime/pynput threads.
+A small frosted-glass circle at the bottom-center of the active screen. No text: state
+is carried entirely by color + motion (mint = listening, periwinkle = thinking, amber =
+speaking), each with a slow breathing glow. Design spec by the Design Director agent.
+
+AppKit is not thread-safe — every method here MUST be called on the main (rumps)
+thread. agent.py drives it from its 0.3s Timer tick, never from worker threads.
 """
 from AppKit import (
-    NSPanel, NSColor, NSTextField, NSFont, NSScreen, NSEvent, NSMakeRect,
-    NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel,
-    NSStatusWindowLevel, NSBackingStoreBuffered, NSTextAlignmentCenter,
+    NSPanel, NSColor, NSView, NSScreen, NSEvent, NSMakeRect, NSAppearance,
+    NSVisualEffectView, NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel,
+    NSStatusWindowLevel, NSBackingStoreBuffered,
+    NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary,
+    NSVisualEffectMaterialHUDWindow, NSVisualEffectBlendingModeBehindWindow,
+    NSVisualEffectStateActive,
 )
+from Quartz import CALayer, CAGradientLayer, CABasicAnimation, CAMediaTimingFunction
 
-# state -> (dot color, label) — minimal: a colored dot + one word
+# state -> (accent rgb, core-center rgb) — mid-saturation, high-value so they glow
+# inside white glass without going neon. cool->warm = listening->thinking->speaking.
 STATES = {
-    "listening": ((0.20, 0.80, 0.40), "Listening"),
-    "thinking": ((1.00, 0.62, 0.04), "Thinking"),
-    "speaking": ((0.04, 0.52, 1.00), "Speaking"),
+    "listening": ((0.239, 0.824, 0.753), (0.498, 0.941, 0.886)),   # mint  #3DD2C0
+    "thinking":  ((0.486, 0.549, 1.000), (0.651, 0.698, 1.000)),   # periwinkle #7C8CFF
+    "speaking":  ((1.000, 0.698, 0.239), (1.000, 0.816, 0.541)),   # amber #FFB23D
+}
+# per-state breathing: (core_scale_to, glow_radius_lo, glow_radius_hi, glow_op_lo, glow_op_hi, dur)
+MOTION = {
+    "listening": (1.08, 12.0, 18.0, 0.35, 0.55, 1.3),
+    "thinking":  (1.04, 13.0, 15.0, 0.45, 0.58, 0.7),
+    "speaking":  (1.05, 14.0, 20.0, 0.45, 0.65, 1.0),
 }
 
-W, H = 150, 40
+PANEL = 84          # clear square panel — extra room for the glow/shadow bloom
+DISC = 52           # frosted glass disc
+CORE = 18           # glowing accent marble
+INSET = (PANEL - DISC) / 2.0
+CORE_OFF = (DISC - CORE) / 2.0
+
+
+def _cg(rgb, a=1.0):
+    r, g, b = rgb
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, a).CGColor()
 
 
 def _active_screen():
-    """The screen the mouse cursor is currently on (so the pill lands where
-    Robin is looking), falling back to the main screen."""
     m = NSEvent.mouseLocation()
     for s in NSScreen.screens():
         f = s.frame()
@@ -34,65 +54,144 @@ def _active_screen():
     return NSScreen.mainScreen()
 
 
+def _reduce_motion():
+    try:
+        from AppKit import NSWorkspace
+        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+    except Exception:
+        return False
+
+
 class Pill:
     def __init__(self):
         self.panel = None
-        self.label = None
-        self.dot = None
+        self.glow = None
+        self.core = None
 
     def _build(self) -> None:
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, W, H), style, NSBackingStoreBuffered, False)
+            NSMakeRect(0, 0, PANEL, PANEL), style, NSBackingStoreBuffered, False)
         panel.setLevel_(NSStatusWindowLevel)
         panel.setFloatingPanel_(True)
         panel.setHidesOnDeactivate_(False)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setIgnoresMouseEvents_(True)  # pure indicator — clicks pass through
+        panel.setIgnoresMouseEvents_(True)
+        panel.setCollectionBehavior_(
+            NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary)
 
         content = panel.contentView()
         content.setWantsLayer_(True)
-        layer = content.layer()
-        layer.setCornerRadius_(H / 2.0)      # full pill
-        layer.setBackgroundColor_(
-            NSColor.colorWithCalibratedWhite_alpha_(0.08, 0.85).CGColor())
+        host = content.layer()
 
-        dot = NSTextField.alloc().initWithFrame_(NSMakeRect(20, (H - 16) / 2, 16, 16))
-        for f in (dot.setBezeled_, dot.setDrawsBackground_, dot.setEditable_, dot.setSelectable_):
-            f(False)
-        dot.setStringValue_("●")
-        dot.setFont_(NSFont.systemFontOfSize_(14))
+        disc = NSMakeRect(INSET, INSET, DISC, DISC)
 
-        label = NSTextField.alloc().initWithFrame_(NSMakeRect(40, (H - 20) / 2, W - 50, 20))
-        for f in (label.setBezeled_, label.setDrawsBackground_, label.setEditable_, label.setSelectable_):
-            f(False)
-        label.setAlignment_(NSTextAlignmentCenter)
-        label.setTextColor_(NSColor.whiteColor())
-        label.setFont_(NSFont.systemFontOfSize_(15))
+        # 1. ambient lift: white disc behind everything, cool soft shadow (body hidden by glass)
+        base = CALayer.layer()
+        base.setFrame_(disc)
+        base.setCornerRadius_(DISC / 2.0)
+        base.setBackgroundColor_(_cg((1, 1, 1), 1.0))
+        base.setShadowColor_(_cg((0.078, 0.094, 0.157), 1.0))
+        base.setShadowOpacity_(0.18)
+        base.setShadowRadius_(16.0)
+        base.setShadowOffset_((0, -6))
+        base.setMasksToBounds_(False)
+        host.insertSublayer_atIndex_(base, 0)
 
-        content.addSubview_(dot)
-        content.addSubview_(label)
-        self.panel, self.label, self.dot = panel, label, dot
+        # 2. state glow: accent bloom (its shadow is the halo; body hidden by glass)
+        glow = CALayer.layer()
+        glow.setFrame_(disc)
+        glow.setCornerRadius_(DISC / 2.0)
+        glow.setShadowOffset_((0, 0))
+        glow.setMasksToBounds_(False)
+        host.insertSublayer_atIndex_(glow, 1)
+        self.glow = glow
+
+        # 3. frosted glass — forced bright (vibrantLight stays luminous in Dark Mode)
+        fx = NSVisualEffectView.alloc().initWithFrame_(disc)
+        fx.setMaterial_(NSVisualEffectMaterialHUDWindow)
+        fx.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        fx.setState_(NSVisualEffectStateActive)
+        try:
+            fx.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameVibrantLight"))
+        except Exception:
+            pass
+        fx.setWantsLayer_(True)
+        fxl = fx.layer()
+        fxl.setCornerRadius_(DISC / 2.0)
+        fxl.setMasksToBounds_(True)
+        content.addSubview_(fx)
+
+        # 4. luminance tint — pushes the glass brighter/cooler than raw vibrancy
+        tint = CALayer.layer()
+        tint.setFrame_(NSMakeRect(0, 0, DISC, DISC))
+        tint.setCornerRadius_(DISC / 2.0)
+        tint.setBackgroundColor_(_cg((1, 1, 1), 0.18))
+        fxl.addSublayer_(tint)
+
+        # 5. hairline glass rim (lit meniscus)
+        rim = CALayer.layer()
+        rim.setFrame_(NSMakeRect(0.5, 0.5, DISC - 1, DISC - 1))
+        rim.setCornerRadius_((DISC - 1) / 2.0)
+        rim.setBorderWidth_(1.0)
+        rim.setBorderColor_(_cg((1, 1, 1), 0.6))
+        fxl.addSublayer_(rim)
+
+        # 6. glowing accent core — a lit radial-gradient marble
+        core = CAGradientLayer.layer()
+        core.setFrame_(NSMakeRect(CORE_OFF, CORE_OFF, CORE, CORE))
+        core.setCornerRadius_(CORE / 2.0)
+        core.setType_("radial")
+        core.setStartPoint_((0.5, 0.5))
+        core.setEndPoint_((1.0, 1.0))
+        core.setLocations_([0.0, 1.0])
+        fxl.addSublayer_(core)
+        self.core = core
+
+        self.panel = panel
+
+    @staticmethod
+    def _anim(keypath, frm, to, dur):
+        a = CABasicAnimation.animationWithKeyPath_(keypath)
+        a.setFromValue_(frm)
+        a.setToValue_(to)
+        a.setDuration_(dur)
+        a.setAutoreverses_(True)
+        a.setRepeatCount_(1e9)
+        a.setTimingFunction_(CAMediaTimingFunction.functionWithName_("easeInEaseOut"))
+        a.setRemovedOnCompletion_(False)
+        return a
+
+    def set_state(self, state: str) -> None:
+        if self.core is None:
+            return
+        accent, center = STATES.get(state, ((0.7, 0.7, 0.7), (0.85, 0.85, 0.85)))
+        scale, rlo, rhi, olo, ohi, dur = MOTION.get(state, (1.05, 13, 16, 0.4, 0.55, 1.2))
+        # colors
+        self.core.setColors_([_cg(center, 1.0), _cg(accent, 1.0)])
+        self.glow.setShadowColor_(_cg(accent, 1.0))
+        self.glow.setShadowRadius_((rlo + rhi) / 2.0)
+        self.glow.setShadowOpacity_((olo + ohi) / 2.0)
+        # motion (or static if reduce-motion)
+        self.core.removeAllAnimations()
+        self.glow.removeAllAnimations()
+        if _reduce_motion():
+            return
+        self.core.addAnimation_forKey_(self._anim("transform.scale", 1.0, scale, dur), "breathe")
+        self.glow.addAnimation_forKey_(self._anim("shadowRadius", rlo, rhi, dur), "halo")
+        self.glow.addAnimation_forKey_(self._anim("shadowOpacity", olo, ohi, dur), "pulse")
 
     def show(self, state: str = "listening") -> None:
         if self.panel is None:
             self._build()
-        f = _active_screen().frame()
-        # bottom-center of the active screen, a little above the Dock
-        self.panel.setFrameOrigin_((f.origin.x + (f.size.width - W) / 2,
-                                    f.origin.y + 80))
+        vf = _active_screen().visibleFrame()
+        # bottom-center, 28pt above the Dock/safe area
+        self.panel.setFrameOrigin_((vf.origin.x + (vf.size.width - PANEL) / 2.0,
+                                    vf.origin.y + 28))
         self.set_state(state)
         self.panel.orderFrontRegardless()
 
     def hide(self) -> None:
         if self.panel is not None:
             self.panel.orderOut_(None)
-
-    def set_state(self, state: str) -> None:
-        color, text = STATES.get(state, ((0.7, 0.7, 0.7), "Live"))
-        if self.label is not None:
-            self.label.setStringValue_(text)
-        if self.dot is not None:
-            r, g, b = color
-            self.dot.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 1.0))
