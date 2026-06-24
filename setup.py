@@ -3,6 +3,9 @@ from setuptools import setup
 
 APP = ["agent.py"]
 
+# settings.html is the WebView UI loaded at runtime; ship it into Contents/Resources.
+DATA_FILES = ["settings.html"]
+
 PLIST = {
     "CFBundleName": "Thrivbe Voice",
     "CFBundleDisplayName": "Thrivbe Voice",
@@ -63,6 +66,7 @@ OPTIONS = {
 
 setup(
     app=APP,
+    data_files=DATA_FILES,
     name="Thrivbe Voice",
     options={"py2app": OPTIONS},
     setup_requires=["py2app"],

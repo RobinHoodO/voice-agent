@@ -269,7 +269,12 @@ def open_settings(agent):
         NSApp.activateIgnoringOtherApps_(True)
         return
     try:
-        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.html")
+        # In a py2app bundle settings.py lives inside lib/python3.12.zip, so
+        # dirname(__file__) is not a real directory. py2app sets RESOURCEPATH to
+        # Contents/Resources (where settings.html is shipped via data_files); in
+        # dev that env var is unset, so fall back to the file's own directory.
+        base = os.environ.get("RESOURCEPATH") or os.path.dirname(os.path.abspath(__file__))
+        html_path = os.path.join(base, "settings.html")
         html = open(html_path, encoding="utf-8").read()
 
         cfg = WKWebViewConfiguration.alloc().init()
