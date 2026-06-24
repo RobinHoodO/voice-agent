@@ -344,8 +344,9 @@ class LiveSession:
         live = self._cfg.get("live") or {}
         instructions = _build_live_instructions(ctx, self._cfg)
         voice = live.get("voice") or VOICE
-        # Respect the agentic-shell toggle (off-by-default is the product safety default).
-        tools = TOOLS if live.get("agentic_shell", True) else [
+        # Respect the agentic-shell toggle. Fail CLOSED — default False to match
+        # config.DEFAULTS and the menu, so a missing key never exposes the shell.
+        tools = TOOLS if live.get("agentic_shell", False) else [
             t for t in TOOLS if t.get("name") != "run_shell"]
         await ws.send(json.dumps({
             "type": "session.update",
