@@ -21,6 +21,7 @@ CLI (so the delegate `pi` can search memory from the workspace shell):
 
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import time
@@ -35,6 +36,10 @@ DB_PATH = os.path.join(config.SUPPORT_DIR, "conversations.db")
 def _db() -> sqlite3.Connection:
     config.ensure_dirs()
     conn = sqlite3.connect(DB_PATH)
+    try:
+        os.chmod(DB_PATH, 0o600)   # transcripts + learned PII — owner-only
+    except OSError:
+        pass
     conn.execute(
         "CREATE TABLE IF NOT EXISTS conversations ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -387,8 +392,11 @@ def _recall_command(query: str, k: int) -> str:
     cmd = config.get("live.memory.command")
     if not cmd:
         return ""
+    # ponytail: shlex.quote below neutralizes {query} injection. The `cmd` TEMPLATE is
+    # still trusted config — a model with agentic-shell access could rewrite it in
+    # config.json. Closing that needs a command allowlist (product decision); not done here.
     try:
-        full = cmd.replace("{query}", query)
+        full = cmd.replace("{query}", shlex.quote(query))   # quote: query is a single arg, not shell
         r = subprocess.run(["sh", "-c", full], capture_output=True, text=True, timeout=20)
         return (r.stdout or "").strip()[:2000]
     except Exception as e:
