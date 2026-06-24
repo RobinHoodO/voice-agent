@@ -420,8 +420,11 @@ class LiveSession(AudioMixin):
                 out = "couldn't start it (delegation is off or the instruction was empty)"
             else:
                 cmd, _out_path = built
-                self._run_in_shell(cmd)   # nohup returns instantly; job runs detached
-                out = "Started it in the background — I'll come back with the result when it's done."
+                self._run_in_shell(cmd)   # returns instantly; runs detached or in a Terminal
+                if (self._cfg.get("live") or {}).get("show_task_terminals"):
+                    out = "Opened it in a Terminal so you can watch it work."
+                else:
+                    out = "Started it in the background — I'll come back with the result when it's done."
             config.activity(f"🚀  delegated: {args.get('instruction', '')[:80]}")
         else:
             out = await self._loop.run_in_executor(None, self._run_in_shell, args.get("command", ""))

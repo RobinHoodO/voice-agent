@@ -106,23 +106,19 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
         runner = (f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null > {shlex.quote(out)} 2>&1; '
                   f'touch {shlex.quote(done)}')
         if live.get("show_task_terminals"):
-            # Run pi DIRECTLY in its own Terminal window so the user watches the real
-            # session — NOT a `tail -f` of <out>, because pi -p writes only its final
-            # answer at the end, so tailing the file looks frozen until it finishes.
-            # `tee` mirrors the output into <out> so the menubar watcher still auto-wakes
-            # and speaks the result; `touch <done>` signals completion. json.dumps makes a
-            # valid AppleScript string literal; inner paths are shell-quoted (they live
-            # under "Application Support", which has a space).
-            # --verbose in the watch window so tool calls / progress are visible; only the
-            # pi path gets it (no-op for `claude -p`). The headless spoken-result path stays
-            # clean so verbosity is never read aloud.
-            watch_cmd = agent_cmd.replace("pi -p", "pi -p --verbose")
-            term = (f'{watch_cmd} "$(cat {shlex.quote(pf)})" </dev/null 2>&1 '
-                    f'| tee {shlex.quote(out)}; touch {shlex.quote(done)}')
+            # Open the agent INTERACTIVELY in its own Terminal (real TTY → the full live
+            # agent UI: tool calls, streaming, progress). The instruction is passed as the
+            # initial message, exactly as if the user typed it. NO `-p` and NO pipe — a pipe
+            # strips the TTY and pi falls back to writing only its final answer (which is why
+            # tee/tail looked frozen). Trade-off: pi stays open for you to watch, so there is
+            # no auto-captured result for the menubar watcher to speak — watching IS the UX.
+            interactive_cmd = agent_cmd.replace("pi -p", "pi").replace("claude -p", "claude")
+            term = f'{interactive_cmd} "$(cat {shlex.quote(pf)})"'
             osa = f'tell application "Terminal" to do script {json.dumps(term)}'
             cmd = f"osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
         else:
-            # Headless: detached, no window. </dev/null so it doesn't block on stdin.
+            # Headless: detached, no window, auto-wakes + speaks the result. </dev/null so
+            # it doesn't block on stdin.
             cmd = f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown"
         # Return the out-path too so the caller can open a live log window on it.
         return (cmd, out)
