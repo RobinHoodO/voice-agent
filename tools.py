@@ -112,23 +112,6 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
         return None
 
 
-def _open_task_log(out_path: str) -> None:
-    """Open a Terminal window that tails a delegated task's output, so the user can
-    watch the background pi job live. Best-effort; any failure is non-fatal.
-    Note: `pi -p` block-buffers to a file, so output often lands in one burst near
-    completion rather than streaming line-by-line — the window still surfaces it."""
-    try:
-        p = out_path.replace('"', '\\"')
-        script = ('tell application "Terminal"\n'
-                  ' activate\n'
-                  f' do script "clear; echo \\"⏳ Thrivbe Voice — background task (pi). Live output:\\"; '
-                  f'echo; tail -n +1 -F \\"{p}\\""\n'
-                  'end tell')
-        subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-    except Exception as e:
-        _log(f"open task log failed: {e!r}")
-
-
 def _extract_json(text: str):
     """Best-effort: pull the first JSON object out of a model's output (it may wrap it
     in prose or ```json fences). Returns the parsed dict, or None if there's no valid

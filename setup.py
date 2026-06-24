@@ -10,16 +10,15 @@ PLIST = {
     "CFBundleShortVersionString": "1.0",
     "CFBundleVersion": "1.0",
     "LSUIElement": True,
-    "NSMicrophoneUsageDescription": "Thrivbe Voice records only while you hold Right-Option or use Start talking.",
+    "NSMicrophoneUsageDescription": "Thrivbe Voice records your voice during a live conversation (started by double-tapping Control or from the menu).",
     "NSAppleEventsUsageDescription": "Thrivbe Voice reads the frontmost app, window title, Finder selection, and selected text to answer in context.",
-    "NSInputMonitoringUsageDescription": "Thrivbe Voice uses Right-Option as a push-to-talk hotkey.",
+    "NSInputMonitoringUsageDescription": "Thrivbe Voice listens for a double-tap of the Control key to start a conversation.",
 }
 
 OPTIONS = {
     "argv_emulation": False,
     "plist": PLIST,
     "packages": [
-        "openai",
         "pynput",
         "rumps",
         "sounddevice",
@@ -40,7 +39,15 @@ OPTIONS = {
         "pynput.keyboard._darwin",
         "urllib.request",
         # live conversation mode — lazily imported, so name them explicitly
-        "realtime",
+        "realtime",          # back-compat shim → live_session
+        "live_session",
+        "realtime_client",
+        "audio",
+        "tools",
+        "live_prompt",
+        "shell",
+        "macos_context",     # lazily imported by live_session — name it so py2app bundles it
+        "memory",
         "pill",
         "config",
         "asyncio",
