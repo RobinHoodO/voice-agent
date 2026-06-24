@@ -17,6 +17,7 @@ Self-check:  python3 config.py --selftest
 import json
 import os
 import subprocess
+import threading
 import time
 
 APP_NAME = "ThrivbeVoice"
@@ -122,19 +123,29 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
+_cache = None                     # merged config, loaded once and reused
+_cache_lock = threading.Lock()    # serialize set_ so concurrent writers don't clobber
+
+
 def load() -> dict:
-    ensure_dirs()
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as f:
-            user = json.load(f)
-    except FileNotFoundError:
-        user = {}
-    except Exception:
-        user = {}
-    return _deep_merge(DEFAULTS, user)
+    """Merged (DEFAULTS + user) config. Cached after the first read so config.json is
+    parsed from disk once, not on every get(). save()/set_ keep the cache consistent."""
+    global _cache
+    if _cache is None:
+        ensure_dirs()
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                user = json.load(f)
+        except FileNotFoundError:
+            user = {}
+        except Exception:
+            user = {}
+        _cache = _deep_merge(DEFAULTS, user)
+    return _cache
 
 
 def save(cfg: dict) -> None:
+    global _cache
     ensure_dirs()
     tmp = CONFIG_PATH + ".tmp"
     # Create the temp file owner-only from the start (no 0644 window before replace);
@@ -143,6 +154,7 @@ def save(cfg: dict) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
     os.replace(tmp, CONFIG_PATH)   # atomic; 0600 carried over from the fd
+    _cache = cfg                   # cache reflects what we just wrote
 
 
 def get(path: str, default=None):
@@ -156,15 +168,17 @@ def get(path: str, default=None):
 
 
 def set_(path: str, value) -> dict:
-    """Dotted set + persist; returns the new config."""
-    cfg = load()
-    node = cfg
-    parts = path.split(".")
-    for part in parts[:-1]:
-        node = node.setdefault(part, {})
-    node[parts[-1]] = value
-    save(cfg)
-    return cfg
+    """Dotted set + persist; returns the new config. Locked so the settings webview
+    thread and the set_prompt tool can't clobber each other (last-writer-wins)."""
+    with _cache_lock:
+        cfg = load()
+        node = cfg
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+        save(cfg)
+        return cfg
 
 
 # ----- secrets (macOS Keychain via the `security` CLI) ----------------------

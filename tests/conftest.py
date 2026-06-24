@@ -23,6 +23,7 @@ def tmp_app(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "LOG_PATH", str(logs / "agent.log"))
     monkeypatch.setattr(config, "ACTIVITY_PATH", str(logs / "activity.log"))
     monkeypatch.setattr(config, "TASKS_DIR", str(support / "tasks"))
+    monkeypatch.setattr(config, "_cache", None)   # don't leak a cached config between tests
 
     # memory.DB_PATH is captured at import from config.SUPPORT_DIR — re-point it.
     memory = importlib.import_module("memory")
