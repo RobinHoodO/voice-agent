@@ -20,7 +20,7 @@ from audio import AudioMixin
 from live_prompt import _build_live_instructions
 from realtime_client import SR, URL, VOICE, _headers, _selftest
 from shell import Shell
-from tools import TOOLS, _build_delegate_cmd, _extract_json, _open_task_log, _put_text
+from tools import TOOLS, _build_delegate_cmd, _extract_json, _put_text
 
 
 def _log(msg: str) -> None:
@@ -419,10 +419,9 @@ class LiveSession(AudioMixin):
             if not built:
                 out = "couldn't start it (delegation is off or the instruction was empty)"
             else:
-                cmd, out_path = built
+                cmd, _out_path = built
                 self._run_in_shell(cmd)   # nohup returns instantly; job runs detached
-                _open_task_log(out_path)  # surface a live log window for the pi job
-                out = "Started it in the background — I've opened its live log, and I'll come back with the result when it's done."
+                out = "Started it in the background — I'll come back with the result when it's done."
             config.activity(f"🚀  delegated: {args.get('instruction', '')[:80]}")
         else:
             out = await self._loop.run_in_executor(None, self._run_in_shell, args.get("command", ""))
