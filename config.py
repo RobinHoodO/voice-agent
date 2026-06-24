@@ -56,6 +56,20 @@ _ENV_FALLBACK = {
     "openai": ["OPENAI_API_KEY"],
 }
 
+# Env var names that hold secrets — never expose these to spawned shells/subprocesses.
+_SECRET_ENV_VARS = {e for envs in _ENV_FALLBACK.values() for e in envs}
+
+
+def subprocess_env() -> dict:
+    """os.environ minus secrets — for the agentic shell, which runs model-authored
+    commands and must not be able to read API keys (e.g. `echo $OPENAI_API_KEY`)."""
+    env = dict(os.environ)
+    for k in list(env):
+        if k in _SECRET_ENV_VARS or k.endswith(
+                ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PRIVATE_KEY", "_CREDENTIAL")):
+            env.pop(k, None)
+    return env
+
 DEFAULTS = {
     "onboarding_complete": False,
     "live": {
@@ -91,6 +105,7 @@ def ensure_dirs() -> None:
     for d in (SUPPORT_DIR, LOG_DIR, TASKS_DIR):
         try:
             os.makedirs(d, exist_ok=True)
+            os.chmod(d, 0o700)   # owner-only: holds transcripts, logs, job output
         except Exception:
             pass
 
@@ -122,9 +137,12 @@ def load() -> dict:
 def save(cfg: dict) -> None:
     ensure_dirs()
     tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    # Create the temp file owner-only from the start (no 0644 window before replace);
+    # config may hold workspace paths / the custom prompt.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-    os.replace(tmp, CONFIG_PATH)   # atomic
+    os.replace(tmp, CONFIG_PATH)   # atomic; 0600 carried over from the fd
 
 
 def get(path: str, default=None):

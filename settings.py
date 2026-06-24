@@ -23,6 +23,9 @@ VOICES = ["marin", "cedar", "alloy", "ash", "ballad", "coral",
           "echo", "sage", "shimmer", "verse"]
 VERSION = "1.0"
 
+# Security & Privacy panes the UI may deep-link to (the only valid openPane args).
+_SECURITY_PANES = {"Privacy_Microphone", "Privacy_Accessibility", "Privacy_ListenEvent"}
+
 _window = None
 _webview = None
 _bridge = None
@@ -232,7 +235,13 @@ def _handle(fn, arg):
             _log(f"openSetup failed: {e!r}")
         return None
     if fn == "openPane":
-        subprocess.run(["open", f"x-apple.systempreferences:com.apple.preference.security?{arg}"])
+        # arg arrives from the JS bridge (untrusted): only open known Security panes,
+        # never let it smuggle a second URL/argument into `open`.
+        if arg in _SECURITY_PANES:
+            subprocess.run(["open",
+                f"x-apple.systempreferences:com.apple.preference.security?{arg}"])
+        else:
+            _log(f"openPane rejected unknown anchor: {arg!r}")
         return None
     return None
 

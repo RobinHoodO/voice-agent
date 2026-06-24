@@ -206,7 +206,8 @@ class Shell:
             ["/bin/zsh"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
-            cwd=start, start_new_session=True)
+            cwd=start, start_new_session=True,
+            env=config.subprocess_env())   # strip API keys: model-run commands must not read them
         self.p.stdin.write("source ~/.zshrc 2>/dev/null\n")
         self.p.stdin.flush()
         self._drain(0.6)
