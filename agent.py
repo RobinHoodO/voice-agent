@@ -169,8 +169,14 @@ class VoiceAgent(rumps.App):
                 self.pill.set_state(st)
             except Exception:
                 pass
+        # Only cross the ObjC→JS bridge when the level actually changed — at 20Hz an
+        # unconditional set_level (e.g. during silence) needlessly competes with the
+        # AppKit/audio main loop. The shader smooths between updates.
         try:
-            self.pill.set_level(float(getattr(live, "level", 0.0)))
+            lvl = float(getattr(live, "level", 0.0))
+            if abs(lvl - getattr(self, "_pill_level_last", -1.0)) >= 0.01:
+                self._pill_level_last = lvl
+                self.pill.set_level(lvl)
         except Exception:
             pass
 
@@ -188,8 +194,8 @@ class VoiceAgent(rumps.App):
             if not self._pill_shown:
                 self.pill.show(pill_state)
                 self._pill_shown = True
-            else:
-                self.pill.set_state(pill_state)
+            # else: state changes are applied by _pump_pill_level (50ms, change-gated),
+            # so no redundant per-tick set_state JS hop here.
         elif self.pill is not None and self._pill_shown:
             self.pill.hide()
             self._pill_shown = False

@@ -38,3 +38,11 @@ def test_mic_task_done_callback_swallows_errors():
 def test_notify_never_raises_headless():
     # Phase 2.3: surfacing failures must degrade silently when rumps isn't available.
     live_session.LiveSession()._notify("connection lost")
+
+
+def test_out_q_is_bounded_and_drops_oldest():
+    # Phase 3.2: a slow speaker must not let the playback queue grow without bound.
+    s = live_session.LiveSession()
+    for i in range(400):                      # well past maxsize
+        s._enqueue_audio(bytes([i % 256]))    # must never block
+    assert s._out_q.qsize() <= 256
