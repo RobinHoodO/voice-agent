@@ -44,6 +44,10 @@ class Shell:
             ["/bin/zsh"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
+            # Force UTF-8: in a py2app bundle the locale is often ASCII/C, so text=True
+            # would decode readline() as ASCII and crash on any non-ASCII output (≤, smart
+            # quotes, emoji). errors="replace" means malformed bytes degrade, never crash.
+            encoding="utf-8", errors="replace",
             cwd=start, start_new_session=True,
             env=config.subprocess_env())   # strip API keys: model-run commands must not read them
         self.p.stdin.write("source ~/.zshrc 2>/dev/null\n")
