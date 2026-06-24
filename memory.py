@@ -30,42 +30,51 @@ import config
 
 # DB_PATH is module-global so demo()/tests can point it at a tempfile.
 DB_PATH = os.path.join(config.SUPPORT_DIR, "conversations.db")
+_schema_done = set()   # DB paths whose schema + WAL we've already set up (once per path)
 
 
 # --- app-owned conversation store -------------------------------------------
 def _db() -> sqlite3.Connection:
     config.ensure_dirs()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     try:
         os.chmod(DB_PATH, 0o600)   # transcripts + learned PII — owner-only
     except OSError:
         pass
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS conversations ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " ts TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
-        " summary TEXT, transcript TEXT)")
-    # Plain (manually-managed) FTS5 so UPDATEs stay trivial: rowid == conversations.id.
-    conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts "
-        "USING fts5(summary, transcript)")
-    # Durable learnings — the continuous-learning layer on top of raw conversations.
-    # strength*recency ranks them; corrections supersede instead of deleting.
-    # type is preference | fact | correction; status is active | superseded.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS learnings ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " created_at TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
-        " type TEXT NOT NULL,"
-        " text TEXT NOT NULL,"
-        " source_conv_id INTEGER,"
-        " strength REAL NOT NULL DEFAULT 1.0,"
-        " uses INTEGER NOT NULL DEFAULT 0,"
-        " last_used_epoch INTEGER,"
-        " superseded_by INTEGER,"
-        " status TEXT NOT NULL DEFAULT 'active')")
-    conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(text)")
+    # Wait for a lock instead of instantly raising "database is locked" — the
+    # background _learn thread and the main thread both write.
+    conn.execute("PRAGMA busy_timeout=5000")
+    if DB_PATH not in _schema_done:
+        # Schema + WAL set up once per path, not on every call (was a per-call cost
+        # that taxed session-start latency). WAL lets reads proceed during a write.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversations ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " ts TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
+            " summary TEXT, transcript TEXT)")
+        # Plain (manually-managed) FTS5 so UPDATEs stay trivial: rowid == conversations.id.
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts "
+            "USING fts5(summary, transcript)")
+        # Durable learnings — the continuous-learning layer on top of raw conversations.
+        # strength*recency ranks them; corrections supersede instead of deleting.
+        # type is preference | fact | correction; status is active | superseded.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS learnings ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " created_at TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
+            " type TEXT NOT NULL,"
+            " text TEXT NOT NULL,"
+            " source_conv_id INTEGER,"
+            " strength REAL NOT NULL DEFAULT 1.0,"
+            " uses INTEGER NOT NULL DEFAULT 0,"
+            " last_used_epoch INTEGER,"
+            " superseded_by INTEGER,"
+            " status TEXT NOT NULL DEFAULT 'active')")
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(text)")
+        _schema_done.add(DB_PATH)
     return conn
 
 
