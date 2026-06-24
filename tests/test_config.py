@@ -21,6 +21,14 @@ def test_config_roundtrip_isolated(tmp_app):
     assert (tmp_app / "config.json").exists()
 
 
+def test_load_is_cached_and_set_updates_it(tmp_app):
+    a = config.load()
+    b = config.load()
+    assert a is b                       # second load() reuses the cache, no re-parse
+    config.set_("live.voice", "echo")
+    assert config.get("live.voice") == "echo"   # cache reflects the write immediately
+
+
 def test_memory_record_and_recall(tmp_app):
     cid = memory.record("hello world transcript", summary="a greeting")
     assert cid > 0
