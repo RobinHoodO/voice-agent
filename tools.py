@@ -113,7 +113,11 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
             # and speaks the result; `touch <done>` signals completion. json.dumps makes a
             # valid AppleScript string literal; inner paths are shell-quoted (they live
             # under "Application Support", which has a space).
-            term = (f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null 2>&1 '
+            # --verbose in the watch window so tool calls / progress are visible; only the
+            # pi path gets it (no-op for `claude -p`). The headless spoken-result path stays
+            # clean so verbosity is never read aloud.
+            watch_cmd = agent_cmd.replace("pi -p", "pi -p --verbose")
+            term = (f'{watch_cmd} "$(cat {shlex.quote(pf)})" </dev/null 2>&1 '
                     f'| tee {shlex.quote(out)}; touch {shlex.quote(done)}')
             osa = f'tell application "Terminal" to do script {json.dumps(term)}'
             cmd = f"osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
