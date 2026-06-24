@@ -28,7 +28,17 @@ if [ -d "$APP_NAME" ]; then
 fi
 cp -R "dist/$APP_NAME" "$APP_NAME"
 
-codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP_NAME"
+# Sign with the stable self-signed identity if present, so the designated requirement
+# (and thus TCC grants for Input Monitoring / Accessibility) survive every rebuild.
+# Falls back to ad-hoc (which breaks grants on each rebuild) if it isn't set up yet.
+SIGN_IDENTITY="Thrivbe Voice Dev"
+if security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
+  SIGN_AS="$SIGN_IDENTITY"
+else
+  echo "note: '$SIGN_IDENTITY' not found — run ./make_signing_cert.sh once so TCC grants survive rebuilds. Falling back to ad-hoc signing."
+  SIGN_AS="-"
+fi
+codesign --force --deep --sign "$SIGN_AS" --identifier "$BUNDLE_ID" "$APP_NAME"
 codesign --verify --deep --strict --verbose=2 "$APP_NAME"
 
 echo "Built and signed $APP_NAME"
