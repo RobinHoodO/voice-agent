@@ -230,6 +230,24 @@ def learnings_block(k: int = 30) -> str:
     return "\n".join(f"{lid}: [{typ}] {text}" for lid, typ, text, _s in rows)
 
 
+def panel_stats(k: int = 4) -> dict:
+    """Counts + a few recent learnings for the Settings memory panel. Display-only:
+    any failure returns zeros/empty so Settings never breaks on a memory hiccup."""
+    conv = learn = 0
+    try:
+        conn = _db()
+        try:
+            conv = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+            learn = conn.execute(
+                "SELECT COUNT(*) FROM learnings WHERE status='active'").fetchone()[0]
+        finally:
+            conn.close()
+    except Exception as e:
+        _log(f"memory.panel_stats failed: {e!r}")
+    recent = [text for _id, _typ, text, _s in _active_learnings(k)]
+    return {"conversations": conv, "learnings": learn, "recent": recent}
+
+
 def reinforce(learning_id: int) -> None:
     """A restated/confirmed learning: bump strength + uses, refresh recency."""
     if not learning_id:

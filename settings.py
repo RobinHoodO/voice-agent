@@ -147,6 +147,21 @@ def _greeting() -> str:
     return f"Good {part}" + (f", {first}" if first else "")
 
 
+def _mem_stats() -> dict:
+    """Live memory counts + recent learnings for the Settings panel (display-only).
+    Isolated + non-fatal: a memory hiccup must never break the Settings window."""
+    try:
+        import memory
+        s = memory.panel_stats(4)
+        return {"mem_conversation_count": s["conversations"],
+                "mem_learning_count": s["learnings"],
+                "mem_recent_learnings": s["recent"]}
+    except Exception as e:
+        _log(f"mem stats failed: {e!r}")
+        return {"mem_conversation_count": 0, "mem_learning_count": 0,
+                "mem_recent_learnings": []}
+
+
 def _state() -> dict:
     ins, outs = _devices()
     return {
@@ -163,6 +178,7 @@ def _state() -> dict:
         "mem_command": config.get("live.memory.command", "") or "",
         "mem_learn": bool(config.get("live.memory.learn", True)),
         "mem_mirror": bool(config.get("live.memory.mirror_claude_mem", False)),
+        **_mem_stats(),
         "custom_prompt": config.get("live.custom_prompt", "") or "",
         "deep_context": bool(config.get("privacy.read_cursor_context", True)),
         "window_context": bool(config.get("privacy.read_window_context", False)),

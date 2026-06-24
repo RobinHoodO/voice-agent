@@ -31,6 +31,8 @@
   .nav .i{width:18px;text-align:center;opacity:.7}
   .nav.active{background:rgba(120,120,128,.14)}
   .nav.dim{color:var(--muted);opacity:.55}
+  .nav[onclick]{cursor:pointer}
+  .nav[onclick]:hover{background:rgba(120,120,128,.08)}
   .side .grow{flex:1}
   .pill-cta{margin:0 4px;padding:10px;border-radius:11px;text-align:center;font-weight:600;
     background:var(--panel);box-shadow:var(--shadow);color:var(--ink);cursor:pointer}
@@ -70,6 +72,24 @@
   .keyrow:first-child{border-top:none}
   .keycap{background:rgba(120,120,128,.16);border-radius:7px;padding:4px 10px;font-weight:600;font-size:12.5px}
   .ok{color:#16a34a}.bad{color:#dc2626}
+  /* memory — two-layer panel */
+  .mem-hero{padding:16px 18px}
+  .mem-status{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted)}
+  .mem-status .dot{width:8px;height:8px;border-radius:50%;background:#3b82f6;
+    box-shadow:0 0 0 0 rgba(59,130,246,.45);animation:mempulse 2.4s ease-out infinite}
+  @keyframes mempulse{0%{box-shadow:0 0 0 0 rgba(59,130,246,.45)}
+    70%{box-shadow:0 0 0 6px rgba(59,130,246,0)}100%{box-shadow:0 0 0 0 rgba(59,130,246,0)}}
+  @media (prefers-reduced-motion: reduce){.mem-status .dot{animation:none}}
+  .mem-stats{display:flex;gap:10px;margin-top:14px}
+  .mem-stat{flex:1;background:rgba(120,120,128,.10);border-radius:11px;padding:12px 14px}
+  .mem-stat b{display:block;font-size:24px;font-weight:700;line-height:1.1;letter-spacing:-.4px}
+  .mem-stat span{display:block;font-size:11.5px;color:var(--muted);margin-top:3px}
+  .mem-recent{margin-top:14px}
+  .mem-recent .cap{font-size:11px;letter-spacing:.6px;color:var(--muted);font-weight:600;margin-bottom:8px}
+  .mem-chips{display:flex;flex-wrap:wrap;gap:6px}
+  .mem-chip{background:rgba(120,120,128,.14);border-radius:8px;padding:5px 9px;
+    font-size:12px;line-height:1.3;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mem-empty{font-size:12.5px;color:var(--muted);margin-top:2px}
   .foot{color:var(--muted);font-size:12px;margin-top:30px;text-align:center}
   /* toast */
   #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);
@@ -82,10 +102,10 @@
   <aside class="side">
     <div class="brand"><div class="orb"></div>
       <div><h1>THRIVBE</h1><small id="ver">voice</small></div></div>
-    <div class="nav active"><span class="i">⚙</span>Settings</div>
-    <div class="nav dim"><span class="i">🧠</span>Memory</div>
-    <div class="nav dim"><span class="i">🕘</span>Activity</div>
-    <div class="nav dim"><span class="i">🛡</span>Privacy</div>
+    <div class="nav active" onclick="go('SETTINGS',this)"><span class="i">⚙</span>Settings</div>
+    <div class="nav" onclick="go('MEMORY',this)"><span class="i">🧠</span>Memory</div>
+    <div class="nav" onclick="go('ACCOUNT',this)"><span class="i">🔑</span>Account</div>
+    <div class="nav" onclick="go('SYSTEM',this)"><span class="i">⚙</span>System</div>
     <div class="grow"></div>
     <div class="pill-cta" onclick="rpc('openSetup')">Run setup again</div>
   </aside>
@@ -164,20 +184,46 @@
       </div><span class="sw" id="t_term" onclick="toggle('ui.show_terminal',this)"></span></div>
     </div>
 
-    <div class="sec">MEMORY</div>
+    <div class="sec">MEMORY · ALWAYS REMEMBERS</div>
     <div class="card">
-      <div class="row"><div class="ic">🧠</div><div class="body">
-        <div class="lbl">Memory source <span class="desc">· recall past conversations &amp; context</span></div>
-        <div class="desc">The agent always remembers its own conversations. Optionally connect a wider memory system to recall more.</div>
+      <div class="mem-hero">
+        <div class="mem-status">
+          <span class="dot"></span><span>On · Private · No setup · Stored on your Mac</span>
+        </div>
+        <div class="mem-stats">
+          <div class="mem-stat"><b id="mem_conv_n">0</b><span>conversations remembered</span></div>
+          <div class="mem-stat"><b id="mem_learn_n">0</b><span>things learned about you</span></div>
+        </div>
+        <div class="mem-recent">
+          <div class="cap">RECENTLY LEARNED</div>
+          <div class="mem-chips" id="mem_recent_chips"></div>
+          <div class="mem-empty" id="mem_recent_empty" style="display:none">
+            Nothing learned yet — it fills in as you talk.
+          </div>
+        </div>
+      </div>
+
+      <div class="row"><div class="ic">🌱</div><div class="body">
+        <div class="lbl">Keep learning</div>
+        <div class="desc">After each conversation, automatically extract durable preferences and facts, reinforce the ones that recur, and self-correct when you contradict them. This is what fills the store above.</div>
+      </div><span class="sw" id="t_learn" onclick="toggle('live.memory.learn',this)"></span></div>
+    </div>
+
+    <div class="sec">EXTEND IT · WIDER MEMORY</div>
+    <div class="card">
+      <div class="row"><div class="ic">🔗</div><div class="body">
+        <div class="lbl">Connect a wider memory <span class="desc">· optional</span></div>
+        <div class="desc">On-device memory always works on its own. Optionally pull in a broader, read-only memory system to recall more than this app's own conversations.</div>
         <div class="ctl"><select id="mem_provider" onchange="setVal('live.memory.provider', this.value); applyMemRows()">
-          <option value="none">Built-in only (this app's conversations)</option>
+          <option value="none">Don't connect — on-device only</option>
           <option value="claude-mem">claude-mem (your existing memory)</option>
           <option value="command">Custom command…</option>
         </select></div>
       </div></div>
 
-      <div class="row"><div class="ic">🔢</div><div class="body">
+      <div class="row" id="mem_recall_row"><div class="ic">🔢</div><div class="body">
         <div class="lbl">How much to recall</div>
+        <div class="desc">How many extra items to pull from the wider memory each turn.</div>
         <div class="ctl"><select id="mem_recall_count" onchange="setVal('live.memory.recall_count', parseInt(this.value,10))">
           <option value="3">3 items</option><option value="5">5 items</option><option value="10">10 items</option>
         </select></div>
@@ -199,14 +245,9 @@
              onchange="setVal('live.memory.command', this.value||null)" style="width:100%;box-sizing:border-box"></div>
       </div></div>
 
-      <div class="row"><div class="ic">🌱</div><div class="body">
-        <div class="lbl">Keep learning</div>
-        <div class="desc">After each conversation, automatically extract durable preferences and facts, reinforce the ones that recur, and self-correct when you contradict them.</div>
-      </div><span class="sw" id="t_learn" onclick="toggle('live.memory.learn',this)"></span></div>
-
       <div class="row" id="mem_mirror_row"><div class="ic">🔁</div><div class="body">
         <div class="lbl">Mirror to claude-mem</div>
-        <div class="desc">Also write each new learning into your claude-mem store, so it surfaces in your wider memory too.</div>
+        <div class="desc">Also write each new on-device learning into your claude-mem store, so it surfaces in your wider memory too.</div>
       </div><span class="sw" id="t_mirror" onclick="toggle('live.memory.mirror_claude_mem',this)"></span></div>
     </div>
 
@@ -264,13 +305,39 @@
   window.__toast = (msg)=>{ const t=document.getElementById('toast'); t.textContent=msg;
     t.classList.add('show'); clearTimeout(window.__tt); window.__tt=setTimeout(()=>t.classList.remove('show'),2200); };
 
+  function go(label, el){
+    document.querySelectorAll('.side .nav').forEach(function(n){ n.classList.remove('active'); });
+    el.classList.add('active');
+    const t = [].slice.call(document.querySelectorAll('.sec')).find(
+      function(s){ return s.textContent.trim().toUpperCase().indexOf(label)===0; });
+    if(t) t.scrollIntoView({behavior:'smooth', block:'start'});
+  }
   function setVal(key,val){ rpc('set',{key:key,value:val}); }
   async function pickFolder(){ const p=await rpc('pickFolder'); if(p){ document.getElementById('workspace').value=p; } }
   function clearFolder(){ setVal('live.workspace', null); document.getElementById('workspace').value=''; }
   async function pickMemDb(){ const p=await rpc('pickMemDb'); if(p){ document.getElementById('mem_claude_db').value=p; } }
   function applyMemRows(){ const p=document.getElementById('mem_provider').value;
+    const connected = (p!=='none');
+    document.getElementById('mem_recall_row').style.display = connected?'':'none';
+    document.getElementById('mem_mirror_row').style.display = connected?'':'none';
     document.getElementById('mem_db_row').style.display = (p==='claude-mem')?'':'none';
     document.getElementById('mem_cmd_row').style.display = (p==='command')?'':'none'; }
+  function renderMemPanel(s){
+    const conv = s.mem_conversation_count|0, learned = s.mem_learning_count|0;
+    document.getElementById('mem_conv_n').textContent = conv.toLocaleString();
+    document.getElementById('mem_learn_n').textContent = learned.toLocaleString();
+    const items = Array.isArray(s.mem_recent_learnings) ? s.mem_recent_learnings : [];
+    const chips = document.getElementById('mem_recent_chips');
+    const empty = document.getElementById('mem_recent_empty');
+    chips.innerHTML='';
+    if(items.length){
+      empty.style.display='none';
+      items.slice(0,4).forEach(function(t){ const c=document.createElement('span');
+        c.className='mem-chip'; c.textContent=t; c.title=t; chips.appendChild(c); });
+    } else {
+      empty.style.display='';
+    }
+  }
   function toggle(key,el){ const on=!el.classList.contains('on'); el.classList.toggle('on',on);
     rpc('set',{key:key,value:on}); }
   function setSwitch(id,on){ document.getElementById(id).classList.toggle('on',!!on); }
@@ -299,6 +366,7 @@
     setSwitch('t_learn', s.mem_learn);
     setSwitch('t_mirror', s.mem_mirror);
     applyMemRows();
+    renderMemPanel(s);
     document.getElementById('prompt').value = s.custom_prompt || '';
     setSwitch('t_deep', s.deep_context);
     setSwitch('t_winctx', s.window_context);
