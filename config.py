@@ -17,6 +17,7 @@ Self-check:  python3 config.py --selftest
 import json
 import os
 import subprocess
+import time
 
 APP_NAME = "ThrivbeVoice"
 KEYCHAIN_SERVICE = APP_NAME
@@ -26,6 +27,28 @@ LOG_DIR = os.path.expanduser(f"~/Library/Logs/{APP_NAME}")
 CONFIG_PATH = os.path.join(SUPPORT_DIR, "config.json")
 MEMORY_PATH = os.path.join(SUPPORT_DIR, "memory.log")
 LOG_PATH = os.path.join(LOG_DIR, "agent.log")
+ACTIVITY_PATH = os.path.join(LOG_DIR, "activity.log")   # curated, human-readable feed
+TASKS_DIR = os.path.join(SUPPORT_DIR, "tasks")          # detached job output + .done sentinels
+
+
+def activity(msg: str) -> None:
+    """Append one human-readable line to the Activity feed shown in the pop-up window.
+    The raw, noisy log (LOG_PATH) stays separate for diagnostics."""
+    try:
+        ensure_dirs()
+        with open(ACTIVITY_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')}  {msg}\n")
+    except Exception:
+        pass
+
+
+def reset_activity() -> None:
+    """Clear the feed at the start of a conversation so the window shows only this one."""
+    try:
+        ensure_dirs()
+        open(ACTIVITY_PATH, "w").close()
+    except Exception:
+        pass
 
 # Secret name -> env var(s) to fall back on when the Keychain has no entry (dev mode).
 # Live mode only needs OpenAI (Realtime + transcription).
@@ -42,15 +65,30 @@ DEFAULTS = {
         "delegate": "pi",                 # "pi" | "claude" | "off"
         "pi_model": "deepseek-v4-flash",
         "workspace": None,                # optional context/home folder; None = $HOME
+        "custom_prompt": "",              # user/agent-authored persona+context, reloaded every session
+        "memory": {                       # conversation recall + learning — see memory.py
+            "provider": "none",           # "none" | "claude-mem" | "command"
+            "recall_count": 5,
+            "claude_mem_db": "~/.claude-mem/claude-mem.db",
+            "command": None,              # custom KB query, e.g. "my-kb search {query}"
+            "learn": True,                # extract durable learnings on conversation close
+            "mirror_claude_mem": False,   # also write learnings into claude-mem (off by default)
+        },
     },
     "audio": {"input_device": None, "output_device": None},   # device-name substring; null = smart default
     "hotkeys": {"live": "double_ctrl"},
-    "privacy": {"read_cursor_context": True},
+    "privacy": {
+        "read_cursor_context": True,       # text under the mouse cursor + marked selection
+        "read_window_context": False,      # full focused-window text (larger context, via AX)
+        "read_window_screenshot": False,   # send a screenshot of the focused window (vision)
+    },
+    "ui": {"show_terminal": False},        # open a Terminal tailing the log during live mode
+    "system": {"open_at_login": False},
 }
 
 
 def ensure_dirs() -> None:
-    for d in (SUPPORT_DIR, LOG_DIR):
+    for d in (SUPPORT_DIR, LOG_DIR, TASKS_DIR):
         try:
             os.makedirs(d, exist_ok=True)
         except Exception:

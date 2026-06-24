@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thrivbe Voice</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --panel:#ffffff; --ink:#1d1d1f; --muted:#8a8f98;
+    --line:#ececef; --accent:#111; --field:#fff; --fieldline:#e2e3e7;
+    --shadow:0 1px 2px rgba(0,0,0,.04),0 6px 20px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#1c1c1e; --panel:#2a2a2d; --ink:#f2f2f4; --muted:#9b9ba3;
+      --line:#37373b; --field:#2f2f33; --fieldline:#3c3c41;
+      --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35);}
+  }
+  *{box-sizing:border-box;-webkit-user-select:none;user-select:none}
+  html,body{margin:0;height:100%}
+  body{font:14px/1.45 -apple-system,"SF Pro Text",system-ui,sans-serif;
+    color:var(--ink);background:var(--bg);display:flex;overflow:hidden}
+  /* sidebar */
+  .side{width:210px;flex:0 0 210px;padding:22px 14px;display:flex;flex-direction:column;gap:4px}
+  .brand{display:flex;align-items:center;gap:10px;padding:0 8px 18px}
+  .orb{width:34px;height:34px;border-radius:50%;
+    background:radial-gradient(120% 120% at 30% 25%,#cfe4ff,#3b82f6 70%,#1e40af)}
+  .brand h1{font-size:21px;font-weight:700;letter-spacing:.5px;margin:0}
+  .brand small{display:block;font-size:10px;color:var(--muted);font-weight:500;letter-spacing:.3px}
+  .nav{display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:9px;
+    color:var(--ink);font-weight:500;cursor:default}
+  .nav .i{width:18px;text-align:center;opacity:.7}
+  .nav.active{background:rgba(120,120,128,.14)}
+  .nav.dim{color:var(--muted);opacity:.55}
+  .side .grow{flex:1}
+  .pill-cta{margin:0 4px;padding:10px;border-radius:11px;text-align:center;font-weight:600;
+    background:var(--panel);box-shadow:var(--shadow);color:var(--ink);cursor:pointer}
+  /* main */
+  .main{flex:1;overflow-y:auto;padding:30px 40px 60px}
+  .hello{font-size:34px;font-weight:700;margin:0 0 18px}
+  .banner{background:var(--panel);box-shadow:var(--shadow);border-radius:13px;
+    padding:15px 18px;display:flex;align-items:center;justify-content:space-between;margin-bottom:26px}
+  .banner kbd{background:rgba(120,120,128,.16);border-radius:6px;padding:2px 8px;font-family:inherit;font-weight:600}
+  .sec{font-size:11px;letter-spacing:.9px;color:var(--muted);font-weight:600;margin:26px 4px 10px}
+  .card{background:var(--panel);box-shadow:var(--shadow);border-radius:14px;overflow:hidden}
+  .row{display:flex;align-items:flex-start;gap:14px;padding:16px 18px;border-top:1px solid var(--line)}
+  .row:first-child{border-top:none}
+  .row .ic{width:20px;text-align:center;font-size:16px;opacity:.75;margin-top:2px}
+  .row .body{flex:1;min-width:0}
+  .row .lbl{font-weight:600;margin-bottom:2px}
+  .row .desc{color:var(--muted);font-size:12.5px}
+  .row .ctl{margin-top:9px}
+  select,input[type=password],input[type=text]{
+    width:100%;background:var(--field);border:1px solid var(--fieldline);border-radius:9px;
+    padding:9px 11px;font:inherit;color:var(--ink);-webkit-appearance:none;appearance:none}
+  select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+    background-position:calc(100% - 16px) 16px,calc(100% - 11px) 16px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+  .inline{display:flex;gap:8px;align-items:center}
+  .btn{flex:0 0 auto;background:var(--field);border:1px solid var(--fieldline);border-radius:9px;
+    padding:9px 13px;font:inherit;font-weight:600;color:var(--ink);cursor:pointer;white-space:nowrap}
+  .btn:active{transform:translateY(.5px)}
+  .btn.icon{padding:9px 11px}
+  /* toggle */
+  .sw{flex:0 0 auto;width:42px;height:25px;border-radius:13px;background:rgba(120,120,128,.3);
+    position:relative;cursor:pointer;transition:background .18s;margin-top:1px}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:21px;height:21px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .18s}
+  .sw.on{background:var(--accent)}
+  .sw.on::after{transform:translateX(17px)}
+  .keyrow{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-top:1px solid var(--line)}
+  .keyrow:first-child{border-top:none}
+  .keycap{background:rgba(120,120,128,.16);border-radius:7px;padding:4px 10px;font-weight:600;font-size:12.5px}
+  .ok{color:#16a34a}.bad{color:#dc2626}
+  .foot{color:var(--muted);font-size:12px;margin-top:30px;text-align:center}
+  /* toast */
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);
+    background:var(--accent);color:#fff;padding:10px 18px;border-radius:10px;font-weight:600;
+    opacity:0;transition:.25s;pointer-events:none}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+  <aside class="side">
+    <div class="brand"><div class="orb"></div>
+      <div><h1>THRIVBE</h1><small id="ver">voice</small></div></div>
+    <div class="nav active"><span class="i">⚙</span>Settings</div>
+    <div class="nav dim"><span class="i">🧠</span>Memory</div>
+    <div class="nav dim"><span class="i">🕘</span>Activity</div>
+    <div class="nav dim"><span class="i">🛡</span>Privacy</div>
+    <div class="grow"></div>
+    <div class="pill-cta" onclick="rpc('openSetup')">Run setup again</div>
+  </aside>
+
+  <main class="main">
+    <h2 class="hello" id="hello">Settings</h2>
+    <div class="banner">
+      <span>Double-tap <kbd>Control</kbd> to start a live conversation.</span>
+      <span class="sw" id="liveNow" onclick="rpc('toggleLive')" title="Start/stop now"></span>
+    </div>
+
+    <div class="sec">SETTINGS</div>
+    <div class="card">
+      <div class="row"><div class="ic">🎙</div><div class="body">
+        <div class="lbl">Microphone</div>
+        <div class="ctl inline">
+          <select id="mic" onchange="setVal('audio.input_device', this.value||null)"></select>
+          <button class="btn" onclick="rpc('test','mic')">Test</button>
+          <button class="btn icon" onclick="rpc('refresh')" title="Rescan devices">⟳</button>
+        </div></div></div>
+
+      <div class="row"><div class="ic">🔊</div><div class="body">
+        <div class="lbl">Speaker</div>
+        <div class="ctl inline">
+          <select id="spk" onchange="setVal('audio.output_device', this.value||null)"></select>
+          <button class="btn" onclick="rpc('test','spk')">Test</button>
+        </div></div></div>
+
+      <div class="row"><div class="ic">🗣</div><div class="body">
+        <div class="lbl">Voice <span class="desc">· OpenAI Realtime</span></div>
+        <div class="desc">The voice the agent speaks with. Applies on the next conversation.</div>
+        <div class="ctl"><select id="voice" onchange="setVal('live.voice', this.value)"></select></div>
+      </div></div>
+
+      <div class="row"><div class="ic">📝</div><div class="body">
+        <div class="lbl">Custom instructions <span class="desc">· the agent's standing briefing</span></div>
+        <div class="desc">Persona + context the agent reloads every conversation — who you are, what your workspace is for, how it should behave. You can also just tell the agent out loud to update this.</div>
+        <div class="ctl"><textarea id="prompt" rows="5" style="width:100%;box-sizing:border-box;resize:vertical;font:inherit;padding:8px"
+             placeholder="e.g. I'm Robin. My workspace ~/Thrivbe-AI runs my agency. Be direct and proactive…"
+             onchange="setVal('live.custom_prompt', this.value)"></textarea></div>
+      </div></div>
+
+      <div class="row"><div class="ic">📁</div><div class="body">
+        <div class="lbl">Base folder <span class="desc">· where the agent's terminal starts</span></div>
+        <div class="desc">The live shell and delegated tasks start here, so your project skills and files are in reach. Leave empty for your home folder.</div>
+        <div class="ctl inline">
+          <input id="workspace" type="text" readonly placeholder="~ (home folder)" style="flex:1;min-width:0">
+          <button class="btn" onclick="pickFolder()">Browse…</button>
+          <button class="btn" onclick="clearFolder()">Reset</button>
+        </div>
+      </div></div>
+
+      <div class="row"><div class="ic">🧠</div><div class="body">
+        <div class="lbl">Deep Context</div>
+        <div class="desc">Let the agent read what's under your cursor and in the focused window for better answers. Stays on your Mac — sent only to OpenAI for the reply, never stored by us.</div>
+      </div><span class="sw" id="t_deep" onclick="toggle('privacy.read_cursor_context',this)"></span></div>
+
+      <div class="row"><div class="ic">🪟</div><div class="body">
+        <div class="lbl">Full window text</div>
+        <div class="desc">Read the whole window you're in, not just under the cursor — more context for "what am I looking at". Text only, via Accessibility; fast.</div>
+      </div><span class="sw" id="t_winctx" onclick="toggle('privacy.read_window_context',this)"></span></div>
+
+      <div class="row"><div class="ic">📸</div><div class="body">
+        <div class="lbl">Window screenshot (vision)</div>
+        <div class="desc">Send a small screenshot of your focused window each turn so the agent can actually see the UI — images, layout, buttons. Needs Screen Recording permission; adds a little latency.</div>
+      </div><span class="sw" id="t_shot" onclick="toggle('privacy.read_window_screenshot',this)"></span></div>
+
+      <div class="row"><div class="ic">⚡</div><div class="body">
+        <div class="lbl">Agentic shell</div>
+        <div class="desc">Let the agent run commands, read files, and drive apps on your Mac. Powerful — leave off unless you want it acting, not just answering.</div>
+      </div><span class="sw" id="t_shell" onclick="toggle('live.agentic_shell',this)"></span></div>
+
+      <div class="row"><div class="ic">🖥</div><div class="body">
+        <div class="lbl">Activity window</div>
+        <div class="desc">Open a window that shows what the agent hears, says, and runs during a live conversation.</div>
+      </div><span class="sw" id="t_term" onclick="toggle('ui.show_terminal',this)"></span></div>
+    </div>
+
+    <div class="sec">MEMORY</div>
+    <div class="card">
+      <div class="row"><div class="ic">🧠</div><div class="body">
+        <div class="lbl">Memory source <span class="desc">· recall past conversations &amp; context</span></div>
+        <div class="desc">The agent always remembers its own conversations. Optionally connect a wider memory system to recall more.</div>
+        <div class="ctl"><select id="mem_provider" onchange="setVal('live.memory.provider', this.value); applyMemRows()">
+          <option value="none">Built-in only (this app's conversations)</option>
+          <option value="claude-mem">claude-mem (your existing memory)</option>
+          <option value="command">Custom command…</option>
+        </select></div>
+      </div></div>
+
+      <div class="row"><div class="ic">🔢</div><div class="body">
+        <div class="lbl">How much to recall</div>
+        <div class="ctl"><select id="mem_recall_count" onchange="setVal('live.memory.recall_count', parseInt(this.value,10))">
+          <option value="3">3 items</option><option value="5">5 items</option><option value="10">10 items</option>
+        </select></div>
+      </div></div>
+
+      <div class="row" id="mem_db_row"><div class="ic">🗄</div><div class="body">
+        <div class="lbl">claude-mem database</div>
+        <div class="desc">Path to claude-mem.db — used when the source is claude-mem.</div>
+        <div class="ctl inline">
+          <input id="mem_claude_db" type="text" readonly placeholder="~/.claude-mem/claude-mem.db" style="flex:1;min-width:0">
+          <button class="btn" onclick="pickMemDb()">Browse…</button>
+        </div>
+      </div></div>
+
+      <div class="row" id="mem_cmd_row"><div class="ic">⌘</div><div class="body">
+        <div class="lbl">Custom memory command</div>
+        <div class="desc">Shell command to query your own knowledge base. Use <code>{query}</code> as the placeholder.</div>
+        <div class="ctl"><input id="mem_command" type="text" placeholder="my-kb search {query}"
+             onchange="setVal('live.memory.command', this.value||null)" style="width:100%;box-sizing:border-box"></div>
+      </div></div>
+
+      <div class="row"><div class="ic">🌱</div><div class="body">
+        <div class="lbl">Keep learning</div>
+        <div class="desc">After each conversation, automatically extract durable preferences and facts, reinforce the ones that recur, and self-correct when you contradict them.</div>
+      </div><span class="sw" id="t_learn" onclick="toggle('live.memory.learn',this)"></span></div>
+
+      <div class="row" id="mem_mirror_row"><div class="ic">🔁</div><div class="body">
+        <div class="lbl">Mirror to claude-mem</div>
+        <div class="desc">Also write each new learning into your claude-mem store, so it surfaces in your wider memory too.</div>
+      </div><span class="sw" id="t_mirror" onclick="toggle('live.memory.mirror_claude_mem',this)"></span></div>
+    </div>
+
+    <div class="sec">ACCOUNT</div>
+    <div class="card">
+      <div class="row"><div class="ic">🔑</div><div class="body">
+        <div class="lbl">OpenAI API key <span id="keystat" class="desc"></span></div>
+        <div class="desc">Required — powers the live voice conversation. Get one at platform.openai.com/api-keys</div>
+        <div class="ctl inline">
+          <input id="key" type="password" placeholder="sk-…">
+          <button class="btn" onclick="saveKey()">Save</button>
+        </div>
+      </div></div>
+    </div>
+
+    <div class="sec">KEYBINDINGS</div>
+    <div class="card">
+      <div class="keyrow"><span>Start / stop live conversation</span>
+        <span class="keycap" id="hotkey">Double-tap Control</span></div>
+    </div>
+
+    <div class="sec">SYSTEM</div>
+    <div class="card">
+      <div class="row"><div class="ic">🔄</div><div class="body">
+        <div class="lbl">Open at login</div>
+        <div class="desc">Start Thrivbe Voice in the background when your Mac starts.</div>
+      </div><span class="sw" id="t_login" onclick="toggle('system.open_at_login',this)"></span></div>
+
+      <div class="row"><div class="ic">🔐</div><div class="body">
+        <div class="lbl">Permissions</div>
+        <div class="desc">Microphone, Accessibility, and Input Monitoring are required. Open the panes to grant them.</div>
+        <div class="ctl inline">
+          <button class="btn" onclick="rpc('openPane','Privacy_Microphone')">Microphone</button>
+          <button class="btn" onclick="rpc('openPane','Privacy_Accessibility')">Accessibility</button>
+          <button class="btn" onclick="rpc('openPane','Privacy_ListenEvent')">Input Monitoring</button>
+        </div>
+      </div></div>
+    </div>
+
+    <div class="foot">Thrivbe Voice · <span id="verfoot"></span></div>
+  </main>
+
+  <div id="toast"></div>
+
+<script>
+  // --- RPC to Python (WKScriptMessageHandler) ----------------------------
+  let _id = 0; const _pending = {};
+  function rpc(fn, arg){
+    return new Promise(res=>{
+      const reqId = ++_id; _pending[reqId] = res;
+      window.webkit.messageHandlers.bridge.postMessage({fn:fn, arg:arg, reqId:reqId});
+    });
+  }
+  window.__resolve = (reqId, payload)=>{ const r=_pending[reqId]; if(r){r(payload);delete _pending[reqId];} };
+  window.__toast = (msg)=>{ const t=document.getElementById('toast'); t.textContent=msg;
+    t.classList.add('show'); clearTimeout(window.__tt); window.__tt=setTimeout(()=>t.classList.remove('show'),2200); };
+
+  function setVal(key,val){ rpc('set',{key:key,value:val}); }
+  async function pickFolder(){ const p=await rpc('pickFolder'); if(p){ document.getElementById('workspace').value=p; } }
+  function clearFolder(){ setVal('live.workspace', null); document.getElementById('workspace').value=''; }
+  async function pickMemDb(){ const p=await rpc('pickMemDb'); if(p){ document.getElementById('mem_claude_db').value=p; } }
+  function applyMemRows(){ const p=document.getElementById('mem_provider').value;
+    document.getElementById('mem_db_row').style.display = (p==='claude-mem')?'':'none';
+    document.getElementById('mem_cmd_row').style.display = (p==='command')?'':'none'; }
+  function toggle(key,el){ const on=!el.classList.contains('on'); el.classList.toggle('on',on);
+    rpc('set',{key:key,value:on}); }
+  function setSwitch(id,on){ document.getElementById(id).classList.toggle('on',!!on); }
+  function fillSelect(id,items,current){ const s=document.getElementById(id); s.innerHTML='';
+    items.forEach(function(it){ const o=document.createElement('option'); o.value=it.value; o.textContent=it.label;
+      if(it.value===(current==null?'':current)) o.selected=true; s.appendChild(o); }); }
+
+  async function saveKey(){ const v=document.getElementById('key').value.trim(); if(!v) return;
+    const r=await rpc('setKey',v); document.getElementById('key').value='';
+    if(r) window.__push(r); }
+
+  // Python pushes the full state here.
+  window.__push = function(s){
+    document.getElementById('hello').textContent = s.greeting || 'Settings';
+    document.getElementById('ver').textContent = s.version || 'voice';
+    document.getElementById('verfoot').textContent = 'v'+(s.version||'');
+    const dev = function(a){ return (a||[]).map(function(n){return {value:n,label:n};}); };
+    fillSelect('mic', [{value:'',label:'System default'}].concat(dev(s.mics)), s.mic);
+    fillSelect('spk', [{value:'',label:'System default'}].concat(dev(s.spk)), s.speaker);
+    fillSelect('voice', dev(s.voices), s.voice);
+    document.getElementById('workspace').value = s.workspace || '';
+    document.getElementById('mem_provider').value = s.mem_provider || 'none';
+    document.getElementById('mem_recall_count').value = String(s.mem_recall_count || 5);
+    document.getElementById('mem_claude_db').value = s.mem_claude_db || '';
+    document.getElementById('mem_command').value = s.mem_command || '';
+    setSwitch('t_learn', s.mem_learn);
+    setSwitch('t_mirror', s.mem_mirror);
+    applyMemRows();
+    document.getElementById('prompt').value = s.custom_prompt || '';
+    setSwitch('t_deep', s.deep_context);
+    setSwitch('t_winctx', s.window_context);
+    setSwitch('t_shot', s.window_screenshot);
+    setSwitch('t_shell', s.agentic_shell);
+    setSwitch('t_term', s.activity_window);
+    setSwitch('t_login', s.open_at_login);
+    setSwitch('liveNow', s.live_on);
+    document.getElementById('hotkey').textContent = s.hotkey || 'Double-tap Control';
+    const ks=document.getElementById('keystat');
+    ks.textContent = s.key_present ? '· connected' : '· not set';
+    ks.className = 'desc ' + (s.key_present?'ok':'bad');
+  };
+  rpc('ready');
+</script>
+</body>
+</html>

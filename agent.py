@@ -6,7 +6,7 @@ conversation: OpenAI Realtime speech-to-speech (in realtime.py), with barge-in, 
 optional agentic shell, cross-session memory, and awareness of what's under your
 cursor. One mode, one voice (OpenAI) — no push-to-talk, no ElevenLabs.
 """
-import os, sys, subprocess, threading, time
+import os, sys, subprocess, tempfile, threading, time
 
 # py2app puts the frozen python312.zip ahead of Contents/Resources on sys.path,
 # so `import realtime/pill/config` would load STALE zipped copies. Put our own dir
@@ -104,9 +104,11 @@ def _ax(el, attr):
     except Exception:
         return None
 
-def _collect_text(el, out, depth=0):
-    """Walk the element's subtree, gathering visible text (value/title/desc)."""
-    if depth > 8 or len(out) >= 60:
+def _collect_text(el, out, depth=0, max_depth=8, max_items=60, child_cap=25):
+    """Walk the element's subtree, gathering visible text (value/title/desc).
+    Budgets are bounded so even a huge window (Chrome DOM) stays fast; callers pass
+    larger budgets for whole-window capture, defaults keep cursor capture cheap."""
+    if depth > max_depth or len(out) >= max_items:
         return
     for attr in ("AXSelectedText", "AXValue", "AXTitle", "AXDescription"):
         v = _ax(el, attr)
@@ -116,8 +118,8 @@ def _collect_text(el, out, depth=0):
                 out.append(s)
     kids = _ax(el, "AXChildren")
     if kids:
-        for k in list(kids)[:25]:
-            _collect_text(k, out, depth + 1)
+        for k in list(kids)[:child_cap]:
+            _collect_text(k, out, depth + 1, max_depth, max_items, child_cap)
 
 def _selected_text():
     """Whatever the user has highlighted, via the focused element (fast, no Cmd-C)."""
@@ -133,34 +135,109 @@ def _selected_text():
     return ""
 
 def grab_context():
-    """Context for the agent: (1) text the user has MARKED/selected, and
-    (2) the CONTENT under the mouse cursor. Both via AX — fast, no Cmd-C."""
+    """Text context for the agent, each part independently toggleable in Settings:
+      • read_cursor_context  → MARKED selection + CONTENT under the mouse cursor
+      • read_window_context  → the FULL focused window's text (larger context)
+    Both via AX — fast, no Cmd-C. (The screenshot/vision part is separate, see
+    grab_window_screenshot.)"""
     app = osa('tell application "System Events" to name of first process whose frontmost is true')
     parts = []
 
-    selected = _selected_text()
-    if selected:
-        parts.append(f"The user has MARKED this text (prioritise it):\n{selected[:3500]}")
+    if config.get("privacy.read_cursor_context", True):
+        selected = _selected_text()
+        if selected:
+            parts.append(f"The user has MARKED this text (prioritise it):\n{selected[:3500]}")
+        try:
+            from Quartz import CGEventCreate, CGEventGetLocation
+            from ApplicationServices import (
+                AXUIElementCreateSystemWide, AXUIElementCopyElementAtPosition)
+            loc = CGEventGetLocation(CGEventCreate(None))
+            err, el = AXUIElementCopyElementAtPosition(
+                AXUIElementCreateSystemWide(), loc.x, loc.y, None)
+            if err == 0 and el is not None:
+                texts = []
+                _collect_text(el, texts)
+                blob = "\n".join(texts)[:3500]
+                if blob.strip():
+                    parts.append(f"Content under the mouse cursor:\n{blob}")
+        except Exception as e:
+            LOG(f"cursor context failed: {e}")
 
-    try:
-        from Quartz import CGEventCreate, CGEventGetLocation
-        from ApplicationServices import (
-            AXUIElementCreateSystemWide, AXUIElementCopyElementAtPosition)
-        loc = CGEventGetLocation(CGEventCreate(None))
-        err, el = AXUIElementCopyElementAtPosition(
-            AXUIElementCreateSystemWide(), loc.x, loc.y, None)
-        if err == 0 and el is not None:
-            texts = []
-            _collect_text(el, texts)
-            blob = "\n".join(texts)[:3500]
-            if blob.strip():
-                parts.append(f"Content under the mouse cursor:\n{blob}")
-    except Exception as e:
-        LOG(f"cursor context failed: {e}")
+    if config.get("privacy.read_window_context", False):
+        try:
+            from ApplicationServices import AXUIElementCreateSystemWide
+            fapp = _ax(AXUIElementCreateSystemWide(), "AXFocusedApplication")
+            win = _ax(fapp, "AXFocusedWindow") if fapp is not None else None
+            if win is not None:
+                title = _ax(win, "AXTitle") or ""
+                wt = []
+                _collect_text(win, wt, max_depth=12, max_items=200, child_cap=40)
+                blob = "\n".join(wt)[:6000]
+                if blob.strip():
+                    label = f"{app}" + (f" — {title}" if title else "")
+                    parts.append(f"The full window I'm in ({label}) — larger context:\n{blob}")
+        except Exception as e:
+            LOG(f"window context failed: {e}")
 
     if parts:
         return f"App: {app}\n\n" + "\n\n".join(parts)
-    return f"Frontmost app: {app} (no marked text or readable content under cursor)"
+    return f"Frontmost app: {app} (no readable text context)"
+
+
+def _focused_window_region():
+    """'x,y,w,h' of the frontmost app's largest on-screen window (for screencapture -R),
+    or '' to fall back to the full screen. Uses CGWindowList so no AXValue geometry math."""
+    try:
+        from AppKit import NSWorkspace
+        import Quartz
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        pid = app.processIdentifier() if app else -1
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID) or []
+        best, best_area = None, 0
+        for w in wins:
+            if w.get("kCGWindowOwnerPID") != pid or w.get("kCGWindowLayer", 0) != 0:
+                continue
+            b = w.get("kCGWindowBounds") or {}
+            area = (b.get("Width", 0) or 0) * (b.get("Height", 0) or 0)
+            if area > best_area:
+                best_area, best = area, b
+        if best:
+            return f"{int(best['X'])},{int(best['Y'])},{int(best['Width'])},{int(best['Height'])}"
+    except Exception as e:
+        LOG(f"window region failed: {e}")
+    return ""
+
+
+def grab_window_screenshot(max_dim=900, quality=45):
+    """The focused window as a small JPEG (base64, no data-URI header), or '' on failure.
+    Fast by design: captures only the focused window region (not the whole screen) and
+    downscales hard — small payload = lower vision latency + cost. Needs macOS Screen
+    Recording permission; without it the capture is empty and we return ''."""
+    import base64 as _b64
+    f = os.path.join(tempfile.gettempdir(), "tv_window_ctx.jpg")
+    region = _focused_window_region()
+    cap = ["screencapture", "-x", "-o", "-t", "jpg"]
+    if region:
+        cap += ["-R", region]
+    cap.append(f)
+    try:
+        subprocess.run(cap, capture_output=True, timeout=4)
+        # Hard downscale + recompress for speed and token cost (best-effort).
+        subprocess.run(["sips", "-Z", str(max_dim), "-s", "formatOptions", str(quality), f],
+                       capture_output=True, timeout=4)
+        with open(f, "rb") as fh:
+            data = fh.read()
+        return _b64.b64encode(data).decode() if data else ""
+    except Exception as e:
+        LOG(f"window screenshot failed: {e}")
+        return ""
+    finally:
+        try:
+            os.remove(f)
+        except Exception:
+            pass
 
 
 # --- menubar app ------------------------------------------------------------
@@ -175,31 +252,33 @@ class VoiceAgent(rumps.App):
         self.live = None
         self.pill = None
         self._pill_shown = False
+        self._term_win_id = None      # Terminal window id of the Activity feed, if open
         # double-tap Control detection
         self._ctrl_press_t = 0.0
         self._ctrl_clean = False     # True while a Control press has no other key with it
         self._last_ctrl_tap = 0.0
-        self.shell_item = rumps.MenuItem("Agentic shell (runs commands)", callback=self.toggle_shell)
-        self.shell_item.state = 1 if config.get("live.agentic_shell", False) else 0
-        ins, outs = self._list_audio()
-        self._mic_root, self._mic_items = self._device_submenu(
-            "🎙 Microphone", config.get("audio.input_device"), ins, self._pick_mic)
-        self._spk_root, self._spk_items = self._device_submenu(
-            "🔊 Speaker", config.get("audio.output_device"), outs, self._pick_spk)
+        # Slim menu — everything configurable now lives in the Settings window.
         self.menu = [
             rumps.MenuItem("🎧 Live conversation (double-tap Control)", callback=lambda _: self.toggle_live()),
-            None,
-            self.shell_item,
-            self._mic_root,
-            self._spk_root,
-            None,
-            rumps.MenuItem("Set OpenAI key…", callback=lambda _: self._set_key("openai", "OpenAI API key (sk-…)")),
-            rumps.MenuItem("Run setup again…", callback=lambda _: self._onboard(force=True)),
+            rumps.MenuItem("⚙ Settings…", callback=lambda _: self._open_settings()),
             None,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
+        # Auto-wake: detached delegate jobs drop a .done sentinel in config.TASKS_DIR
+        # when they finish. Seed _announced with any that already exist so we don't
+        # replay stale results on launch, then poll for new ones.
+        self._announced = set()
+        try:
+            config.ensure_dirs()
+            for f in os.listdir(config.TASKS_DIR):
+                if f.endswith(".done"):
+                    self._announced.add(f[:-5])
+        except Exception as e:
+            LOG(f"task seed failed: {e!r}")
         # reflect status into the menubar icon from the main thread
         rumps.Timer(self._tick, 0.3).start()
+        rumps.Timer(self._check_tasks, 2.0).start()
+        rumps.Timer(self._pump_pill_level, 0.05).start()   # feed mic level into the wave
         self.hotkey_listener = keyboard.Listener(
             on_press=self._on_key_press,
             on_release=self._on_key_release,
@@ -213,7 +292,14 @@ class VoiceAgent(rumps.App):
                                "Enable 'Thrivbe Voice' in Accessibility + Input Monitoring, then relaunch.")
         print("Ready: double-tap Control for a live conversation.")
 
-    ICONS = {"idle": "🎙", "listening": "🔴", "thinking": "💭", "speaking": "🗣"}
+    ICONS = {"idle": "🎙", "listening": "🔴", "thinking": "💭", "acting": "⚙️", "speaking": "🗣"}
+
+    def _open_settings(self):
+        try:
+            import settings
+            settings.open_settings(self)
+        except Exception as e:
+            LOG(f"open settings failed: {e!r}")
 
     def _tick(self, _):
         if not self._setup_checked:        # first-run onboarding, once the app loop is live
@@ -222,9 +308,28 @@ class VoiceAgent(rumps.App):
         self.title = self.ICONS.get(self.status, "🎙")
         self._reconcile_pill()
 
+    def _pump_pill_level(self, _):
+        """Feed the live conversation's mic level into the wave pill (main-thread).
+        Cheap no-op when not in a live conversation or the pill isn't shown."""
+        live = getattr(self, "live", None)
+        if not (self.live_on and live is not None and self.pill is not None and self._pill_shown):
+            return
+        # precise colour: apply the state the instant it changes (≤50ms), not on the 0.3s tick
+        st = self.status if self.status in ("listening", "thinking", "acting", "speaking") else "listening"
+        if st != getattr(self, "_pill_state_last", None):
+            self._pill_state_last = st
+            try:
+                self.pill.set_state(st)
+            except Exception:
+                pass
+        try:
+            self.pill.set_level(float(getattr(live, "level", 0.0)))
+        except Exception:
+            pass
+
     def _reconcile_pill(self):
         """Show/hide/update the floating pill — main-thread only (called from _tick)."""
-        pill_state = self.status if self.status in ("listening", "thinking", "speaking") else "listening"
+        pill_state = self.status if self.status in ("listening", "thinking", "acting", "speaking") else "listening"
         if self.live_on:
             if self.pill is None:
                 try:
@@ -241,20 +346,106 @@ class VoiceAgent(rumps.App):
         elif self.pill is not None and self._pill_shown:
             self.pill.hide()
             self._pill_shown = False
+            self._pill_state_last = None
 
-    def toggle_shell(self, item):
-        on = not bool(item.state)
-        item.state = 1 if on else 0
-        config.set_("live.agentic_shell", on)
-        rumps.notification("Thrivbe Voice", f"Agentic shell {'ON' if on else 'OFF'}",
-                           "Restart live conversation to apply." if on else
-                           "Live mode will only answer, not run commands.")
+    def _open_activity_window(self):
+        """Open a Terminal window tailing the curated Activity feed (not the raw log).
+        Remembers the window id so the conversation can close it again."""
+        if self._term_win_id:
+            return
+        try:
+            config.activity("— watching —")   # guarantees the file exists for tail
+            path = config.ACTIVITY_PATH.replace('"', '\\"')
+            script = (
+                'tell application "Terminal"\n'
+                ' activate\n'
+                f' do script "clear; tail -n 50 -f \\"{path}\\""\n'
+                ' return id of window 1\n'
+                'end tell')
+            r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+            self._term_win_id = r.stdout.strip() or None
+        except Exception as e:
+            LOG(f"activity window failed: {e!r}")
 
-    # --- audio device pickers -----------------------------------------------
+    def _close_activity_window(self):
+        """Close the Activity window when the conversation ends (if we opened one)."""
+        wid, self._term_win_id = self._term_win_id, None
+        if not wid:
+            return
+        try:
+            subprocess.run(["osascript", "-e",
+                f'tell application "Terminal" to close (every window whose id is {wid})'],
+                capture_output=True, text=True)
+        except Exception as e:
+            LOG(f"activity window close failed: {e!r}")
+
+    # --- auto-wake on background task completion -----------------------------
+    def _check_tasks(self, _):
+        """Main-thread poll: when a delegated job drops a .done sentinel, wake the
+        agent (if idle) to speak its result. Skips jobs finished while we're already
+        live — the user is mid-conversation, so we don't barge in (the .out file
+        stays on disk; ponytail: idle-only auto-wake, no queueing)."""
+        try:
+            for f in sorted(os.listdir(config.TASKS_DIR)):
+                if not f.endswith(".done"):
+                    continue
+                tid = f[:-5]
+                if tid in self._announced:
+                    continue
+                self._announced.add(tid)
+                if self.live_on:
+                    LOG(f"task {tid} done while live — not auto-waking")
+                    continue
+                LOG(f"task {tid} done -> waking to speak result")
+                self._wake_and_speak(self._read_task_out(tid))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            LOG(f"task check failed: {e!r}")
+
+    def _read_task_out(self, tid):
+        """Read a finished job's captured output, stripped of terminal escape codes."""
+        try:
+            with open(os.path.join(config.TASKS_DIR, f"{tid}.out"),
+                      encoding="utf-8", errors="replace") as fh:
+                import re
+                txt = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", fh.read()).strip()
+        except Exception:
+            txt = ""
+        return txt or "(the task finished but produced no output)"
+
+    def _wake_and_speak(self, text):
+        """Open a live session that speaks `text` first, then stays listening so the
+        user can follow up and close it manually. Mirrors toggle_live's start path."""
+        if config.get("ui.show_terminal", False):
+            config.reset_activity()
+            self._open_activity_window()
+        try:
+            import realtime
+            self.live = realtime.LiveSession(on_state=self._on_live_state, announce=text)
+            self.live_on = True
+            self.status = "listening"
+            self.live.start()
+        except Exception as e:
+            LOG(f"wake-and-speak failed: {e!r}")
+            self.live_on = False
+            self.status = "idle"
+
+    # --- audio device list (consumed by the Settings window) ----------------
     def _list_audio(self):
-        """(input names, output names) for the device-picker submenus."""
+        """(input names, output names) for the device pickers."""
         try:
             import sounddevice as sd
+            # PortAudio caches the device list at init, so hot-plugged gear (a
+            # reconnected headset, AirPods, etc.) never appears until we re-init.
+            # Refresh it first so the pickers always mirror the live system.
+            # ponytail: global re-init would kill an active stream — skip mid-call;
+            #           drop the guard once devices are scanned only when idle.
+            if not self.live_on:
+                try:
+                    sd._terminate(); sd._initialize()
+                except Exception as e:
+                    LOG(f"audio reinit skipped: {e!r}")
             ins, outs = [], []
             for d in sd.query_devices():
                 if d["max_input_channels"] > 0 and d["name"] not in ins:
@@ -265,38 +456,6 @@ class VoiceAgent(rumps.App):
         except Exception as e:
             LOG(f"audio list failed: {e!r}")
             return [], []
-
-    def _device_submenu(self, title, current, names, cb):
-        """Build a submenu of 'System default' + each device, checkmarking the
-        current choice. Returns (root MenuItem, [child items])."""
-        root = rumps.MenuItem(title)
-        items = []
-        default = rumps.MenuItem("System default", callback=cb)
-        default.state = 0 if current else 1
-        root.add(default); items.append(default)
-        for n in names:
-            it = rumps.MenuItem(n, callback=cb)
-            it.state = 1 if (current and current == n) else 0
-            root.add(it); items.append(it)
-        return root, items
-
-    def _check_group(self, items, sender):
-        for it in items:
-            it.state = 1 if it is sender else 0
-
-    def _pick_mic(self, sender):
-        name = None if sender.title == "System default" else sender.title
-        config.set_("audio.input_device", name)
-        self._check_group(self._mic_items, sender)
-        rumps.notification("Thrivbe Voice", "Microphone set",
-                           f"{sender.title} — applies on next live conversation")
-
-    def _pick_spk(self, sender):
-        name = None if sender.title == "System default" else sender.title
-        config.set_("audio.output_device", name)
-        self._check_group(self._spk_items, sender)
-        rumps.notification("Thrivbe Voice", "Speaker set",
-                           f"{sender.title} — applies on next live conversation")
 
     # --- onboarding / settings (product setup) ------------------------------
     def _set_key(self, name, prompt):
@@ -383,8 +542,12 @@ class VoiceAgent(rumps.App):
                 self.live.stop()
                 self.live = None
             self.status = "idle"
+            self._close_activity_window()   # detached background jobs keep running
             return
         LOG("LIVE: starting")
+        if config.get("ui.show_terminal", False):
+            config.reset_activity()         # fresh feed for this conversation
+            self._open_activity_window()
         try:
             import realtime
             self.live = realtime.LiveSession(on_state=self._on_live_state)

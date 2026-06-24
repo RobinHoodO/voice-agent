@@ -247,24 +247,32 @@ Secrets are **not** in this file — they're in the Keychain.
 
 ## 8. Roadmap (build order)
 
-1. **Foundation (now):** `config.py` (config dir + Keychain + settings), de-hardcode
-   `agent.py`/`realtime.py`, secrets from Keychain w/ `.env` dev fallback. ← in progress
-2. **Onboarding + Settings (next):** first-run flow, key validation, permission
+1. **Foundation (done):** `config.py` (config dir + Keychain + settings), de-hardcoded
+   `agent.py`/`realtime.py`, secrets from Keychain w/ `.env` dev fallback.
+2. **Onboarding + Settings (done):** first-run flow, key validation, permission
    deep-links, device pickers, preferences window.
-3. **Hardening:** agentic-shell off-by-default + consent gate, command allowlist
-   option, privacy toggles.
-4. **Packaging:** Developer ID signing + notarization + DMG + Sparkle auto-update.
-5. **Commerce:** trial + license activation; pick Gumroad/Paddle/Setapp.
-6. **Lite/MAS (optional):** sandboxed voice-Q&A-only edition for App Store funnel.
+3. **Memory + perception (done):** app-owned conversation store (SQLite+FTS) with a
+   continuous-learning loop — extracts durable preferences/facts/corrections on each
+   close, reinforces what recurs, supersedes on contradiction; optional claude-mem
+   mirror. On-screen context the user can mix-and-match: cursor/marked text, full
+   focused-window text, and a focused-window screenshot (vision). See `LEARNING-PLAN.md`.
+4. **Hardening:** agentic-shell off-by-default + consent gate, command allowlist
+   option, privacy toggles (cursor/window/screenshot done; allowlist next).
+5. **Packaging:** Developer ID signing + notarization + DMG + Sparkle auto-update.
+6. **Commerce:** trial + license activation; pick Gumroad/Paddle/Setapp.
+7. **Lite/MAS (optional):** sandboxed voice-Q&A-only edition for App Store funnel.
 
 ---
 
 ## Build status
 
 - [x] Personal MVP: push-to-talk + live agentic mode working
-- [ ] `config.py` foundation (per-user config + Keychain)  ← building now
-- [ ] de-hardcode paths/keys/devices
-- [ ] onboarding flow
-- [ ] settings window
+- [x] `config.py` foundation (per-user config + Keychain)
+- [x] de-hardcode paths/keys/devices
+- [x] onboarding flow
+- [x] settings window
+- [x] conversation memory + continuous learning (reinforce / supersede / decay)
+- [x] selectable screen context: cursor text · full-window text · window screenshot (vision)
+- [ ] command allowlist + kill-switch (hardening)
 - [ ] signing/notarization pipeline
 - [ ] licensing + auto-update
