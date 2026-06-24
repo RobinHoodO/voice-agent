@@ -8,8 +8,8 @@ refreshes cursor/selection context each turn. agent.py starts/stops it.
 
 Standalone check (no GUI, text only):  .venv/bin/python realtime.py --selftest
 
-Agent helpers (LOG, grab_context, run_shell, SYSTEM) are imported lazily inside
-methods, not at module top — this breaks the agent<->realtime import cycle and
+Agent helpers (LOG, run_shell, SYSTEM) are imported lazily inside methods, not at
+module top; screen context comes from macos_context. This breaks the agent<->realtime cycle and
 keeps --selftest from pulling in rumps/ffmpeg.
 """
 import asyncio
@@ -880,7 +880,7 @@ def _grab_context() -> str:
             or config.get("privacy.read_window_context", False)):
         return "(deep context off)"
     try:
-        from agent import grab_context
+        from macos_context import grab_context
         return grab_context()
     except Exception as e:
         _log(f"grab_context failed: {e!r}")
@@ -892,7 +892,7 @@ def _grab_screenshot() -> str:
     if not config.get("privacy.read_window_screenshot", False):
         return ""
     try:
-        from agent import grab_window_screenshot
+        from macos_context import grab_window_screenshot
         return grab_window_screenshot()
     except Exception as e:
         _log(f"grab_screenshot failed: {e!r}")
