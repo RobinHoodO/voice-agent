@@ -319,7 +319,9 @@ class LiveSession(AudioMixin):
     async def _speak_announcement(self) -> None:
         """Auto-wake greeting: the menubar watcher opened this session because a
         background task finished. Tell the model to report the result out loud."""
-        txt = (self._announce or "")[:2500]
+        # Keep the TAIL, not the head: the VERIFIED/UNVERIFIED/FAILED tag is the last line,
+        # so truncating from the front would drop the very verdict we want spoken.
+        txt = (self._announce or "")[-2500:]
         self._announce = None
         config.activity("🔔  task finished — speaking result")
         await self._ws.send(json.dumps({

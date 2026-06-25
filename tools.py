@@ -100,6 +100,26 @@ def _verify_wrap(instruction: str) -> str:
     return f"{VERIFY_HARNESS}\n\n--- TASK ---\n{instruction}"
 
 
+def _completion_signal(out: str, done: str) -> str:
+    """Instruction appended to WATCHED tasks. An interactive agent never exits, so the
+    shell can't drop the .done sentinel — instead the agent self-reports: its last action
+    writes the final report (incl. the VERIFIED/… tag) to <out> and touches <done>, which
+    the menubar poller already watches to auto-wake and speak. No duplicate run, no stream
+    parsing — same wake path as headless."""
+    return ("\n\n--- SIGNAL COMPLETION (REQUIRED) ---\n"
+            "You are running in a terminal the user is watching live, and your process will "
+            "NOT exit on its own — so the voice agent only learns you're done if you tell it. "
+            "As your VERY LAST action, after you have finished AND verified, use your shell "
+            "tool exactly once to write your final report (a short summary plus the "
+            "VERIFIED/UNVERIFIED/FAILED tag line) to the result file and then create the done "
+            "marker:\n"
+            f"  cat > {shlex.quote(out)} <<'REPORT'\n"
+            "  <your final summary and the VERIFIED/UNVERIFIED/FAILED tag>\n"
+            "REPORT\n"
+            f"  touch {shlex.quote(done)}\n"
+            "Without this, the user never hears your result.")
+
+
 def _build_delegate_cmd(instruction: str, cfg: dict):
     """Write the instruction to a prompt file and return (shell command, out_path) that
     runs the background agent DETACHED, capturing output to TASKS_DIR/<id>.out and
@@ -121,21 +141,25 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
         pf = os.path.join(config.TASKS_DIR, f"{tid}.prompt")
         out = os.path.join(config.TASKS_DIR, f"{tid}.out")
         done = os.path.join(config.TASKS_DIR, f"{tid}.done")
+        watch = bool(live.get("show_task_terminals"))
+        # Watched tasks self-report completion (the agent writes <out> + touches <done>);
+        # headless tasks have the shell do it via the runner below.
+        prompt_text = instruction + _completion_signal(out, done) if watch else instruction
         with open(pf, "w", encoding="utf-8") as f:
-            f.write(instruction)
+            f.write(prompt_text)
         # $(cat prompt) avoids any shell-injection from the instruction text itself.
         # </dev/null is essential: detached under the live shell, the agent would
         # otherwise inherit an open stdin that never EOFs and block forever (0% CPU,
         # no output, no .done — so the auto-wake never fires).
         runner = (f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null > {shlex.quote(out)} 2>&1; '
                   f'touch {shlex.quote(done)}')
-        if live.get("show_task_terminals"):
+        if watch:
             # Open the agent INTERACTIVELY in its own Terminal (real TTY → the full live
             # agent UI: tool calls, streaming, progress). The instruction is passed as the
             # initial message, exactly as if the user typed it. NO `-p` and NO pipe — a pipe
-            # strips the TTY and pi falls back to writing only its final answer (which is why
-            # tee/tail looked frozen). Trade-off: pi stays open for you to watch, so there is
-            # no auto-captured result for the menubar watcher to speak — watching IS the UX.
+            # strips the TTY and pi falls back to writing only its final answer. The agent
+            # self-reports completion (see _completion_signal) so the watcher still auto-wakes
+            # and speaks the result — watching AND a spoken result, from one run.
             interactive_cmd = agent_cmd.replace("pi -p", "pi").replace("claude -p", "claude")
             # A new Terminal window opens in $HOME, so claude/pi would prompt "trust this
             # folder?" every time. cd into the workspace (already a trusted folder) first so
@@ -214,12 +238,24 @@ if __name__ == "__main__":
         assert "--- TASK ---" in written and "desktop icons" in written
         assert _build_delegate_cmd("anything", {"live": {"delegate": "off"}}) is None
         assert _build_delegate_cmd("", cfg) is None
-        # Watch mode: the Terminal must cd into the trusted workspace so the
-        # "trust this folder?" dialog never fires.
-        wcmd, _ = _build_delegate_cmd("x", {"live": {"delegate": "claude",
-                                                     "show_task_terminals": True,
-                                                     "workspace": "~/Thrivbe-AI"}})
+        # Watch mode: the Terminal must cd into the trusted workspace (no trust prompt),
+        # and the prompt must carry the self-report completion signal so the watcher still
+        # auto-wakes and speaks — referencing this task's own .out and .done paths.
+        wcmd, wout = _build_delegate_cmd("x", {"live": {"delegate": "claude",
+                                                        "show_task_terminals": True,
+                                                        "workspace": "~/Thrivbe-AI"}})
         assert "cd " in wcmd and "Thrivbe-AI" in wcmd, "watch-mode cmd must cd into workspace"
-        print("tools self-check OK — verify harness wraps every delegated task")
+        wdone = wout[:-4] + ".done"
+        wprompt = next(p for p in (os.path.join(config.TASKS_DIR, f)
+                                   for f in os.listdir(config.TASKS_DIR) if f.endswith(".prompt"))
+                       if "SIGNAL COMPLETION" in open(p, encoding="utf-8").read())
+        wtext = open(wprompt, encoding="utf-8").read()
+        assert wout in wtext and wdone in wtext, "completion signal must name this task's out+done"
+        # Headless prompts must NOT carry it (the shell drops .done for them).
+        hcmd, hout = _build_delegate_cmd("y", {"live": {"delegate": "pi"}})
+        hprompt = hout[:-4] + ".prompt"
+        assert "SIGNAL COMPLETION" not in open(hprompt, encoding="utf-8").read(), \
+            "headless prompt must not carry the completion signal"
+        print("tools self-check OK — verify harness + watch self-report wired")
     finally:
         config.TASKS_DIR = orig_tasks
