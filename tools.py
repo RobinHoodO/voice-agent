@@ -137,7 +137,11 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
             # tee/tail looked frozen). Trade-off: pi stays open for you to watch, so there is
             # no auto-captured result for the menubar watcher to speak — watching IS the UX.
             interactive_cmd = agent_cmd.replace("pi -p", "pi").replace("claude -p", "claude")
-            term = f'{interactive_cmd} "$(cat {shlex.quote(pf)})"'
+            # A new Terminal window opens in $HOME, so claude/pi would prompt "trust this
+            # folder?" every time. cd into the workspace (already a trusted folder) first so
+            # the agent starts where the project lives and the trust dialog never fires.
+            ws = os.path.expanduser(live.get("workspace") or "~")
+            term = f'cd {shlex.quote(ws)} && {interactive_cmd} "$(cat {shlex.quote(pf)})"'
             osa = f'tell application "Terminal" to do script {json.dumps(term)}'
             cmd = f"osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
         else:
@@ -210,6 +214,12 @@ if __name__ == "__main__":
         assert "--- TASK ---" in written and "desktop icons" in written
         assert _build_delegate_cmd("anything", {"live": {"delegate": "off"}}) is None
         assert _build_delegate_cmd("", cfg) is None
+        # Watch mode: the Terminal must cd into the trusted workspace so the
+        # "trust this folder?" dialog never fires.
+        wcmd, _ = _build_delegate_cmd("x", {"live": {"delegate": "claude",
+                                                     "show_task_terminals": True,
+                                                     "workspace": "~/Thrivbe-AI"}})
+        assert "cd " in wcmd and "Thrivbe-AI" in wcmd, "watch-mode cmd must cd into workspace"
         print("tools self-check OK — verify harness wraps every delegated task")
     finally:
         config.TASKS_DIR = orig_tasks
