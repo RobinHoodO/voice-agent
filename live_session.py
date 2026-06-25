@@ -328,7 +328,12 @@ class LiveSession(AudioMixin):
                      "content": [{"type": "input_text",
                                   "text": ("[A background task you started earlier just finished. "
                                            "Greet me briefly and tell me out loud, in 1-3 sentences, "
-                                           "what it found. Result:\n" + txt + "\n]")}]},
+                                           "what it found. The result ends with a status tag — "
+                                           "VERIFIED means it confirmed the end-state (say it's done); "
+                                           "UNVERIFIED means it could NOT confirm it (say so plainly — "
+                                           "tell me what couldn't be confirmed, don't imply success); "
+                                           "FAILED means it didn't work. Be honest about which it is. "
+                                           "Result:\n" + txt + "\n]")}]},
         }))
         await self._ws.send(json.dumps({"type": "response.create"}))
 

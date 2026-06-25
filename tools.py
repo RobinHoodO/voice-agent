@@ -77,6 +77,29 @@ TOOLS = [
 ]
 
 
+# Verify-or-be-honest harness wrapped around EVERY delegated instruction. The
+# background agent has file/bash tools, so it can observe the real end-state — this
+# forces it to, instead of declaring success off a proxy (a script's "done" echo, a
+# tool's own success message). The closing VERIFIED/UNVERIFIED/FAILED tag is what the
+# voice agent relays out loud, so an honest "couldn't confirm" reaches the user.
+VERIFY_HARNESS = """Work to a VERIFIED end-state — not an "I ran the command" proxy.
+
+1. GOAL AS OBSERVABLE STATE: before acting, restate the task as a concrete, checkable end-state — what should be TRUE and directly observable when it's done (a file's contents, a command's output, a value on screen, a process running).
+2. ACT: do the task.
+3. VERIFY INDEPENDENTLY: confirm that end-state by OBSERVING it directly — read the file back, re-run the query, check the actual result. Never trust a tool's own "done"/success message or a script's echo: that is a proxy, not proof.
+4. ITERATE: if verification fails, diagnose and try a DIFFERENT approach. Repeat act→verify until the end-state actually holds, or you've genuinely exhausted reasonable approaches.
+5. REPORT HONESTLY — end your final message with exactly one tag line:
+   VERIFIED: <what's true now, and how you observed it>
+   UNVERIFIED: <what you did, what you could NOT confirm, and why>
+   FAILED: <what blocked it, what you tried>
+Never claim success you didn't independently observe. An honest "couldn't confirm" beats a false "done"."""
+
+
+def _verify_wrap(instruction: str) -> str:
+    """Prepend the verify-or-be-honest harness to a delegated instruction."""
+    return f"{VERIFY_HARNESS}\n\n--- TASK ---\n{instruction}"
+
+
 def _build_delegate_cmd(instruction: str, cfg: dict):
     """Write the instruction to a prompt file and return (shell command, out_path) that
     runs the background agent DETACHED, capturing output to TASKS_DIR/<id>.out and
@@ -87,6 +110,7 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
     mode = live.get("delegate", "pi")
     if not instruction or mode == "off":
         return None
+    instruction = _verify_wrap(instruction)
     if mode == "claude":
         agent_cmd = "claude -p"
     else:
@@ -167,3 +191,25 @@ def _put_text(text: str, paste: bool = True) -> str:
     if r.returncode != 0:
         return "copied to the clipboard — press Cmd-V to paste it in (auto-paste needs Accessibility permission)"
     return "pasted it into the front window"
+
+
+if __name__ == "__main__":
+    # Self-check: every built delegate command must carry the verify harness (so the
+    # background agent verifies the real end-state), and delegation-off must return None.
+    import tempfile
+    cfg = {"live": {"delegate": "pi", "show_task_terminals": False}}
+    orig_tasks = config.TASKS_DIR
+    config.TASKS_DIR = tempfile.mkdtemp()
+    try:
+        cmd, out = _build_delegate_cmd("organize my desktop icons", cfg)
+        pf = os.path.join(config.TASKS_DIR,
+                          [f for f in os.listdir(config.TASKS_DIR) if f.endswith(".prompt")][0])
+        with open(pf, encoding="utf-8") as f:
+            written = f.read()
+        assert written.startswith(VERIFY_HARNESS), "harness missing from delegated prompt"
+        assert "--- TASK ---" in written and "desktop icons" in written
+        assert _build_delegate_cmd("anything", {"live": {"delegate": "off"}}) is None
+        assert _build_delegate_cmd("", cfg) is None
+        print("tools self-check OK — verify harness wraps every delegated task")
+    finally:
+        config.TASKS_DIR = orig_tasks
