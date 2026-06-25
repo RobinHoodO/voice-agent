@@ -185,6 +185,7 @@ def _state() -> dict:
         "window_screenshot": bool(config.get("privacy.read_window_screenshot", False)),
         "agentic_shell": bool(config.get("live.agentic_shell", False)),
         "show_task_terminals": bool(config.get("live.show_task_terminals", False)),
+        "delegate": config.get("live.delegate", "pi"),
         "activity_window": bool(config.get("ui.show_terminal", False)),
         "open_at_login": bool(config.get("system.open_at_login", False)),
         "live_on": bool(getattr(_agent, "live_on", False)),
