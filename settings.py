@@ -308,6 +308,10 @@ def open_settings(agent):
         _window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, NSBackingStoreBuffered, False)
         _window.setTitle_("Thrivbe Voice")
+        # ponytail: NSWindow defaults isReleasedWhenClosed=YES, which frees the ObjC
+        # object on the red close button while the Python global _window still points
+        # at it — reopen then segfaults. False = close just hides; reopen re-shows it.
+        _window.setReleasedWhenClosed_(False)
         _window.setContentView_(_webview)
         _window.center()
         _window.makeKeyAndOrderFront_(None)

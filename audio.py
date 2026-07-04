@@ -8,6 +8,7 @@ import base64
 import json
 import queue
 import threading
+import time
 
 from realtime_client import SR
 
@@ -131,17 +132,30 @@ class AudioMixin:
             _log(f"audio output device: {name!r} (idx={out}, prefer {want_out!r})")
         except Exception as e:
             _log(f"query output device failed: {e!r}")
-        try:
-            self._out_stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16", device=out)
-            self._out_stream.start()
-        except Exception as e:
-            _log(f"player init failed: {e!r} — falling back to default output")
+        # ponytail: Bluetooth headsets (Shokz) often fail RawOutputStream with PortAudio
+        # -9986 on first open — the SCO link isn't ready. Old code fell back to the system
+        # *default*, which IS the same headset, so it failed twice and went silent. Try the
+        # preferred device, retry once after a warmup, then the built-in speakers (a DIFFERENT
+        # device), then default. First that opens wins.
+        builtin = _find_device("MacBook", want_input=False)
+        attempts = [("preferred", out), ("preferred-retry", out),
+                    ("built-in", builtin), ("default", None)]
+        for label, dev in attempts:
+            if label == "built-in" and (dev is None or dev == out):
+                continue   # no distinct built-in to fall back to
+            if label == "preferred-retry":
+                time.sleep(0.4)   # let a flaky BT output settle before the second try
             try:
-                self._out_stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16")
+                self._out_stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16", device=dev)
                 self._out_stream.start()
-            except Exception as e2:
-                _log(f"player default init also failed: {e2!r}")
-                return
+                if label != "preferred":
+                    _log(f"player using {label} output (idx={dev})")
+                break
+            except Exception as e:
+                _log(f"player init failed ({label}): {e!r}")
+        else:
+            _log("player gave up — no usable output device")
+            return
         while self._running:
             try:
                 chunk = self._out_q.get(timeout=0.1)

@@ -36,9 +36,12 @@ class LiveSession(AudioMixin):
     (rumps) thread; everything else runs on the session's own asyncio thread.
     Audio I/O comes from AudioMixin."""
 
-    def __init__(self, on_state=None, announce=None):
+    def __init__(self, on_state=None, announce=None, on_auto_stop=None):
         self.on_state = on_state or (lambda s: None)
         self._announce = announce          # if set, speak this aloud right after opening
+        self._on_auto_stop = on_auto_stop  # called when the idle/max watchdog ends the session
+        self._session_start = 0.0          # loop.time() when this session opened
+        self._last_speech = 0.0            # loop.time() of the last detected speech turn
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ws = None
@@ -79,6 +82,36 @@ class LiveSession(AudioMixin):
                 asyncio.run_coroutine_threadsafe(_close(), loop)
             except Exception:
                 pass
+
+    async def _idle_watchdog(self) -> None:
+        """Auto-end the session so a forgotten-on mic doesn't keep responding to ambient
+        speech (e.g. you talking to another app). Two guards, either 0 = off:
+          auto_stop_idle_s — stop after this much silence (no speech turn). Default 90s.
+          auto_stop_max_s  — hard cap on total live time. Default 300s.
+        The idle guard handles walk-aways; the max cap handles 'kept talking nearby so idle
+        never fired' — the exact case that triggered this. Adjust/disable in config.json."""
+        live = self._cfg.get("live") or {}
+        idle_s = float(live.get("auto_stop_idle_s", 90) or 0)
+        max_s = float(live.get("auto_stop_max_s", 300) or 0)
+        if idle_s <= 0 and max_s <= 0:
+            return
+        reason = None
+        while self._running and reason is None:
+            await asyncio.sleep(5)
+            now = self._loop.time()
+            if idle_s > 0 and (now - self._last_speech) > idle_s:
+                reason = f"{int(now - self._last_speech)}s idle (>{int(idle_s)}s)"
+            elif max_s > 0 and (now - self._session_start) > max_s:
+                reason = f"{int(now - self._session_start)}s live (>{int(max_s)}s cap)"
+        if reason is None:
+            return
+        _log(f"auto-stop: {reason} — ending live session")
+        self.stop()
+        if self._on_auto_stop:
+            try:
+                self._on_auto_stop()
+            except Exception as e:
+                _log(f"on_auto_stop callback failed: {e!r}")
 
     def _notify(self, msg: str) -> None:
         """Best-effort user-visible notification (so failures aren't silent)."""
@@ -176,7 +209,7 @@ class LiveSession(AudioMixin):
                 f"Conversation transcript:\n{transcript[:8000]}")
             r = subprocess.run([pi_bin, "-p", "--model", model, prompt],
                                stdin=subprocess.DEVNULL, capture_output=True,
-                               text=True, timeout=120)
+                               text=True, encoding="utf-8", errors="replace", timeout=120)
             raw = (r.stdout or "").strip()
             if not raw:
                 return
@@ -214,15 +247,20 @@ class LiveSession(AudioMixin):
             self._mic_task.add_done_callback(self._on_mic_task_done)
             self.on_state("listening")
             _log("realtime session open — listening")
+            self._session_start = self._last_speech = self._loop.time()
+            wd = asyncio.ensure_future(self._idle_watchdog())
             if self._announce:
                 await self._speak_announcement()
-            async for raw in ws:
-                if not self._running:
-                    break
-                try:
-                    await self._handle(json.loads(raw))
-                except Exception as e:
-                    _log(f"realtime handle error: {e!r}")
+            try:
+                async for raw in ws:
+                    if not self._running:
+                        break
+                    try:
+                        await self._handle(json.loads(raw))
+                    except Exception as e:
+                        _log(f"realtime handle error: {e!r}")
+            finally:
+                wd.cancel()
 
     async def _configure(self, ws) -> None:
         ctx = await self._loop.run_in_executor(None, _grab_context)
@@ -275,6 +313,8 @@ class LiveSession(AudioMixin):
             details = resp.get("status_details")
             _log(f"ev response.done status={status} audio_deltas={getattr(self, '_audio_n', 0)} "
                  f"details={details}")
+        if t in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
+            self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
         if t == "input_audio_buffer.speech_started":
             self._flush_out()                       # barge-in: stop talking
             if self._speaking:

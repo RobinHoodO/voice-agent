@@ -207,7 +207,9 @@ def _put_text(text: str, paste: bool = True) -> str:
     if not text.strip():
         return "nothing to put"
     try:
-        subprocess.run(["pbcopy"], input=text, text=True, check=True)
+        # ponytail: encode bytes ourselves — text=True uses the locale encoding, which is
+        # ASCII in the py2app bundle, so em-dashes/emoji crashed pbcopy with a UnicodeError.
+        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
     except Exception as e:
         return f"couldn't reach the clipboard: {e}"
     if not paste:

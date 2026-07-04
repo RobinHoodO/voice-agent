@@ -424,7 +424,8 @@ def _recall_command(query: str, k: int) -> str:
     # config.json. Closing that needs a command allowlist (product decision); not done here.
     try:
         full = cmd.replace("{query}", shlex.quote(query))   # quote: query is a single arg, not shell
-        r = subprocess.run(["sh", "-c", full], capture_output=True, text=True, timeout=20)
+        r = subprocess.run(["sh", "-c", full], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=20)
         return (r.stdout or "").strip()[:2000]
     except Exception as e:
         _log(f"memory._recall_command failed: {e!r}")

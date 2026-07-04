@@ -275,7 +275,8 @@ class VoiceAgent(rumps.App):
             self._open_activity_window()
         try:
             import realtime
-            self.live = realtime.LiveSession(on_state=self._on_live_state, announce=text)
+            self.live = realtime.LiveSession(on_state=self._on_live_state, announce=text,
+                                             on_auto_stop=self._auto_stopped)
             self.live_on = True
             self.status = "listening"
             self.live.start()
@@ -403,7 +404,8 @@ class VoiceAgent(rumps.App):
             self._open_activity_window()
         try:
             import realtime
-            self.live = realtime.LiveSession(on_state=self._on_live_state)
+            self.live = realtime.LiveSession(on_state=self._on_live_state,
+                                             on_auto_stop=self._auto_stopped)
             self.live_on = True
             self.status = "listening"
             self.live.start()
@@ -411,6 +413,15 @@ class VoiceAgent(rumps.App):
             LOG(f"LIVE start failed: {e!r}")
             self.live_on = False
             self.status = "idle"
+
+    def _auto_stopped(self):
+        """The session's idle/max watchdog ended itself — reconcile menu state so the next
+        double-tap starts fresh instead of trying to stop an already-dead session. Plain
+        attributes only (called off the realtime thread); the pill is reconciled in _tick."""
+        self.live_on = False
+        self.live = None
+        self.status = "idle"
+        self._close_activity_window()
 
     def _on_live_state(self, state):
         """Called from the realtime thread — only mutate plain attributes here."""
