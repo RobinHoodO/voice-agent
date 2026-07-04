@@ -16,6 +16,7 @@ import time
 import uuid
 
 import config
+import kernel_tools
 from audio import AudioMixin
 from live_prompt import _build_live_instructions
 from realtime_client import SR, URL, VOICE, _headers, _selftest
@@ -473,6 +474,38 @@ class LiveSession(AudioMixin):
                 else:
                     out = "Started it in the background — I'll come back with the result when it's done."
             config.activity(f"🚀  delegated: {args.get('instruction', '')[:80]}")
+        elif name == "kernel_status":
+            out = await self._loop.run_in_executor(None, kernel_tools.kernel_status)
+            _log("kernel_status")
+            config.activity("🧠  checked kernel status")
+        elif name == "kernel_decide":
+            out = await self._loop.run_in_executor(None, kernel_tools.kernel_decide, args)
+            _log(f"kernel_decide: {args!r} -> {out}")
+            config.activity(f"🧠  kernel decision: {out}")
+        elif name == "kernel_memo":
+            out = await self._loop.run_in_executor(None, kernel_tools.kernel_memo, args)
+            _log(f"kernel_memo: {out}")
+            config.activity("🧠  filed kernel memo")
+        elif name == "bloom_create_task":
+            out = await self._loop.run_in_executor(None, kernel_tools.bloom_create_task, args)
+            _log(f"bloom_create_task: {out}")
+            config.activity(f"🧠  {out}")
+        elif name == "bloom_update_task":
+            out = await self._loop.run_in_executor(None, kernel_tools.bloom_update_task, args)
+            _log(f"bloom_update_task: {out}")
+            config.activity(f"🧠  {out}")
+        elif name == "bloom_comment_task":
+            out = await self._loop.run_in_executor(None, kernel_tools.bloom_comment_task, args)
+            _log(f"bloom_comment_task: {out}")
+            config.activity(f"🧠  {out}")
+        elif name == "twenty_search_contacts":
+            out = await self._loop.run_in_executor(None, kernel_tools.twenty_search_contacts, args)
+            _log(f"twenty_search_contacts: {args.get('name_query', '')!r}")
+            config.activity(f"🧠  CRM search: {args.get('name_query', '')}")
+        elif name == "semsearch_query":
+            out = await self._loop.run_in_executor(None, kernel_tools.semsearch_query, args)
+            _log(f"semsearch_query: {args.get('corpus', 'people')}: {args.get('query', '')!r}")
+            config.activity(f"🧠  semantic search: {args.get('query', '')}")
         else:
             out = await self._loop.run_in_executor(None, self._run_in_shell, args.get("command", ""))
         await self._ws.send(json.dumps({

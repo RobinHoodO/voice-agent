@@ -7,6 +7,7 @@ what's on screen this turn). Pure assembly — reads config + memory, returns a 
 import os
 
 import config
+import kernel_tools
 
 
 def _log(msg: str) -> None:
@@ -63,7 +64,11 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
     """LIVE_SYSTEM + per-session context from config: optional workspace + its skills,
     the delegation line, the memory tail, and what's under the cursor right now."""
     cfg = cfg or config.load()
-    blocks = [LIVE_SYSTEM]
+    blocks = []
+    persona = kernel_tools.kernel_persona(timeout=3)
+    if persona:
+        blocks.append(f"Kernel-served identity:\n{persona}")
+    blocks.append(LIVE_SYSTEM)
     ws = (cfg.get("live") or {}).get("workspace")
     if ws:
         ws = os.path.expanduser(ws)

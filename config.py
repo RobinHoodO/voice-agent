@@ -55,6 +55,7 @@ def reset_activity() -> None:
 # Live mode only needs OpenAI (Realtime + transcription).
 _ENV_FALLBACK = {
     "openai": ["OPENAI_API_KEY"],
+    "VOICE_API_TOKEN": ["VOICE_API_TOKEN"],
 }
 
 # Env var names that hold secrets — never expose these to spawned shells/subprocesses.
