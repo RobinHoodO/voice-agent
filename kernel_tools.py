@@ -151,6 +151,19 @@ def kernel_memo(args: dict) -> str:
     return f"Noted - filed to your inbox ({data.get('id', 'saved')})."
 
 
+def os_delegate(args: dict) -> str:
+    instruction = (args.get("instruction") or "").strip()
+    if not instruction:
+        return "I need an instruction to hand to the OS worker."
+    try:
+        _kernel_call("POST", "/delegate", {"instruction": instruction, "source": "voice-agent"})
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"The kernel rejected that delegation: {e.code}."
+    return "Handed to the OS worker — Robin will get an approval or a summary on Telegram."
+
+
 def bloom_create_task(args: dict) -> str:
     payload = {"op": "create", "projectId": args.get("projectId"), "title": args.get("title")}
     if args.get("description"):

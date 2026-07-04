@@ -486,6 +486,10 @@ class LiveSession(AudioMixin):
             out = await self._loop.run_in_executor(None, kernel_tools.kernel_memo, args)
             _log(f"kernel_memo: {out}")
             config.activity("🧠  filed kernel memo")
+        elif name == "os_delegate":
+            out = await self._loop.run_in_executor(None, kernel_tools.os_delegate, args)
+            _log(f"os_delegate: {out}")
+            config.activity("🧠  delegated to OS worker")
         elif name == "bloom_create_task":
             out = await self._loop.run_in_executor(None, kernel_tools.bloom_create_task, args)
             _log(f"bloom_create_task: {out}")

@@ -68,6 +68,14 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "os_delegate",
+        "description": "Hand BUSINESS/SYSTEM work to Robin's thrivbe-os worker: tasks, CRM updates, approvals, follow-ups/chasing, or anything in Robin's operating system such as 'create a task', 'update...', or 'chase...'. This only waits for the OS to accept the job; Robin gets a Telegram approval or summary later. Use the local `delegate` tool instead for Mac coding/research tasks.",
+        "parameters": {"type": "object",
+                       "properties": {"instruction": {"type": "string"}},
+                       "required": ["instruction"]},
+    },
+    {
+        "type": "function",
         "name": "set_prompt",
         "description": "Save (overwrite) your persistent custom instructions — your persona and standing context about the user and their workspace. Reloaded at the start of every future conversation. Use when the user asks you to remember how to behave, or after researching their setup to write your own briefing.",
         "parameters": {"type": "object",
