@@ -111,6 +111,23 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "kernel_remember",
+        "description": "Store a durable fact in Robin's ONE memory (shared across voice, Telegram, and the OS). Use for 'remember that...', preferences, decisions, or context worth keeping. Distinct from kernel_memo, which files an inbox item for triage.",
+        "parameters": {"type": "object",
+                       "properties": {"text": {"type": "string",
+                                               "description": "The fact to remember, 1-4000 characters."}},
+                       "required": ["text"]},
+    },
+    {
+        "type": "function",
+        "name": "kernel_recall",
+        "description": "Search Robin's ONE memory (remembered notes first, then CRM/tasks/wiki) for facts or context. Use for 'what did I say about...', 'do you remember...', or any question about stored knowledge.",
+        "parameters": {"type": "object",
+                       "properties": {"query": {"type": "string"}},
+                       "required": ["query"]},
+    },
+    {
+        "type": "function",
         "name": "bloom_create_task",
         "description": "Request creation of a new task in a Bloom project. This is gated: it files an approval for Robin and does not take effect until he approves it — tell him that plainly rather than saying the task is created.",
         "parameters": {"type": "object",

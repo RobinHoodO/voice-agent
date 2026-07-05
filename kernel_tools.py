@@ -151,6 +151,35 @@ def kernel_memo(args: dict) -> str:
     return f"Noted - filed to your inbox ({data.get('id', 'saved')})."
 
 
+def kernel_remember(args: dict) -> str:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return "I need something to remember."
+    try:
+        _kernel_call("POST", "/remember", {"text": text})
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"The kernel rejected that memory: {e.code}."
+    return "Remembered."
+
+
+def kernel_recall(args: dict) -> str:
+    q = (args.get("query") or "").strip()
+    if not q:
+        return "What should I recall?"
+    try:
+        data = _kernel_call("GET", "/recall", params={"q": q})
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Recall failed: {e.code}."
+    hits = data.get("hits", [])
+    if not hits:
+        return f"Nothing recalled for {q}."
+    return "\n".join(_short(h.get("text"), 200) for h in hits[:4])
+
+
 def os_delegate(args: dict) -> str:
     instruction = (args.get("instruction") or "").strip()
     if not instruction:
