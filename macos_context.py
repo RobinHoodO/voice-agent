@@ -13,6 +13,22 @@ import tempfile
 import config
 
 
+# Robin can extend this denylist as additional sensitive apps emerge.
+SCREENSHOT_DENY_APPS = frozenset((
+    "bank", "nordea", "dnb", "revolut", "paypal", "stripe", "coinbase",
+    "helsenorge", "health", "patient", "journal",
+    "1password", "bitwarden", "keychain access", "lastpass", "dashlane",
+    "messages", "signal", "whatsapp", "telegram", "beeper", "mail", "gmail",
+))
+SCREENSHOT_DENY_TITLE = frozenset((
+    "bank", "nordea", "dnb", "revolut", "paypal", "stripe", "coinbase",
+    "helsenorge", "health", "patient", "journal",
+    "1password", "bitwarden", "keychain access", "lastpass", "dashlane",
+    "messages", "signal", "whatsapp", "telegram", "beeper", "mail", "gmail",
+    "password", "login", "secure",
+))
+
+
 def _log(msg: str) -> None:
     try:
         from agent import LOG
@@ -27,6 +43,22 @@ def osa(script):
                               capture_output=True, text=True, timeout=5).stdout.strip()
     except Exception:
         return ""
+
+
+def _frontmost_app_and_title():
+    """Return the frontmost app and its window title, or empty strings on error."""
+    result = osa('''tell application "System Events"
+        set frontmostProcess to first process whose frontmost is true
+        set appName to name of frontmostProcess
+        try
+            set windowTitle to name of front window of frontmostProcess
+        on error
+            set windowTitle to ""
+        end try
+        return appName & "|||" & windowTitle
+    end tell''')
+    app, separator, title = result.partition("|||")
+    return (app.strip(), title.strip()) if separator else ("", "")
 
 
 def _ax(el, attr):
@@ -212,6 +244,13 @@ def grab_window_screenshot(max_dim=900, quality=45):
     Fast by design: captures only the focused window region (not the whole screen) and
     downscales hard — small payload = lower vision latency + cost. Needs macOS Screen
     Recording permission; without it the capture is empty and we return ''."""
+    app, title = _frontmost_app_and_title()
+    app_lower, title_lower = app.lower(), title.lower()
+    if (any(term in app_lower for term in SCREENSHOT_DENY_APPS) or
+            any(term in title_lower for term in SCREENSHOT_DENY_TITLE)):
+        _log("screenshot skipped: sensitive app/window")
+        return ""
+
     import base64 as _b64
     f = os.path.join(tempfile.gettempdir(), "tv_window_ctx.jpg")
     region = _focused_window_region()

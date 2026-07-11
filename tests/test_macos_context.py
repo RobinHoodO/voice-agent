@@ -23,3 +23,15 @@ def test_import_does_not_pull_agent():
 def test_grab_context_returns_str():
     # always returns a string (graceful even with no AX/permissions)
     assert isinstance(macos_context.grab_context(), str)
+
+
+def test_sensitive_app_skips_screenshot(monkeypatch):
+    monkeypatch.setattr(macos_context, "_frontmost_app_and_title", lambda: ("Nordea", ""))
+    monkeypatch.setattr(macos_context, "_log", lambda message: None)
+
+    def fail_screencapture(*args, **kwargs):
+        raise AssertionError("screencapture must not run for sensitive apps")
+
+    monkeypatch.setattr(macos_context.subprocess, "run", fail_screencapture)
+
+    assert macos_context.grab_window_screenshot() == ""
