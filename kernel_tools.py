@@ -193,6 +193,21 @@ def os_delegate(args: dict) -> str:
     return "Handed to the OS worker — Robin will get an approval or a summary on Telegram."
 
 
+def session_log(source: str, cost_nok: float, duration_sec: float | None, summary: str) -> str:
+    try:
+        _kernel_call("POST", "/session-log", {
+            "source": source,
+            "costNok": cost_nok,
+            "durationSec": duration_sec,
+            "summary": summary,
+        })
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"The kernel rejected that session log: {e.code}."
+    return "Session cost logged."
+
+
 def bloom_create_task(args: dict) -> str:
     payload = {"op": "create", "projectId": args.get("projectId"), "title": args.get("title")}
     if args.get("description"):

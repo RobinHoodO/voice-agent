@@ -24,6 +24,10 @@ from shell import Shell
 from tools import TOOLS, _build_delegate_cmd, _extract_json, _put_text
 
 
+# Rough all-in OpenAI Realtime audio estimate; tune without code changes if billing shifts.
+VOICE_REALTIME_NOK_PER_MIN = float(os.getenv("VOICE_REALTIME_NOK_PER_MIN", "3.0"))
+
+
 def _log(msg: str) -> None:
     try:
         from agent import LOG
@@ -43,6 +47,7 @@ class LiveSession(AudioMixin):
         self._on_auto_stop = on_auto_stop  # called when the idle/max watchdog ends the session
         self._session_start = 0.0          # loop.time() when this session opened
         self._last_speech = 0.0            # loop.time() of the last detected speech turn
+        self._wall_start = 0.0             # wall-clock time when this session opened
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ws = None
@@ -169,6 +174,8 @@ class LiveSession(AudioMixin):
         if not turns:
             return
         transcript = "\n".join(turns)
+        duration = max(0.0, time.time() - self._wall_start) if self._wall_start else 0.0
+        cost_nok = (duration / 60.0) * VOICE_REALTIME_NOK_PER_MIN
         try:
             import memory
             cid = memory.record(transcript)
@@ -178,6 +185,12 @@ class LiveSession(AudioMixin):
                                  daemon=True).start()
         except Exception as e:
             _log(f"persist conversation failed: {e!r}")
+        if duration > 1.0:
+            try:
+                kernel_tools.session_log(
+                    "voice-agent-realtime", cost_nok, duration, turns[0] or transcript[:80])
+            except Exception as e:
+                _log(f"session cost log failed: {e!r}")
 
     def _learn(self, cid: int, transcript: str) -> None:
         """Background: in ONE pi call, extract a summary AND durable learnings from this
@@ -257,6 +270,7 @@ class LiveSession(AudioMixin):
             self.on_state("listening")
             _log("realtime session open — listening")
             self._session_start = self._last_speech = self._loop.time()
+            self._wall_start = time.time()
             wd = asyncio.ensure_future(self._idle_watchdog())
             if self._announce:
                 await self._speak_announcement()
