@@ -221,6 +221,14 @@ class LiveSession(AudioMixin):
                     memory.set_summary(cid, summary)
                 if learn_on:
                     memory.extract_apply(payload, cid)
+                    try:
+                        for item in payload.get("new_learnings") or []:
+                            text = item.get("text", "")
+                            if text:
+                                kernel_tools.kernel_remember(
+                                    {"text": f"[voice-learned {item.get('type', 'fact')}] {text}"})
+                    except Exception as e:
+                        _log(f"kernel memory mirror failed: {e!r}")
                 _log(f"conversation {cid} learned "
                      f"(+{len(payload.get('new_learnings') or [])} learnings, "
                      f"-{len(payload.get('supersede') or [])} superseded)")

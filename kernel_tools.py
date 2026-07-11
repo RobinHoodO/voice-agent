@@ -9,7 +9,7 @@ import config
 
 
 KERNEL_BASE_URL = "http://127.0.0.1:8790"
-UNREACHABLE = "The kernel isn't reachable right now."
+UNREACHABLE = "The kernel isn't reachable right now — the SSH tunnel to Thrivbe-1 (launchd, local port 8790) may be down."
 
 
 def _log(msg: str) -> None:
