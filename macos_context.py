@@ -245,15 +245,30 @@ def grab_window_screenshot(max_dim=900, quality=45):
     downscales hard — small payload = lower vision latency + cost. Needs macOS Screen
     Recording permission; without it the capture is empty and we return ''."""
     app, title = _frontmost_app_and_title()
+    if not app and not title:
+        _log("screenshot skipped: could not identify frontmost app (fail-closed)")
+        return ""
+
+    try:
+        _, cursor_title = _ax_window_under_cursor()
+    except Exception:
+        cursor_title = ""
+
     app_lower, title_lower = app.lower(), title.lower()
+    cursor_title_lower = str(cursor_title).lower()
     if (any(term in app_lower for term in SCREENSHOT_DENY_APPS) or
-            any(term in title_lower for term in SCREENSHOT_DENY_TITLE)):
+            any(term in title_lower for term in SCREENSHOT_DENY_TITLE) or
+            any(term in cursor_title_lower for term in SCREENSHOT_DENY_APPS) or
+            any(term in cursor_title_lower for term in SCREENSHOT_DENY_TITLE)):
         _log("screenshot skipped: sensitive app/window")
         return ""
 
     import base64 as _b64
     f = os.path.join(tempfile.gettempdir(), "tv_window_ctx.jpg")
     region = _focused_window_region()
+    if not region and not app:
+        _log("screenshot skipped: full-screen capture with unidentified app (fail-closed)")
+        return ""
     cap = ["screencapture", "-x", "-o", "-t", "jpg"]
     if region:
         cap += ["-R", region]
