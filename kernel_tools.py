@@ -457,6 +457,27 @@ def list_inbox_items(args: dict) -> str:
     return "\n".join(lines)
 
 
+def cognee_ask(args: dict) -> str:
+    q = (args.get("query") or "").strip()
+    if not q:
+        return "I need a question to search the community graph."
+    body = {"query": q}
+    mode = (args.get("mode") or "").strip()
+    if mode:
+        body["mode"] = mode
+    try:
+        # Spawns a cognee graph query on the server — genuinely slow (~20-30s).
+        data = _kernel_call("POST", "/cognee-ask", body, timeout=100)
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Community graph search failed: {e.code}."
+    answer = (data.get("answer") or "").strip() if isinstance(data, dict) else ""
+    if not answer:
+        return "The community graph returned nothing for that."
+    return answer[:2000]
+
+
 def kernel_persona(timeout: float = 3) -> str:
     try:
         data = _kernel_call("GET", "/persona", timeout=timeout)

@@ -193,6 +193,22 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "cognee_ask",
+        "description": "Deep search of the Beeper community knowledge graph — people, groups,"
+        " roles, who-knows-whom, open asks across Robin's group chats. SLOW (~20-30s):"
+        " tell the user you're looking it up BEFORE calling, then continue when it returns.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "query": {"type": "string",
+                                     "description": "The question, phrased naturally."},
+                           "mode": {"type": "string",
+                                    "enum": ["GRAPH_COMPLETION", "RAG_COMPLETION", "INSIGHTS",
+                                             "CHUNKS", "SUMMARIES", "TEMPORAL"],
+                                    "description": "Defaults to GRAPH_COMPLETION."}},
+                       "required": ["query"]},
+    },
+    {
+        "type": "function",
         "name": "graph_get_node",
         "description": "Inspect a node and its nearby relationships in the system graph.",
         "parameters": {"type": "object",

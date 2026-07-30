@@ -602,6 +602,10 @@ class LiveSession(AudioMixin):
             out = await self._loop.run_in_executor(None, kernel_tools.hybrid_rag_search, args)
             _log(f"hybrid_rag_search: {args.get('query', '')!r}")
             config.activity(f"🧠  hybrid search: {args.get('query', '')}")
+        elif name == "cognee_ask":
+            out = await self._loop.run_in_executor(None, kernel_tools.cognee_ask, args)
+            _log(f"cognee_ask: {args.get('query', '')!r}")
+            config.activity(f"🧠  community graph: {args.get('query', '')}")
         elif name == "graph_get_node":
             out = await self._loop.run_in_executor(None, kernel_tools.graph_get_node, args)
             _log(f"graph_get_node: {args.get('id', '')!r}")
