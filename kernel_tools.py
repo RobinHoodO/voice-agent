@@ -116,6 +116,24 @@ def kernel_status() -> str:
     return "\n".join(lines) if lines else "Nothing needs your attention right now."
 
 
+def kernel_attention_brief(timeout: float = 2.5) -> str:
+    """One compact, best-effort status line for the live-session prompt."""
+    try:
+        data = _kernel_call("GET", "/status", timeout=timeout)
+    except (KernelUnavailable, urllib.error.HTTPError):
+        return ""
+    approvals = data.get("approvals", []) if isinstance(data, dict) else []
+    attention = data.get("attention", []) if isinstance(data, dict) else []
+    if not approvals and not attention:
+        return ""
+    parts = []
+    if approvals:
+        parts.append(f"{len(approvals)} approval{'s' if len(approvals) != 1 else ''} pending")
+    if attention:
+        parts.append(f"{len(attention)} attention item{'s' if len(attention) != 1 else ''}")
+    return "KERNEL ATTENTION: " + ", ".join(parts) + " — mention this to the user at the first natural opening, briefly."
+
+
 def kernel_decide(args: dict) -> str:
     approval_id = args.get("approvalId", args.get("approval_id"))
     decision = args.get("decision")
@@ -286,6 +304,155 @@ def semsearch_query(args: dict) -> str:
             headline = f"{res.get('path')} chunk {res.get('chunk_index', 0)}"
         company = f" at {res.get('company')}" if res.get("company") else ""
         lines.append(f"{name}{company}: {_short(headline)}")
+    return "\n".join(lines)
+
+
+def _items(data, *keys: str) -> list:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def hybrid_rag_search(args: dict) -> str:
+    q = (args.get("query") or "").strip()
+    if not q:
+        return "I need a query to search."
+    try:
+        data = _kernel_call("POST", "/ai-search", {"query": q})
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Hybrid search failed: {e.code}."
+    if not isinstance(data, dict):
+        return "Hybrid search returned no usable result."
+    answer = _short(data.get("answer"), 360)
+    entities = _items(data, "entities", "resolvedEntities")
+    lines = [answer] if answer else []
+    if entities:
+        names = []
+        for entity in entities[:3]:
+            if isinstance(entity, dict):
+                name = entity.get("title") or entity.get("name") or entity.get("id")
+                kind = entity.get("type")
+                if name:
+                    names.append(f"{_short(name, 80)}{f' ({kind})' if kind else ''}")
+        if names:
+            lines.append("Related: " + ", ".join(names) + ".")
+    return "\n".join(lines) or f"No hybrid search result for {q}."
+
+
+def graph_get_node(args: dict) -> str:
+    node_id = (args.get("id") or "").strip()
+    if not node_id:
+        return "I need a graph node id."
+    params = {"id": node_id}
+    if args.get("depth") is not None:
+        params["depth"] = args["depth"]
+    try:
+        data = _kernel_call("GET", "/graph-node", params=params)
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Graph lookup failed: {e.code}."
+    if not isinstance(data, dict):
+        return f"No graph details found for {node_id}."
+    nodes = _items(data, "nodes")
+    root = next((node for node in nodes if isinstance(node, dict) and node.get("id") == node_id), None)
+    root = root or (nodes[0] if nodes and isinstance(nodes[0], dict) else {})
+    title = root.get("name") or root.get("title") or node_id
+    kind = root.get("type") or root.get("kind")
+    related = [node for node in nodes if isinstance(node, dict) and node.get("id") != node_id]
+    lines = [f"{_short(title, 100)}{f' ({kind})' if kind else ''}: {len(related)} related node{'s' if len(related) != 1 else ''}."]
+    names = [_short(node.get("name") or node.get("title") or node.get("id"), 80)
+             for node in related[:4] if node.get("name") or node.get("title") or node.get("id")]
+    if names:
+        lines.append("Top related: " + ", ".join(names) + ".")
+    return "\n".join(lines)
+
+
+def graph_get_document(args: dict) -> str:
+    document_id = (args.get("id") or "").strip()
+    if not document_id:
+        return "I need a graph document id."
+    try:
+        data = _kernel_call("GET", "/graph-doc", params={"id": document_id})
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Graph document lookup failed: {e.code}."
+    if not isinstance(data, dict):
+        return f"No readable graph document found for {document_id}."
+    title = data.get("title") or data.get("name") or data.get("path") or document_id
+    content = data.get("content") or data.get("text")
+    if not content:
+        return f"{_short(title, 120)} has no readable content."
+    return f"{_short(title, 120)}: {_short(content, 500)}"
+
+
+def bloom_list_projects(args: dict) -> str:
+    try:
+        data = _kernel_call("GET", "/bloom-projects")
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Bloom project lookup failed: {e.code}."
+    projects = _items(data, "projects", "items", "results")
+    if not projects:
+        return "No Bloom projects found."
+    lines = [f"I found {len(projects)} Bloom project{'s' if len(projects) != 1 else ''}:"]
+    for project in projects[:5]:
+        if isinstance(project, dict):
+            name = project.get("name") or project.get("title") or "Untitled project"
+            project_id = project.get("id")
+            lines.append(f"[{project_id}] {_short(name, 100)}" if project_id is not None else _short(name, 100))
+    return "\n".join(lines)
+
+
+def bloom_list_tasks(args: dict) -> str:
+    params = {key: args[key] for key in ("projectId", "status", "q") if args.get(key) is not None}
+    try:
+        data = _kernel_call("GET", "/bloom-tasks", params=params)
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Bloom task lookup failed: {e.code}."
+    tasks = _items(data, "tasks", "items", "results")
+    if not tasks:
+        return "No Bloom tasks found."
+    lines = [f"I found {len(tasks)} Bloom task{'s' if len(tasks) != 1 else ''}:"]
+    for task in tasks[:5]:
+        if isinstance(task, dict):
+            title = task.get("title") or task.get("name") or "Untitled task"
+            task_id = task.get("id")
+            status = task.get("status")
+            prefix = f"[{task_id}] " if task_id is not None else ""
+            lines.append(prefix + _short(title, 100) + (f" ({status})" if status else ""))
+    return "\n".join(lines)
+
+
+def list_inbox_items(args: dict) -> str:
+    params = {key: args[key] for key in ("triage_status", "search", "limit") if args.get(key) is not None}
+    try:
+        data = _kernel_call("GET", "/inbox", params=params)
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Inbox lookup failed: {e.code}."
+    items = _items(data, "items", "results")
+    if not items:
+        return "No inbox items found."
+    lines = [f"I found {len(items)} inbox item{'s' if len(items) != 1 else ''}:"]
+    for item in items[:5]:
+        if isinstance(item, dict):
+            subject = item.get("subject") or item.get("snippet") or "Untitled item"
+            sender = item.get("sender")
+            detail = f" from {_short(sender, 60)}" if sender else ""
+            lines.append(f"{_short(subject, 120)}{detail}")
     return "\n".join(lines)
 
 

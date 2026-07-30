@@ -67,6 +67,9 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
     the delegation line, the memory tail, and what's under the cursor right now."""
     cfg = cfg or config.load()
     blocks = []
+    attention = kernel_tools.kernel_attention_brief(timeout=2.5)
+    if attention:
+        blocks.append(attention)
     persona = kernel_tools.kernel_persona(timeout=3)
     if persona:
         blocks.append(f"Kernel-served identity:\n{persona}")

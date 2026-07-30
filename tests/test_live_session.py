@@ -4,6 +4,10 @@ LiveSession can't run headlessly (needs a mic + OpenAI socket), but we can pin t
 it composes correctly: instantiates, mixes in the audio methods, keeps orchestration,
 and the realtime.py shim still re-exports it for agent.py.
 """
+import asyncio
+import json
+
+import kernel_tools
 import live_session
 import realtime
 
@@ -46,3 +50,42 @@ def test_out_q_is_bounded_and_drops_oldest():
     for i in range(400):                      # well past maxsize
         s._enqueue_audio(bytes([i % 256]))    # must never block
     assert s._out_q.qsize() <= 256
+
+
+def test_kernel_decision_confirmation_gate_is_short_and_deny_wins():
+    pending = {"args": {"approvalId": 7, "decision": "approve"}, "ts": 100.0}
+    assert live_session._is_short_affirm("go ahead")
+    assert not live_session._is_short_affirm("yes please record the decision now")
+    assert live_session._pending_confirmation_outcome(pending, "yes", now=101.0) == "confirmed"
+    assert live_session._pending_confirmation_outcome(pending, "yes no", now=101.0) == "denied"
+    assert live_session._pending_confirmation_outcome(pending, "not now", now=101.0) == "dropped"
+    assert live_session._pending_confirmation_outcome(pending, "yes", now=220.0) == "expired"
+
+
+def test_kernel_decision_is_staged_then_executes_only_after_affirm(monkeypatch):
+    calls, sent = [], []
+
+    class Ws:
+        async def send(self, message):
+            sent.append(json.loads(message))
+
+    monkeypatch.setattr(live_session.config, "activity", lambda _message: None)
+    monkeypatch.setattr(kernel_tools, "kernel_decide", lambda args: calls.append(args) or "Decision recorded.")
+
+    async def scenario():
+        session = live_session.LiveSession()
+        session._loop = asyncio.get_running_loop()
+        session._ws = Ws()
+        await session._do_tool({
+            "call_id": "call-1", "name": "kernel_decide",
+            "arguments": json.dumps({"approvalId": 9, "decision": "approve"}),
+        })
+        assert calls == []
+        assert session._pending_kernel_decision["args"]["approvalId"] == 9
+        assert "CONFIRMATION REQUIRED" in sent[0]["item"]["output"]
+
+        await session._resolve_pending_kernel_decision("yes")
+
+    asyncio.run(scenario())
+    assert calls == [{"approvalId": 9, "decision": "approve"}]
+    assert "Decision recorded." in sent[-1]["item"]["content"][0]["text"]

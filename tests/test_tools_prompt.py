@@ -1,4 +1,5 @@
 """Characterization tests for the tools.py + live_prompt.py extractions (Phase 4)."""
+import kernel_tools
 import live_prompt
 import tools
 
@@ -24,3 +25,16 @@ def test_build_live_instructions_includes_base(tmp_app):
     out = live_prompt._build_live_instructions("on-screen text here")
     assert "hands-free voice agent" in out          # LIVE_SYSTEM base present
     assert "on-screen text here" in out             # the per-turn ctx is appended
+
+
+def test_build_live_instructions_prepends_kernel_attention(monkeypatch, tmp_app):
+    seen = []
+    monkeypatch.setattr(
+        kernel_tools,
+        "kernel_attention_brief",
+        lambda timeout: seen.append(timeout) or "KERNEL ATTENTION: 1 approval pending — mention this briefly.",
+    )
+    monkeypatch.setattr(kernel_tools, "kernel_persona", lambda timeout: "")
+    out = live_prompt._build_live_instructions("")
+    assert out.startswith("KERNEL ATTENTION:")
+    assert seen == [2.5]

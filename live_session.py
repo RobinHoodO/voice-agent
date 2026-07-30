@@ -10,6 +10,7 @@ import base64
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -34,6 +35,31 @@ def _log(msg: str) -> None:
         LOG(msg)
     except Exception:
         pass
+
+
+PENDING_ACTION_TTL_SECONDS = 120
+AFFIRM_RE = re.compile(r"\b(yes|yeah|yep|confirm|confirmed|approve|approved|go ahead|do it|send it|proceed|ja|kjør)\b", re.IGNORECASE)
+DENY_RE = re.compile(r"\b(no|nope|cancel|reject|rejected|stop|abort|don't|nei)\b", re.IGNORECASE)
+
+
+def _is_short_affirm(text: str) -> bool:
+    return len(text.strip().split()) <= 4 and bool(AFFIRM_RE.search(text))
+
+
+def _is_short_deny(text: str) -> bool:
+    return len(text.strip().split()) <= 4 and bool(DENY_RE.search(text))
+
+
+def _pending_confirmation_outcome(pending: dict, transcript: str, now: float | None = None) -> str:
+    """Return the deterministic disposition for a staged kernel decision."""
+    now = time.time() if now is None else now
+    if now - pending["ts"] >= PENDING_ACTION_TTL_SECONDS:
+        return "expired"
+    if _is_short_deny(transcript):
+        return "denied"
+    if _is_short_affirm(transcript):
+        return "confirmed"
+    return "dropped"
 
 
 class LiveSession(AudioMixin):
@@ -367,6 +393,8 @@ class LiveSession(AudioMixin):
             await self._do_tool(ev)
         elif t == "conversation.item.input_audio_transcription.completed":
             heard = ev.get("transcript", "").strip()
+            if heard:
+                await self._resolve_pending_kernel_decision(heard)
             _log(f"live heard: {heard!r}")
             if heard:
                 config.activity(f"🗣  you: {heard}")
@@ -378,6 +406,30 @@ class LiveSession(AudioMixin):
                 self._turns.append(f"agent: {said}")
         elif t == "error":
             _log(f"realtime error event: {ev.get('error')}")
+
+    async def _resolve_pending_kernel_decision(self, transcript: str) -> None:
+        pending = getattr(self, "_pending_kernel_decision", None)
+        if not pending:
+            return
+        outcome = _pending_confirmation_outcome(pending, transcript)
+        self._pending_kernel_decision = None
+        if outcome == "expired":
+            _log("kernel_decide confirmation dropped: expired")
+            return
+        if outcome != "confirmed":
+            _log(f"kernel_decide confirmation dropped: {outcome}")
+            return
+        args = pending["args"]
+        out = await self._loop.run_in_executor(None, kernel_tools.kernel_decide, args)
+        _log(f"kernel_decide confirmation executed: {args!r} -> {out}")
+        config.activity(f"🧠  kernel decision confirmed: {out}")
+        if self._ws:
+            await self._ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text",
+                                      "text": f"[System context: the confirmed kernel decision has executed. Result: {out}]"}]},
+            }))
 
     async def _speak_announcement(self) -> None:
         """Auto-wake greeting: the menubar watcher opened this session because a
@@ -501,9 +553,15 @@ class LiveSession(AudioMixin):
             _log("kernel_status")
             config.activity("🧠  checked kernel status")
         elif name == "kernel_decide":
-            out = await self._loop.run_in_executor(None, kernel_tools.kernel_decide, args)
-            _log(f"kernel_decide: {args!r} -> {out}")
-            config.activity(f"🧠  kernel decision: {out}")
+            if getattr(self, "_pending_kernel_decision", None):
+                _log("kernel_decide confirmation dropped: superseded by a new staged decision")
+            self._pending_kernel_decision = {"args": args, "ts": time.time()}
+            decision = args.get("decision")
+            approval_id = args.get("approvalId", args.get("approval_id"))
+            out = ("CONFIRMATION REQUIRED: about to record decision "
+                   f"{decision} for approval {approval_id}. Ask the user to confirm out loud.")
+            _log(f"kernel_decide confirmation staged: {args!r}")
+            config.activity(f"🧠  kernel decision awaiting confirmation: {approval_id}")
         elif name == "kernel_memo":
             out = await self._loop.run_in_executor(None, kernel_tools.kernel_memo, args)
             _log(f"kernel_memo: {out}")
@@ -540,6 +598,30 @@ class LiveSession(AudioMixin):
             out = await self._loop.run_in_executor(None, kernel_tools.semsearch_query, args)
             _log(f"semsearch_query: {args.get('corpus', 'people')}: {args.get('query', '')!r}")
             config.activity(f"🧠  semantic search: {args.get('query', '')}")
+        elif name == "hybrid_rag_search":
+            out = await self._loop.run_in_executor(None, kernel_tools.hybrid_rag_search, args)
+            _log(f"hybrid_rag_search: {args.get('query', '')!r}")
+            config.activity(f"🧠  hybrid search: {args.get('query', '')}")
+        elif name == "graph_get_node":
+            out = await self._loop.run_in_executor(None, kernel_tools.graph_get_node, args)
+            _log(f"graph_get_node: {args.get('id', '')!r}")
+            config.activity(f"🧠  graph node: {args.get('id', '')}")
+        elif name == "graph_get_document":
+            out = await self._loop.run_in_executor(None, kernel_tools.graph_get_document, args)
+            _log(f"graph_get_document: {args.get('id', '')!r}")
+            config.activity(f"🧠  graph document: {args.get('id', '')}")
+        elif name == "bloom_list_projects":
+            out = await self._loop.run_in_executor(None, kernel_tools.bloom_list_projects, args)
+            _log("bloom_list_projects")
+            config.activity("🧠  listed Bloom projects")
+        elif name == "bloom_list_tasks":
+            out = await self._loop.run_in_executor(None, kernel_tools.bloom_list_tasks, args)
+            _log(f"bloom_list_tasks: {args!r}")
+            config.activity("🧠  listed Bloom tasks")
+        elif name == "list_inbox_items":
+            out = await self._loop.run_in_executor(None, kernel_tools.list_inbox_items, args)
+            _log(f"list_inbox_items: {args!r}")
+            config.activity("🧠  listed inbox items")
         else:
             out = await self._loop.run_in_executor(None, self._run_in_shell, args.get("command", ""))
         await self._ws.send(json.dumps({
@@ -623,6 +705,15 @@ def main() -> None:
         assert memory.add_learning("fact", marker), "add_learning failed"
         assert marker in memory.top_learnings(50), "remember→learnings round-trip failed"
         print("MEMORY OK")
+    elif "--selftest-confirmation" in sys.argv:
+        pending = {"args": {"approvalId": 7, "decision": "approve"}, "ts": 100.0}
+        assert _is_short_affirm("ja, kjør")
+        assert not _is_short_affirm("yes please execute this decision now")
+        assert _pending_confirmation_outcome(pending, "yes", now=101.0) == "confirmed"
+        assert _pending_confirmation_outcome(pending, "yes no", now=101.0) == "denied"
+        assert _pending_confirmation_outcome(pending, "tell me more", now=101.0) == "dropped"
+        assert _pending_confirmation_outcome(pending, "yes", now=220.0) == "expired"
+        print("CONFIRMATION GATE OK")
     elif "--selftest" in sys.argv:
         reply = asyncio.run(_selftest())
         print("SELFTEST REPLY:", reply)

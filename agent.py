@@ -6,7 +6,7 @@ conversation: OpenAI Realtime speech-to-speech (in realtime.py), with barge-in, 
 optional agentic shell, cross-session memory, and awareness of what's under your
 cursor. One mode, one voice (OpenAI) — no push-to-talk, no ElevenLabs.
 """
-import os, sys, subprocess, threading, time
+import os, socket, sys, subprocess, threading, time
 
 # py2app puts the frozen python312.zip ahead of Contents/Resources on sys.path,
 # so `import realtime/pill/config` would load STALE zipped copies. Put our own dir
@@ -140,6 +140,7 @@ class VoiceAgent(rumps.App):
         print("Ready: double-tap Control for a live conversation.")
 
     ICONS = {"idle": "🎙", "listening": "🔴", "thinking": "💭", "acting": "⚙️", "speaking": "🗣"}
+    KERNEL_TUNNEL_ITEM = "Kernel tunnel down — check hetzner-tunnels"
 
     def _open_settings(self):
         try:
@@ -152,8 +153,47 @@ class VoiceAgent(rumps.App):
         if not self._setup_checked:        # first-run onboarding, once the app loop is live
             self._setup_checked = True
             self._onboard()
-        self.title = self.ICONS.get(self.status, "🎙")
+        now = time.monotonic()
+        if now >= getattr(self, "_tunnel_next_check", 0.0) and not getattr(self, "_tunnel_probe_inflight", False):
+            self._tunnel_next_check = now + 60.0
+            self._tunnel_probe_inflight = True
+            threading.Thread(target=self._probe_kernel_tunnel, daemon=True).start()
+        result = getattr(self, "_tunnel_probe_result", None)
+        if result is not None:
+            self._tunnel_probe_result = None
+            self._tunnel_probe_inflight = False
+            if result != getattr(self, "_tunnel_up", None):
+                self._tunnel_up = result
+                self._reconcile_kernel_tunnel_state()
+        title = "🎙⚠" if getattr(self, "_tunnel_up", None) is False else self.ICONS.get(self.status, "🎙")
+        if self.title != title:
+            self.title = title
         self._reconcile_pill()
+
+    def _probe_kernel_tunnel(self):
+        """Background-only TCP check; _tick applies its result on the AppKit thread."""
+        try:
+            with socket.create_connection(("127.0.0.1", 8790), timeout=0.5):
+                up = True
+        except OSError:
+            up = False
+        self._tunnel_probe_result = up
+
+    def _reconcile_kernel_tunnel_state(self):
+        """Apply a tunnel transition to the menu. Called only from _tick on the main thread."""
+        item = getattr(self, "_kernel_tunnel_item", None)
+        if self._tunnel_up:
+            if item is not None:
+                try:
+                    del self.menu[self.KERNEL_TUNNEL_ITEM]
+                except Exception as e:
+                    LOG(f"kernel tunnel menu remove failed: {e!r}")
+                self._kernel_tunnel_item = None
+            return
+        if item is None:
+            item = rumps.MenuItem(self.KERNEL_TUNNEL_ITEM, callback=None)
+            self.menu.insert_before("Quit", item)
+            self._kernel_tunnel_item = item
 
     def _pump_pill_level(self, _):
         """Feed the live conversation's mic level into the wave pill (main-thread).

@@ -183,6 +183,57 @@ TOOLS = [
                                       "description": "Defaults to people."}},
                        "required": ["query"]},
     },
+    {
+        "type": "function",
+        "name": "hybrid_rag_search",
+        "description": "Hybrid RAG search across system-graph relations and wiki, skills, and codebases. Returns a compact answer with relevant entities.",
+        "parameters": {"type": "object",
+                       "properties": {"query": {"type": "string"}},
+                       "required": ["query"]},
+    },
+    {
+        "type": "function",
+        "name": "graph_get_node",
+        "description": "Inspect a node and its nearby relationships in the system graph.",
+        "parameters": {"type": "object",
+                       "properties": {"id": {"type": "string"},
+                                      "depth": {"type": "integer"}},
+                       "required": ["id"]},
+    },
+    {
+        "type": "function",
+        "name": "graph_get_document",
+        "description": "Read a markdown document or wiki page from the Command Center catalog by graph node ID.",
+        "parameters": {"type": "object",
+                       "properties": {"id": {"type": "string"}},
+                       "required": ["id"]},
+    },
+    {
+        "type": "function",
+        "name": "bloom_list_projects",
+        "description": "List active Bloom projects to find project IDs.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "bloom_list_tasks",
+        "description": "List tasks in a Bloom project board; use hybrid_rag_search for global search.",
+        "parameters": {"type": "object",
+                       "properties": {"projectId": {"type": "integer"},
+                                      "status": {"type": "string", "enum": ["todo", "in_progress", "done"]},
+                                      "q": {"type": "string"}},
+                       "required": []},
+    },
+    {
+        "type": "function",
+        "name": "list_inbox_items",
+        "description": "List inbox items from email, SMS, Beeper, and LinkedIn.",
+        "parameters": {"type": "object",
+                       "properties": {"triage_status": {"type": "string", "enum": ["unprocessed", "triaged", "snoozed", "archived", "actioned", "all"]},
+                                      "search": {"type": "string"},
+                                      "limit": {"type": "integer"}},
+                       "required": []},
+    },
 ]
 
 
@@ -207,6 +258,20 @@ Never claim success you didn't independently observe. An honest "couldn't confir
 def _verify_wrap(instruction: str) -> str:
     """Prepend the verify-or-be-honest harness to a delegated instruction."""
     return f"{VERIFY_HARNESS}\n\n--- TASK ---\n{instruction}"
+
+
+# Claude-mode delegation runs Sonnet as an ORCHESTRATOR: it plans and does routine
+# work itself, and escalates only the genuinely hard parts to Fable subagents (or
+# fans out mechanical sweeps to Haiku). Keeps most voice-delegated tasks fast and
+# cheap while hard problems still get the strongest model.
+ORCHESTRATOR_HARNESS = """You are the ORCHESTRATOR for this task. Handle planning and routine work yourself. When a subtask genuinely needs deeper reasoning than you can confidently deliver — hard architecture, gnarly debugging, high-stakes writing — spawn a subagent via the Agent tool with model "fable" for it; for large mechanical fan-out (many similar small lookups/edits) use model "haiku" subagents in parallel. Small or straightforward tasks: just do them yourself, no subagents."""
+
+
+def _orchestrator_wrap(instruction: str, mode: str) -> str:
+    """Prepend the orchestrator harness for claude-mode delegation only."""
+    if mode != "claude":
+        return instruction
+    return f"{ORCHESTRATOR_HARNESS}\n\n{instruction}"
 
 
 def _completion_signal(out: str, done: str) -> str:
@@ -239,9 +304,9 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
     mode = live.get("delegate", "pi")
     if not instruction or mode == "off":
         return None
-    instruction = _verify_wrap(instruction)
+    instruction = _verify_wrap(_orchestrator_wrap(instruction, mode))
     if mode == "claude":
-        agent_cmd = "claude -p"
+        agent_cmd = f"claude -p --model {live.get('claude_model', 'sonnet')} --permission-mode acceptEdits"
     else:
         agent_cmd = f"pi -p --model {live.get('pi_model', 'deepseek-v4-flash')}"
     try:
@@ -279,7 +344,11 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
             cmd = f"osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
         else:
             # Headless: detached, no window, auto-wakes + speaks the result. </dev/null so
-            # it doesn't block on stdin.
+            # it doesn't block on stdin. cd into the workspace first — the live shell's
+            # cwd drifts with the conversation, and the agent must always start in the
+            # trusted workspace (loads its CLAUDE.md, no trust prompt).
+            ws = os.path.expanduser(live.get("workspace") or "~")
+            runner = f"cd {shlex.quote(ws)} && {runner}"
             cmd = f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown"
         # Return the out-path too so the caller can open a live log window on it.
         return (cmd, out)
@@ -365,8 +434,18 @@ if __name__ == "__main__":
         # Headless prompts must NOT carry it (the shell drops .done for them).
         hcmd, hout = _build_delegate_cmd("y", {"live": {"delegate": "pi"}})
         hprompt = hout[:-4] + ".prompt"
-        assert "SIGNAL COMPLETION" not in open(hprompt, encoding="utf-8").read(), \
+        htext = open(hprompt, encoding="utf-8").read()  # read now — same-second builds share a tid and overwrite
+        assert "SIGNAL COMPLETION" not in htext, \
             "headless prompt must not carry the completion signal"
-        print("tools self-check OK — verify harness + watch self-report wired")
+        # pi mode must NOT get the orchestrator harness.
+        assert "ORCHESTRATOR" not in htext
+        # Claude mode: Sonnet orchestrator, headless cd into workspace, orchestrator harness.
+        ccmd, cout = _build_delegate_cmd("z", {"live": {"delegate": "claude",
+                                                        "workspace": "~/Thrivbe-AI"}})
+        assert "--model sonnet" in ccmd, "claude mode must pin the sonnet orchestrator"
+        assert "Thrivbe-AI" in ccmd, "headless claude cmd must cd into the workspace"
+        ctext = open(cout[:-4] + ".prompt", encoding="utf-8").read()
+        assert "ORCHESTRATOR" in ctext, "claude prompt must carry the orchestrator harness"
+        print("tools self-check OK — verify harness + watch self-report + orchestrator wired")
     finally:
         config.TASKS_DIR = orig_tasks
