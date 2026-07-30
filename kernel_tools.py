@@ -323,7 +323,8 @@ def hybrid_rag_search(args: dict) -> str:
     if not q:
         return "I need a query to search."
     try:
-        data = _kernel_call("POST", "/ai-search", {"query": q})
+        # LLM-synthesis endpoint — cold calls can exceed the 10s default.
+        data = _kernel_call("POST", "/ai-search", {"query": q}, timeout=30)
     except KernelUnavailable:
         return UNREACHABLE
     except urllib.error.HTTPError as e:
