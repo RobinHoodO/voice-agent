@@ -32,7 +32,7 @@ BLANK SLATE: respond ONLY to what the user actually said. Never open with "I see
 
 PUTTING TEXT IN A WINDOW: you CAN type/paste into whatever app the user is in — call put_text with the exact text. It copies to the clipboard and pastes into the frontmost window. Use it whenever the user asks you to write, insert, or paste something into an email, doc, or field. Never claim you can't reach the clipboard or the window.
 
-DOING TASKS — ALWAYS DELEGATE: whenever the user asks you to DO something — build, fix, change, organize, write, run, set up, or carry out any task (not just answer a question) — call delegate with a clear, complete instruction AND a short task_name (e.g. 'routing-fix'). Do NOT do the task inline with run_shell. delegate runs the job as a named lane in the user's `voice` herdr workspace, survives this conversation, and when it finishes the voice agent automatically comes back and speaks the result — so hand it off, tell the user you've started it (by name), and move on. Don't wait or poll. TRACKING LANES: delegate_status lists every task and whether it's working, blocked, waiting for input, or finished. When the user gives feedback on a running task, send it into THAT task with continue_task — if you're not sure which task they mean, check delegate_status and ask rather than guess. Close finished lanes with close_finished_tasks; it never touches running ones, and closing a specific unfinished task requires the user naming it explicitly.
+DOING TASKS — ALWAYS DELEGATE: whenever the user asks you to DO something — build, fix, change, organize, write, run, set up, or carry out any task (not just answer a question) — call fleet first when the relevant pane is not already fresh in this conversation, then use delegate with a clear complete instruction and short task_name. Prefer continue_task for related work in an existing pane and say which pane you chose. For unrelated work, use delegate with reuse_pane only for a suitable idle Claude lane or shell: it clears Claude first and adopts the pane; pi lanes get a fresh spawn. Otherwise delegate starts fresh. Do NOT do tasks inline with run_shell, wait, or poll. fleet lists every workspace, named lane, and bare shell; use it before guessing a name. continue_task can adopt a foreign pane for requested work, and sending text to foreign panes is allowed, but never send /exit to or close the protected orchestrator. close_finished_tasks closes Pam's finished lanes freely; a named foreign close always needs Robin's spoken confirmation. Never request server stop, session stop, update, or --takeover. Every delegated path creates the completion sentinel so the result is spoken later.
 
 RECOGNIZING TASKS AS THEY COME UP: task-shaped discussion doesn't require an explicit "create a task" request — notice it live, the same way you'd notice it in a meeting. If the conversation lands on a decision, a fix, or a follow-up with an implied owner, that's an action item. Keep a running mental list through the conversation. When the discussion naturally wraps, or the user says something like "log those" / "sync that to Notion" / "add those as tasks", call notion_create_task for each item — it creates the task DIRECTLY in the Notion Tasks database, instantly, with the right defaults (assigned to Robin, status Next Up, near-term due date). A single, obvious action item can be captured immediately, but say what you're doing ("logging that as a task") so it's never a surprise. Use os_delegate only for non-task OS work (CRM updates, approvals, chasing).
 
@@ -68,6 +68,40 @@ def _load_memory_tail(n: int = 30) -> str:
         return ""
 
 
+HERDR_SKILL_PATH = os.path.expanduser("~/.claude/skills/herdr/SKILL.md")
+_herdr_skill_warned = False
+
+
+def _herdr_section(text: str, heading: str) -> str:
+    start = text.lower().find(heading.lower())
+    if start < 0:
+        return ""
+    rest = text[start:]
+    end = rest.find("\n## ", len(heading))
+    return rest if end < 0 else rest[:end]
+
+
+def _load_herdr_doctrine(limit: int = 1500) -> str:
+    """Small skill digest; an absent learned tail never blocks session startup."""
+    global _herdr_skill_warned
+    try:
+        with open(HERDR_SKILL_PATH, encoding="utf-8") as f:
+            text = f.read()
+        marker = "## Learned by Pam"
+        if marker not in text:
+            raise ValueError("Learned by Pam section missing")
+        protected = _herdr_section(text, "## PROTECTED")
+        etiquette = _herdr_section(text, "## Etiquette")
+        learned = text[text.index(marker):]
+        compact = (protected.strip()[:400], etiquette.strip()[:400], learned.strip()[:600])
+        digest = ("Herdr doctrine digest — read the full skill with run_shell before a non-routine move.\n"
+                  + "\n".join(part for part in compact if part))
+        return digest[:limit]
+    except Exception as e:
+        if not _herdr_skill_warned:
+            _herdr_skill_warned = True
+            _log(f"herdr doctrine unavailable: {e!r}")
+        return ""
 def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
     """LIVE_SYSTEM + per-session context from config: optional workspace + its skills,
     the delegation line, the memory tail, and what's under the cursor right now."""
@@ -93,6 +127,9 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
     deleg = _delegation_line(cfg)
     if deleg:
         blocks.append(deleg)
+    doctrine = _load_herdr_doctrine()
+    if doctrine:
+        blocks.append(doctrine)
     custom = ((cfg.get("live") or {}).get("custom_prompt") or "").strip()
     if custom:
         blocks.append("Your custom instructions (set by the user — follow these):\n" + custom)

@@ -78,8 +78,11 @@ Scraped status still appears in the confirmation preview ("currently working") a
 2. **The `orchestrator` agent is untouchable** — close refuses it even when confirmed;
    `/exit`-style text is refused too. Matches the skill's PROTECTED section, mechanically.
 3. **Foreign close requires the spoken gate** (table above).
-4. **Skill self-edits are append-only by construction** — `>>` only, into the last
-   section of the file.
+4. **Skill self-edits are append-only by convention** — `>>` only, into the last
+   section of the file. *(Post-review honesty note, 2026-07-31: unlike floors 1–3
+   this has no code chokepoint — the append runs through `run_shell`, so it is
+   doctrine the model is instructed to follow, not a mechanical guarantee. Adding
+   a dedicated append tool would break the 38-tool ceiling in §2; accepted as-is.)*
 
 Everything else — which pane to pick, reuse vs spawn, `--split right`/`--no-focus`, the
 Enter-after-paste gotcha, `/clear` semantics, supervision cadence — is **soft doctrine in

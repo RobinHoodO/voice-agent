@@ -73,19 +73,24 @@ TOOLS = [
         "parameters": {"type": "object",
                        "properties": {"instruction": {"type": "string"},
                                       "task_name": {"type": "string",
-                                                    "description": "Short kebab-case handle, e.g. 'routing-fix'. Optional; derived from the instruction if omitted."}},
+                                                    "description": "Short kebab-case handle, e.g. 'routing-fix'. Optional; derived from the instruction if omitted."},
+                                      "reuse_pane": {"type": "string",
+                                                     "description": "Spoken pane name to clear and reuse for this unrelated task. Omit to start a fresh lane."}},
                        "required": ["instruction"]},
     },
     {
         "type": "function",
-        "name": "delegate_status",
-        "description": "List Robin's delegated background tasks: each task's name and whether it is working, blocked, waiting for input, or finished. Use before continue_task if unsure which task Robin means.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "name": "fleet",
+        "description": "List every herdr pane across Robin's workspaces, including named agent lanes and bare shells. Pass pane to zoom into its recent output and process information before choosing where to continue work.",
+        "parameters": {"type": "object",
+                       "properties": {"pane": {"type": "string",
+                                                "description": "Spoken pane name from a previous fleet listing."}},
+                       "required": []},
     },
     {
         "type": "function",
         "name": "continue_task",
-        "description": "Send follow-up feedback into a specific running delegated task by name. If it's ambiguous which task Robin means, check delegate_status and ask him instead of guessing.",
+        "description": "Send follow-up feedback into any named herdr pane. If the pane is not already Pam's lane, it is adopted first; never target the protected orchestrator pane.",
         "parameters": {"type": "object",
                        "properties": {"task_name": {"type": "string"},
                                       "feedback": {"type": "string"}},
@@ -94,7 +99,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "close_finished_tasks",
-        "description": "Close the lanes of finished delegated tasks. Never touches running or blocked ones. Pass task_name to close one specific task explicitly (allowed even if unfinished, when Robin says so).",
+        "description": "Close finished Pam-owned lanes. Pass task_name to close one named pane; a foreign pane always requires Robin's spoken confirmation, and orchestrator is protected.",
         "parameters": {"type": "object",
                        "properties": {"task_name": {"type": "string"}},
                        "required": []},
@@ -469,27 +474,48 @@ def _completion_signal(out: str, done: str) -> str:
 
 HERDR = os.path.expanduser("~/.local/bin/herdr")
 LANE_PREFIX = "voice-"
+PROTECTED_AGENTS = frozenset({"orchestrator"})
+
+
+def _normalized_argv(args) -> tuple:
+    """Tokenize argv values before applying the hard global-command floor."""
+    out = []
+    for arg in args:
+        try:
+            bits = shlex.split(str(arg))
+        except ValueError:
+            bits = [str(arg)]
+        out.extend(bit.strip().strip("'\"").lower() for bit in bits if bit.strip())
+    return tuple(out)
+
+
+def _forbidden(args) -> bool:
+    argv = _normalized_argv(args)
+    return (argv[:2] in (("server", "stop"), ("session", "stop"))
+            or argv[:1] == ("update",)
+            or any(arg == "--takeover" or arg.startswith("--takeover=") for arg in argv))
 
 
 def _herdr(*args, timeout: int = 10):
     """Run one herdr CLI command; return its parsed `result` dict, or None on any
     failure (server down, timeout, bad JSON). Single seam for all herdr access."""
+    if _forbidden(args):
+        _log(f"refused forbidden herdr argv: {_normalized_argv(args)!r}")
+        return None
     try:
         r = subprocess.run([HERDR, *args], capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0 or not r.stdout.strip():
             return None
-        return json.loads(r.stdout).get("result")
+        payload = json.loads(r.stdout)
+        return payload if args[:2] == ("status", "--json") else payload.get("result")
     except Exception:
         return None
 
 
 def _herdr_up() -> bool:
-    # NOT via _herdr(): `status --json` has a different shape (no `result` wrapper)
-    # and exits 0 even when the server is down — liveness is in server.running.
+    # `status --json` exits 0 even when the server is down — liveness is in server.running.
     try:
-        r = subprocess.run([HERDR, "status", "--json"],
-                           capture_output=True, text=True, timeout=3)
-        return bool(json.loads(r.stdout).get("server", {}).get("running"))
+        return bool((_herdr("status", "--json", timeout=3) or {}).get("server", {}).get("running"))
     except Exception:
         return False
 
@@ -510,6 +536,50 @@ def _voice_lanes() -> list:
     listed = _herdr("agent", "list")
     return [a for a in (listed or {}).get("agents", [])
             if (a.get("name") or "").startswith(LANE_PREFIX)]
+
+
+def _all_panes() -> list:
+    """Every herdr pane, including foreign agent lanes and bare shells."""
+    listed = _herdr("pane", "list")
+    return list((listed or {}).get("panes", []))
+
+
+def _workspaces() -> list:
+    listed = _herdr("workspace", "list")
+    return list((listed or {}).get("workspaces", []))
+
+
+def _speakable_labels(panes=None, agents=None, workspaces=None) -> list:
+    """Join herdr's three inventories and attach the labels Robin can say aloud."""
+    panes = list(_all_panes() if panes is None else panes)
+    agents = list((_herdr("agent", "list") or {}).get("agents", [])
+                  if agents is None else agents)
+    workspaces = list(_workspaces() if workspaces is None else workspaces)
+    by_pane = {a.get("pane_id"): a for a in agents if a.get("pane_id")}
+    ws_names = {w.get("workspace_id"): (w.get("label") or w.get("workspace_id") or "workspace")
+                for w in workspaces}
+    records = []
+    for pane in panes:
+        rec = dict(pane)
+        agent = by_pane.get(rec.get("pane_id"))
+        if agent:
+            rec.update({k: v for k, v in agent.items() if v is not None})
+        rec["_workspace_label"] = (ws_names.get(rec.get("workspace_id"))
+                                   or rec.get("workspace_label") or "workspace")
+        records.append(rec)
+    shells = {}
+    for rec in sorted((r for r in records if not r.get("agent") and not r.get("name")),
+                      key=lambda r: (r.get("workspace_id") or "", r.get("pane_id") or "")):
+        ws = rec["_workspace_label"]
+        shells[ws] = shells.get(ws, 0) + 1
+        rec["_label"] = f"shell {shells[ws]} in {ws}"
+    for rec in records:
+        if rec.get("_label"):
+            continue
+        name = (rec.get("name") or "").strip()
+        rec["_label"] = (name[len(LANE_PREFIX):].replace("-", " ")
+                         if name.startswith(LANE_PREFIX) else name or "unnamed pane")
+    return records
 
 
 def _lane_sidecars() -> dict:
@@ -549,8 +619,48 @@ def _own_pane(pane_id: str, lanes=None) -> bool:
     return False
 
 
+def _is_protected(pane_id: str, lanes=None) -> bool:
+    for lane in (lanes if lanes is not None else (_herdr("agent", "list") or {}).get("agents", [])):
+        if lane.get("pane_id") == pane_id:
+            return (lane.get("name") or "").strip().lower() in PROTECTED_AGENTS
+    return False
+
+
+def _is_exit_text(text: str) -> bool:
+    return any(word.startswith("/exit") for word in (text or "").strip().lower().split())
+
+
+def _write_lane(tid: str, name: str, pane_id: str) -> None:
+    config.ensure_dirs()
+    with open(os.path.join(config.TASKS_DIR, f"{tid}.lane"), "w", encoding="utf-8") as f:
+        json.dump({"name": name, "pane_id": pane_id}, f)
+
+
+def _adopt_pane(pane_id: str, name: str, tid: str | None = None) -> str | None:
+    """Rename a requested non-protected pane into Pam's provenance registry."""
+    if not pane_id or _is_protected(pane_id):
+        return None
+    adopted = LANE_PREFIX + _slug(name)
+    lanes = _voice_lanes()
+    taken = {lane.get("name") for lane in lanes}
+    n, i = adopted, 2
+    while n in taken:
+        n, i = f"{adopted}-{i}", i + 1
+    adopted = n
+    if _herdr("agent", "rename", pane_id, adopted) is None:
+        return None
+    try:
+        if tid is None:
+            tid, _pf, _out, _done = _task_paths()
+        _write_lane(tid, adopted, pane_id)
+    except Exception as e:
+        _log(f"pane adoption sidecar failed: {e!r}")
+        return None
+    return adopted
+
+
 def _lane_send(pane_id: str, text: str, lanes=None) -> bool:
-    if not _own_pane(pane_id, lanes):
+    if not pane_id or _is_protected(pane_id, lanes) or _is_exit_text(text):
         return False
     if _herdr("agent", "send", pane_id, text) is None:
         return False
@@ -563,10 +673,25 @@ def _lane_send(pane_id: str, text: str, lanes=None) -> bool:
     return True
 
 
-def _lane_close(pane_id: str, lanes=None) -> bool:
-    if not _own_pane(pane_id, lanes):
+def _lane_close(pane_id: str, lanes=None, confirmed: bool = False) -> bool:
+    if _is_protected(pane_id, lanes) or (not confirmed and not _own_pane(pane_id, lanes)):
         return False
-    return _herdr("pane", "close", pane_id) is not None
+    if _herdr("pane", "close", pane_id) is None:
+        return False
+    try:
+        for f in os.listdir(config.TASKS_DIR):
+            if not f.endswith(".lane"):
+                continue
+            path = os.path.join(config.TASKS_DIR, f)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    if json.load(fh).get("pane_id") == pane_id:
+                        os.unlink(path)
+            except Exception:
+                continue
+    except Exception as e:
+        _log(f"lane sidecar cleanup failed: {e!r}")
+    return True
 
 
 def _slug(text: str) -> str:
@@ -591,6 +716,17 @@ def _task_paths():
         tid += "b"
     j = lambda ext: os.path.join(config.TASKS_DIR, f"{tid}{ext}")
     return tid, j(".prompt"), j(".out"), j(".done")
+
+
+def _mint_task(instruction: str, cfg: dict):
+    """Write one watched prompt and return its fresh tid plus sidecar paths."""
+    live = cfg.get("live") or {}
+    mode = live.get("delegate", "pi")
+    wrapped = _verify_wrap(_orchestrator_wrap(instruction, mode))
+    tid, pf, out, done = _task_paths()
+    with open(pf, "w", encoding="utf-8") as f:
+        f.write(wrapped + _completion_signal(out, done))
+    return tid, pf, out, done
 
 
 def _build_delegate_cmd(instruction: str, cfg: dict):
@@ -632,7 +768,8 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
         return None
 
 
-def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=None) -> str:
+def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=None,
+                  reuse_pane: str = "") -> str:
     """Launch a watched delegate as a named herdr lane in the `voice` workspace.
     Falls back to the headless path (via run_shell) when herdr is down or watching
     is disabled. Returns the spoken confirmation string."""
@@ -662,51 +799,107 @@ def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=No
         return _headless("herdr isn't running, so you can't watch this one —")
 
     name = LANE_PREFIX + _slug(task_name or instruction)
-    taken = {a.get("name") for a in _voice_lanes()}
+    lanes = _voice_lanes()
+    taken = {a.get("name") for a in lanes}
     n, i = name, 2
     while n in taken:
         n, i = f"{name}-{i}", i + 1
     name = n
 
-    try:
-        wrapped = _verify_wrap(_orchestrator_wrap(instruction, mode))
-        _tid, pf, out, done = _task_paths()
-        with open(pf, "w", encoding="utf-8") as f:
-            f.write(wrapped + _completion_signal(out, done))
-        ws = os.path.expanduser(live.get("workspace") or "~")
-        wsid = _voice_workspace(ws)
-        if not wsid:
-            return _headless("I couldn't reach the voice workspace, so")
-        # Shell first, never the raw binary: the `claude` zsh function (with bypass
-        # permissions baked in) only resolves through zsh — the raw binary would
-        # silently hang lanes on permission prompts nobody answers.
-        started = _herdr("agent", "start", name, "--cwd", ws, "--workspace", wsid,
-                         "--split", "right", "--no-focus", "--", "zsh")
-        pane_id = ((started or {}).get("agent") or {}).get("pane_id")
-        if not pane_id:
-            return _headless("I couldn't open a lane, so")
-        if mode == "claude":
-            run_cmd = f"claude --model {live.get('claude_model', 'sonnet')}"
-        else:
-            run_cmd = f"pi --model {live.get('pi_model', 'deepseek-v4-flash')}"
-        # pane run = text + Enter atomically; the pane's shell expands $(cat …), so
-        # the multi-KB prompt never gets typed and the Enter gotcha never applies.
-        _herdr("pane", "run", pane_id, f'{run_cmd} "$(cat {shlex.quote(pf)})"')
-        with open(os.path.join(config.TASKS_DIR, f"{_tid}.lane"), "w", encoding="utf-8") as f:
-            json.dump({"name": name, "pane_id": pane_id}, f)
-        spoken = name[len(LANE_PREFIX):].replace("-", " ")
-        return (f"Started it as '{spoken}' in your voice workspace — "
-                "I'll come back with the result when it's done.")
-    except Exception as e:
-        _log(f"lane launch failed: {e!r}")
-        return _headless("the lane launch failed, so")
+    def _spawn_fresh(reason: str = "") -> str:
+        try:
+            tid, pf, _out, _done = _mint_task(instruction, cfg)
+            ws = os.path.expanduser(live.get("workspace") or "~")
+            wsid = _voice_workspace(ws)
+            if not wsid:
+                return _headless("I couldn't reach the voice workspace, so")
+            # Shell first, never the raw binary: the `claude` zsh function (with bypass
+            # permissions baked in) only resolves through zsh — the raw binary would
+            # silently hang lanes on permission prompts nobody answers.
+            started = _herdr("agent", "start", name, "--cwd", ws, "--workspace", wsid,
+                             "--split", "right", "--no-focus", "--", "zsh")
+            pane_id = ((started or {}).get("agent") or {}).get("pane_id")
+            if not pane_id:
+                return _headless("I couldn't open a lane, so")
+            if mode == "claude":
+                run_cmd = f"claude --model {live.get('claude_model', 'sonnet')}"
+            else:
+                run_cmd = f"pi --model {live.get('pi_model', 'deepseek-v4-flash')}"
+            # pane run = text + Enter atomically; the pane's shell expands $(cat …), so
+            # the multi-KB prompt never gets typed and the Enter gotcha never applies.
+            _herdr("pane", "run", pane_id, f'{run_cmd} "$(cat {shlex.quote(pf)})"')
+            _write_lane(tid, name, pane_id)
+            spoken = name[len(LANE_PREFIX):].replace("-", " ")
+            prefix = f"{reason} " if reason else ""
+            return (f"{prefix}Started it as '{spoken}' in your voice workspace — "
+                    "I'll come back with the result when it's done.")
+        except Exception as e:
+            _log(f"lane launch failed: {e!r}")
+            return _headless("the lane launch failed, so")
+
+    if reuse_pane:
+        target = _find_lane(reuse_pane, _speakable_labels())
+        if target is None:
+            return _spawn_fresh("I couldn't find that pane, so")
+        pane_id = target.get("pane_id")
+        if _is_protected(pane_id):
+            return _spawn_fresh("That pane is protected, so")
+        if target.get("agent_status") == "working":
+            return _spawn_fresh("That pane is currently working, so")
+        info = _herdr("pane", "process-info", pane_id) or {}
+
+        def _process_words(value):
+            if isinstance(value, dict):
+                for item in value.values():
+                    yield from _process_words(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    yield from _process_words(item)
+            elif isinstance(value, str):
+                yield os.path.basename(value).lower()
+
+        process = set(_process_words(info))
+        agent_type = (target.get("agent") or "").strip().lower()
+        kind = "pi" if agent_type == "pi" or "pi" in process else (
+            "claude" if agent_type == "claude" or "claude" in process else "shell")
+        if kind == "pi":
+            return _spawn_fresh("I can't safely reuse a pi lane yet, so")
+        try:
+            if kind == "claude":
+                if not _lane_send(pane_id, "/clear"):
+                    return _spawn_fresh("That Claude lane would not clear, so")
+                if _herdr("agent", "wait", pane_id, "--status", "idle", "--timeout", "8000",
+                          timeout=10) is None:
+                    return _spawn_fresh("That Claude lane did not become ready, so")
+            tid, pf, _out, _done = _mint_task(instruction, cfg)
+            adopted = _adopt_pane(pane_id, task_name or instruction, tid)
+            if not adopted:
+                return _spawn_fresh("I couldn't adopt that pane, so")
+            if kind == "claude":
+                _lane_send(pane_id, f"Read {pf} and execute it exactly")
+            else:
+                run_cmd = (f"claude --model {live.get('claude_model', 'sonnet')}"
+                           if mode == "claude" else
+                           f"pi --model {live.get('pi_model', 'deepseek-v4-flash')}")
+                _herdr("pane", "run", pane_id, f'{run_cmd} "$(cat {shlex.quote(pf)})"')
+            spoken = adopted[len(LANE_PREFIX):].replace("-", " ")
+            return (f"Cleared and reused '{target['_label']}' as '{spoken}' — "
+                    "I'll come back with the result when it's done.")
+        except Exception as e:
+            _log(f"lane reuse failed: {e!r}")
+            return _spawn_fresh("the lane reuse failed, so")
+
+    return _spawn_fresh()
 
 
 def _lane_state(a, sidecars) -> str:
-    """One word of speakable state for a live lane."""
+    """One word of speakable state for a lane, including sidecar-less ones."""
+    a = a or {}
     rec = sidecars.get(a.get("pane_id"))
     if _lane_done(rec):
         return "finished"
+    if not a.get("name") and not a.get("agent"):
+        return "sitting at a prompt"
     st = a.get("agent_status")
     if st == "working":
         return "working"
@@ -717,31 +910,71 @@ def _lane_state(a, sidecars) -> str:
     return "paused, probably waiting for your input"
 
 
-def delegate_status(args: dict = None) -> str:
+def fleet(args: dict = None) -> str:
     if not _herdr_up():
         return "herdr isn't running, so there are no watchable tasks. Headless ones still announce themselves when done."
-    lanes = _voice_lanes()
-    if not lanes:
-        return "No delegated tasks in the voice workspace right now."
+    args = args or {}
+    panes = _speakable_labels()
+    if not panes:
+        return "No herdr panes are open right now."
     sidecars = _lane_sidecars()
-    parts = []
-    for a in lanes:
-        spoken = (a.get("name") or "")[len(LANE_PREFIX):].replace("-", " ")
-        rec = sidecars.get(a.get("pane_id"))
-        age = f", started {_age_min(rec['mtime'])} minutes ago" if rec else ""
-        parts.append(f"{spoken}: {_lane_state(a, sidecars)}{age}")
-    n = len(lanes)
-    return f"{n} task{'s' if n > 1 else ''} — " + "; ".join(parts) + "."
+    wanted = (args.get("pane") or "").strip()
+    if wanted:
+        pane = _find_lane(wanted, panes)
+        if pane is None:
+            return f"I don't see a pane called {wanted}."
+        recent = _herdr("agent", "read", pane["pane_id"], "--source", "recent") or {}
+        proc = _herdr("pane", "process-info", pane["pane_id"]) or {}
+        return (f"{pane['_label']} in {pane['_workspace_label']} is "
+                f"{_lane_state(pane, sidecars)}. Recent: {json.dumps(recent)[:500]}. "
+                f"Process: {json.dumps(proc)[:300]}.")
+    by_ws = {}
+    for pane in panes:
+        by_ws.setdefault(pane["_workspace_label"], []).append(pane)
+    sentences = [f"{len(by_ws)} workspace{'s' if len(by_ws) != 1 else ''} and {len(panes)} panes."]
+    for ws, group in by_ws.items():
+        shown = group
+        if len(panes) > 8:
+            shown = [p for p in group if _lane_state(p, sidecars) != "paused, probably waiting for your input"
+                     or _lane_done(sidecars.get(p.get("pane_id")))]
+        bits = []
+        for pane in shown:
+            state = _lane_state(pane, sidecars)
+            bits.append(f"{pane['_label']} is {state}")
+        hidden = len(group) - len(shown)
+        if hidden:
+            bits.append(f"{hidden} other idle pane{'s' if hidden != 1 else ''}")
+        sentences.append(f"In {ws}: " + ", ".join(bits or ["all panes are idle"]) + ".")
+        if len(sentences) >= 6:
+            break
+    return " ".join(sentences)
 
 
 def _find_lane(task_name: str, lanes):
-    """Resolve a spoken/kebab name to a live lane, forgiving the voice- prefix."""
-    want = _slug(task_name) if " " in (task_name or "") else (task_name or "").lower().strip()
-    want = want[len(LANE_PREFIX):] if want.startswith(LANE_PREFIX) else want
-    want = want.replace(" ", "-")
-    for a in lanes:
-        if (a.get("name") or "")[len(LANE_PREFIX):] == want:
-            return a
+    """Resolve the inventory's spoken label, then fall back to a unique substring."""
+    numbers = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+               "six": "6", "seven": "7", "eight": "8", "nine": "9"}
+
+    def _spoken(text):
+        return " ".join(numbers.get(word, word) for word in (text or "").lower()
+                        .replace("-", " ").split())
+
+    want = _spoken(task_name)
+    if want.startswith("voice "):
+        want = want[6:]
+    exact = []
+    partial = []
+    for lane in lanes:
+        label = _spoken(lane.get("_label") or lane.get("name"))
+        name = _spoken(lane.get("name"))
+        if want in (label, name[6:] if name.startswith("voice ") else name):
+            exact.append(lane)
+        elif want and (want in label or want in name):
+            partial.append(lane)
+    if len(exact) == 1:
+        return exact[0]
+    if len(partial) == 1:
+        return partial[0]
     return None
 
 
@@ -752,43 +985,71 @@ def continue_task(args: dict) -> str:
         return "I need both the task name and the feedback."
     if not _herdr_up():
         return "herdr isn't running — I can't reach that task's lane."
-    lanes = _voice_lanes()
+    lanes = _speakable_labels()
     lane = _find_lane(task_name, lanes)
     if lane is None:
-        return f"I don't see a task called {task_name}. Ask me for the task list."
+        return f"I don't see a pane called {task_name}. Ask me for the fleet."
+    if _is_protected(lane["pane_id"]):
+        return "I won't send text to the protected orchestrator pane."
     # New tid + sentinel so the auto-wake fires again for this follow-up. Keep the
     # message single-line: multi-line pastes need extra Enters to submit.
     _tid, _pf, out, done = _task_paths()
-    open(_pf, "w", encoding="utf-8").write(feedback)  # de-collision marker + audit trail
+    with open(_pf, "w", encoding="utf-8") as f:
+        f.write(feedback)  # de-collision marker + audit trail
+    name = lane.get("name") or LANE_PREFIX + _slug(task_name)
+    if not _own_pane(lane["pane_id"]):
+        adopted = _adopt_pane(lane["pane_id"], task_name, _tid)
+        if not adopted:
+            return "I couldn't adopt that pane — it may have just closed."
+        name = adopted
+        lane["name"] = adopted
     msg = (" ".join(feedback.split())
            + f" — when this follow-up is done, write your updated summary to {out} "
            f"and then run: touch {shlex.quote(done)}")
     if not _lane_send(lane["pane_id"], msg, lanes):
         return "That lane didn't accept input — it may have just closed."
-    with open(os.path.join(config.TASKS_DIR, f"{_tid}.lane"), "w", encoding="utf-8") as f:
-        json.dump({"name": lane["name"], "pane_id": lane["pane_id"]}, f)
-    spoken = lane["name"][len(LANE_PREFIX):].replace("-", " ")
+    if _own_pane(lane["pane_id"]):
+        _write_lane(_tid, name, lane["pane_id"])
+    spoken = name[len(LANE_PREFIX):].replace("-", " ") if name.startswith(LANE_PREFIX) else lane["_label"]
     return f"Passed that on to {spoken} — I'll speak up when it reports back."
 
 
-def close_finished_tasks(args: dict = None) -> str:
+def close_gate(args: dict = None) -> bool:
+    """Whether a named close crosses the foreign-pane spoken confirmation boundary."""
     task_name = ((args or {}).get("task_name") or "").strip()
+    if not task_name or task_name.lower().strip() in PROTECTED_AGENTS:
+        return False
+    if not _herdr_up():
+        return False
+    lane = _find_lane(task_name, _speakable_labels())
+    return bool(lane and not _own_pane(lane["pane_id"]))
+
+
+def close_finished_tasks(args: dict = None, confirmed: bool = False) -> str:
+    task_name = ((args or {}).get("task_name") or "").strip()
+    if task_name.lower() in PROTECTED_AGENTS:
+        return "I won't close the protected orchestrator pane."
     if not _herdr_up():
         return "herdr isn't running — nothing to close."
-    lanes = _voice_lanes()
+    lanes = _speakable_labels()
     sidecars = _lane_sidecars()
     if task_name:
         lane = _find_lane(task_name, lanes)
         if lane is None:
-            return f"I don't see a task called {task_name}."
-        spoken = lane["name"][len(LANE_PREFIX):].replace("-", " ")
-        if _lane_close(lane["pane_id"], lanes):
+            return f"I don't see a pane called {task_name}."
+        if _is_protected(lane["pane_id"]):
+            return "I won't close the protected orchestrator pane."
+        spoken = lane["_label"]
+        own = _own_pane(lane["pane_id"])
+        if not own and not confirmed:
+            return f"Closing {spoken} needs Robin's spoken confirmation."
+        if _lane_close(lane["pane_id"], lanes, confirmed=confirmed):
             return f"Closed {spoken}."
-        return f"I couldn't close {spoken} — it isn't a lane I own."
+        return f"I couldn't close {spoken} — it may have just closed."
     closed, kept = [], []
     for a in lanes:
-        spoken = (a.get("name") or "")[len(LANE_PREFIX):].replace("-", " ")
-        if _lane_done(sidecars.get(a.get("pane_id"))):
+        spoken = a["_label"]
+        if _own_pane(a["pane_id"]) and _lane_done(sidecars.get(a.get("pane_id"))):
             (closed if _lane_close(a["pane_id"], lanes) else kept).append(spoken)
         else:
             kept.append(f"{spoken} ({_lane_state(a, sidecars)})")
@@ -846,9 +1107,7 @@ def _put_text(text: str, paste: bool = True) -> str:
 
 
 if __name__ == "__main__":
-    # Self-check: delegate prompts must carry the verify harness; herdr lanes must be
-    # launched, continued, and closed ONLY through the voice- ownership chokepoint;
-    # herdr-down must fall back headless. herdr itself is faked — no server needed.
+    # Self-check: every herdr call is faked — no live panes are touched.
     import tempfile
     cfg = {"live": {"delegate": "pi", "show_task_terminals": False}}
     orig_tasks = config.TASKS_DIR
@@ -889,9 +1148,29 @@ if __name__ == "__main__":
         finally:
             globals()["HARNESS_PATH"] = _real_harness
 
+        # --- hard floor ----------------------------------------------------
+        class _Result:
+            returncode = 0
+            stdout = '{"result": {}}'
+
+        subprocess_calls = []
+        real_run = subprocess.run
+        subprocess.run = lambda argv, **kwargs: subprocess_calls.append(argv) or _Result()
+        try:
+            for argv in (("server", "stop"), ("session", "stop"), ("update",),
+                         ("agent", "attach", "'--takeover'"),
+                         ("agent", "attach", "--takeover=true")):
+                assert _herdr(*argv) is None, f"denylist admitted {argv!r}"
+            assert _herdr("agent", "list") == {}, "agent list must stay available"
+            assert _herdr("pane", "close", "w9:p7") == {}, "pane close must stay available"
+        finally:
+            subprocess.run = real_run
+
         # --- fake herdr ----------------------------------------------------
         calls = []
-        FAKE = {"agents": [], "workspaces": [{"label": "voice", "workspace_id": "w9"}]}
+        FAKE = {"agents": [], "panes": [],
+                "workspaces": [{"label": "voice", "workspace_id": "w9"},
+                               {"label": "home", "workspace_id": "w2"}]}
 
         def fake_herdr(*args, timeout=10):
             calls.append(args)
@@ -899,13 +1178,35 @@ if __name__ == "__main__":
                 return {"workspaces": FAKE["workspaces"]}
             if args[:2] == ("agent", "list"):
                 return {"agents": FAKE["agents"]}
+            if args[:2] == ("pane", "list"):
+                return {"panes": FAKE["panes"]}
             if args[:2] == ("agent", "start"):
                 a = {"name": args[2], "pane_id": "w9:p7", "agent_status": "working"}
                 FAKE["agents"].append(a)
+                FAKE["panes"].append({"pane_id": "w9:p7", "workspace_id": "w9", "agent": "claude"})
                 return {"agent": a}
+            if args[:2] == ("agent", "rename"):
+                pane_id, name = args[2], args[3]
+                for a in FAKE["agents"]:
+                    if a.get("pane_id") == pane_id:
+                        a["name"] = name
+                        break
+                else:
+                    FAKE["agents"].append({"name": name, "pane_id": pane_id,
+                                           "agent_status": "idle"})
+                return {}
+            if args[:2] == ("pane", "process-info"):
+                pane = next((p for p in FAKE["panes"] if p.get("pane_id") == args[2]), {})
+                return {"argv": pane.get("argv", [pane.get("agent", "zsh")])}
+            if args[:2] == ("pane", "close"):
+                pane_id = args[2]
+                FAKE["panes"][:] = [p for p in FAKE["panes"] if p.get("pane_id") != pane_id]
+                FAKE["agents"][:] = [a for a in FAKE["agents"] if a.get("pane_id") != pane_id]
+                return {}
             return {}
         globals()["_herdr"] = fake_herdr
         globals()["_herdr_up"] = lambda: FAKE.get("up", True)
+        globals()["time"].sleep = lambda _s: None
 
         wcfg = {"live": {"delegate": "claude", "show_task_terminals": True,
                          "workspace": "~/Thrivbe-AI"}}
@@ -913,26 +1214,35 @@ if __name__ == "__main__":
         assert "routing fix" in spoken, spoken
         lanes = [f for f in os.listdir(config.TASKS_DIR) if f.endswith(".lane")]
         assert len(lanes) == 1, "lane sidecar not written"
-        rec = json.load(open(os.path.join(config.TASKS_DIR, lanes[0])))
+        with open(os.path.join(config.TASKS_DIR, lanes[0]), encoding="utf-8") as f:
+            rec = json.load(f)
         assert rec == {"name": "voice-routing-fix", "pane_id": "w9:p7"}
-        wtext = next(open(os.path.join(config.TASKS_DIR, f), encoding="utf-8").read()
+        def _read_utf8(path):
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+
+        wtext = next(_read_utf8(os.path.join(config.TASKS_DIR, f))
                      for f in os.listdir(config.TASKS_DIR)
                      if f.endswith(".prompt")
-                     and "SIGNAL COMPLETION" in open(os.path.join(config.TASKS_DIR, f)).read())
+                     and "SIGNAL COMPLETION" in _read_utf8(os.path.join(config.TASKS_DIR, f)))
         assert "ORCHESTRATOR" in wtext, "watched claude prompt must carry harness + signal"
         run_calls = [c for c in calls if c[:2] == ("pane", "run")]
         assert run_calls and "claude --model sonnet" in run_calls[0][3], "lane must run claude via the zsh function"
 
-        # ownership chokepoint: foreign panes are untouchable even if live
-        FAKE["agents"].append({"name": "orchestrator", "pane_id": "w2:p1", "agent_status": "idle"})
-        assert not _lane_close("w2:p1"), "must refuse to close a non-voice lane"
-        assert not _lane_send("w2:p1", "hi"), "must refuse to send into a non-voice lane"
-        assert not _lane_close("w9:p99"), "must refuse a pane with no sidecar"
+        # Protected close refuses before touching herdr, even with confirmed execution.
+        before = len(calls)
+        assert "won't close" in close_finished_tasks({"task_name": "orchestrator"}, confirmed=True)
+        assert len(calls) == before, "orchestrator close made a herdr call"
 
-        # status + continue + close
-        st = delegate_status()
-        assert "routing fix" in st and ("working" in st), st
-        globals()["time"].sleep = lambda s: None  # skip the 1.5s re-enter wait
+        # Foreign send is deliberately ungated; foreign close is deliberately not.
+        FAKE["agents"].append({"name": "foreign", "pane_id": "w2:p1", "agent_status": "idle"})
+        FAKE["panes"].append({"pane_id": "w2:p1", "workspace_id": "w2", "agent": "claude"})
+        assert _lane_send("w2:p1", "hi"), "foreign send must remain available"
+        before = len(calls)
+        assert "confirmation" in close_finished_tasks({"task_name": "foreign"}).lower()
+        assert not any(c[:2] == ("pane", "close") for c in calls[before:]), "unconfirmed foreign close ran"
+
+        # Own finished lanes stay ungated, and a successful close removes their sidecar.
         cont = continue_task({"task_name": "routing fix", "feedback": "also check the fallback"})
         assert "routing fix" in cont, cont
         assert any(c[:2] == ("agent", "send") and c[2] == "w9:p7" for c in calls), "feedback must land in the named lane"
@@ -941,13 +1251,15 @@ if __name__ == "__main__":
         # mark the newest tid done -> now closable
         newest = max((f for f in os.listdir(config.TASKS_DIR) if f.endswith(".lane")),
                      key=lambda f: os.path.getmtime(os.path.join(config.TASKS_DIR, f)))
-        open(os.path.join(config.TASKS_DIR, newest[:-5] + ".done"), "w").close()
+        with open(os.path.join(config.TASKS_DIR, newest[:-5] + ".done"), "w", encoding="utf-8"):
+            pass
         res = close_finished_tasks({})
         assert "routing fix" in res and "Closed 1" in res, res
+        assert not os.path.exists(os.path.join(config.TASKS_DIR, newest)), "close leaked its lane sidecar"
         # herdr down -> headless fallback that still says so
         FAKE["up"] = False
         spoken = delegate_task("quick job", wcfg, run_shell=lambda c: None)
         assert "herdr isn't running" in spoken, spoken
-        print("tools self-check OK — harness + herdr lanes + ownership chokepoint + headless fallback wired")
+        print("tools self-check OK — harness + hard floor + provenance close gate + headless fallback wired")
     finally:
         config.TASKS_DIR = orig_tasks

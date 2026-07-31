@@ -6,7 +6,7 @@ conversation: OpenAI Realtime speech-to-speech (in realtime.py), with barge-in, 
 optional agentic shell, cross-session memory, and awareness of what's under your
 cursor. One mode, one voice (OpenAI) — no push-to-talk, no ElevenLabs.
 """
-import os, socket, sys, subprocess, threading, time
+import os, queue, socket, sys, subprocess, threading, time
 
 # py2app puts the frozen python312.zip ahead of Contents/Resources on sys.path,
 # so `import realtime/pill/config` would load STALE zipped copies. Put our own dir
@@ -32,6 +32,36 @@ def LOG(msg):
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except Exception:
         pass
+
+
+def _prune_old_tasks() -> None:
+    """Drop stale task sidecars before launch seeding can silence fresh tids."""
+    try:
+        config.ensure_dirs()
+        cutoff = time.time() - 7 * 24 * 60 * 60
+        removed = 0
+        for name in os.listdir(config.TASKS_DIR):
+            path = os.path.join(config.TASKS_DIR, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.unlink(path)
+                    removed += 1
+            except Exception as e:
+                LOG(f"task prune skipped {name!r}: {e!r}")
+        if removed:
+            LOG(f"task prune removed {removed} stale sidecars")
+    except Exception as e:
+        LOG(f"task prune failed: {e!r}")
+
+
+def _seed_announced_tasks() -> set:
+    try:
+        config.ensure_dirs()
+        return {f[:-5] for f in os.listdir(config.TASKS_DIR) if f.endswith(".done")}
+    except Exception as e:
+        LOG(f"task seed failed: {e!r}")
+        return set()
+
 
 def accessibility_trusted():
     """True if macOS grants this process the Accessibility right pynput needs."""
@@ -114,14 +144,10 @@ class VoiceAgent(rumps.App):
         # Auto-wake: detached delegate jobs drop a .done sentinel in config.TASKS_DIR
         # when they finish. Seed _announced with any that already exist so we don't
         # replay stale results on launch, then poll for new ones.
-        self._announced = set()
-        try:
-            config.ensure_dirs()
-            for f in os.listdir(config.TASKS_DIR):
-                if f.endswith(".done"):
-                    self._announced.add(f[:-5])
-        except Exception as e:
-            LOG(f"task seed failed: {e!r}")
+        self._spoken_tasks = queue.Queue()
+        self._announcing = set()
+        _prune_old_tasks()
+        self._announced = _seed_announced_tasks()
         # reflect status into the menubar icon from the main thread
         rumps.Timer(self._tick, 0.3).start()
         rumps.Timer(self._check_tasks, 2.0).start()
@@ -279,24 +305,39 @@ class VoiceAgent(rumps.App):
             LOG(f"activity window close failed: {e!r}")
 
     # --- auto-wake on background task completion -----------------------------
+    def _task_spoken(self, tid):
+        """Realtime-loop callback; queue main-thread acknowledgement after injection."""
+        try:
+            self._spoken_tasks.put_nowait(tid)
+        except Exception as e:
+            LOG(f"task spoken queue failed: {e!r}")
+
     def _check_tasks(self, _):
         """Main-thread poll: when a delegated job drops a .done sentinel, wake the
-        agent (if idle) to speak its result. Skips jobs finished while we're already
-        live — the user is mid-conversation, so we don't barge in (the .out file
-        stays on disk; ponytail: idle-only auto-wake, no queueing)."""
+        agent (if idle) to speak its result. Live sessions queue results for their next
+        turn boundary; ponytail: mark announced only after speech is injected."""
         try:
+            while True:
+                try:
+                    spoken_tid = self._spoken_tasks.get_nowait()
+                    self._announced.add(spoken_tid)
+                    self._announcing.discard(spoken_tid)
+                except queue.Empty:
+                    break
             for f in sorted(os.listdir(config.TASKS_DIR)):
                 if not f.endswith(".done"):
                     continue
                 tid = f[:-5]
-                if tid in self._announced:
+                if tid in self._announced or tid in self._announcing:
                     continue
-                self._announced.add(tid)
-                if self.live_on:
-                    LOG(f"task {tid} done while live — not auto-waking")
+                live = self.live if self.live_on else None
+                if live is not None:
+                    if live.offer_task(tid, self._read_task_out(tid)):
+                        LOG(f"task {tid} done while live — queued for next turn")
                     continue
                 LOG(f"task {tid} done -> waking to speak result")
-                self._wake_and_speak(self._read_task_out(tid))
+                if self._wake_and_speak(self._read_task_out(tid), tid):
+                    self._announcing.add(tid)
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -313,7 +354,7 @@ class VoiceAgent(rumps.App):
             txt = ""
         return txt or "(the task finished but produced no output)"
 
-    def _wake_and_speak(self, text):
+    def _wake_and_speak(self, text, announce_tid=None):
         """Open a live session that speaks `text` first, then stays listening so the
         user can follow up and close it manually. Mirrors toggle_live's start path."""
         if config.get("ui.show_terminal", False):
@@ -322,14 +363,18 @@ class VoiceAgent(rumps.App):
         try:
             import realtime
             self.live = realtime.LiveSession(on_state=self._on_live_state, announce=text,
-                                             on_auto_stop=self._auto_stopped)
+                                             on_auto_stop=self._auto_stopped,
+                                             on_task_spoken=self._task_spoken,
+                                             announce_tid=announce_tid)
             self.live_on = True
             self.status = "listening"
             self.live.start()
+            return True
         except Exception as e:
             LOG(f"wake-and-speak failed: {e!r}")
             self.live_on = False
             self.status = "idle"
+            return False
 
     # --- audio device list (consumed by the Settings window) ----------------
     def _list_audio(self):
@@ -441,6 +486,7 @@ class VoiceAgent(rumps.App):
             if self.live:
                 self.live.stop()
                 self.live = None
+            self._announcing.clear()
             self.status = "idle"
             self._close_activity_window()   # detached background jobs keep running
             return
@@ -451,7 +497,8 @@ class VoiceAgent(rumps.App):
         try:
             import realtime
             self.live = realtime.LiveSession(on_state=self._on_live_state,
-                                             on_auto_stop=self._auto_stopped)
+                                             on_auto_stop=self._auto_stopped,
+                                             on_task_spoken=self._task_spoken)
             self.live_on = True
             self.status = "listening"
             self.live.start()
@@ -466,6 +513,7 @@ class VoiceAgent(rumps.App):
         attributes only (called off the realtime thread); the pill is reconciled in _tick."""
         self.live_on = False
         self.live = None
+        self._announcing.clear()
         self.status = "idle"
         self._close_activity_window()
 

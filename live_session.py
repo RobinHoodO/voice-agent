@@ -24,7 +24,7 @@ from realtime_client import SR, URL, VOICE, _headers, _selftest
 from shell import Shell
 import services
 from tools import (TOOLS, LOCAL_HIGH_STAKES, _extract_json, _put_text,
-                   delegate_task, delegate_status, continue_task, close_finished_tasks)
+                   delegate_task, fleet, continue_task, close_finished_tasks, close_gate)
 
 
 # Rough all-in OpenAI Realtime audio estimate; tune without code changes if billing shifts.
@@ -60,6 +60,7 @@ def _is_short_deny(text: str) -> bool:
 HIGH_STAKES_EXECUTORS = {
     "gmail_send": lambda args: services.gmail_send(args),
     "kernel_decide": lambda args: kernel_tools.kernel_decide(args),
+    "close_finished_tasks": lambda args: close_finished_tasks(args, confirmed=True),
 }
 
 
@@ -72,6 +73,8 @@ def _confirmation_preview(tool: str, args: dict) -> str:
     if tool == "kernel_decide":
         return (f"about to record decision {args.get('decision')} for approval "
                 f"{args.get('approvalId', args.get('approval_id'))}")
+    if tool == "close_finished_tasks":
+        return f"about to close the foreign pane '{args.get('task_name')}'"
     known = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3]) or "no arguments"
     return f"about to run {tool.replace('_', ' ')} with {known}"
 
@@ -93,10 +96,13 @@ class LiveSession(AudioMixin):
     (rumps) thread; everything else runs on the session's own asyncio thread.
     Audio I/O comes from AudioMixin."""
 
-    def __init__(self, on_state=None, announce=None, on_auto_stop=None):
+    def __init__(self, on_state=None, announce=None, on_auto_stop=None, on_task_spoken=None,
+                 announce_tid=None):
         self.on_state = on_state or (lambda s: None)
         self._announce = announce          # if set, speak this aloud right after opening
         self._on_auto_stop = on_auto_stop  # called when the idle/max watchdog ends the session
+        self._on_task_spoken = on_task_spoken
+        self._announce_tid = announce_tid
         self._session_start = 0.0          # loop.time() when this session opened
         self._last_speech = 0.0            # loop.time() of the last detected speech turn
         self._wall_start = 0.0             # wall-clock time when this session opened
@@ -121,6 +127,9 @@ class LiveSession(AudioMixin):
         self._turns: list = []                        # ["you: …", "agent: …"] for this conversation
         self.level: float = 0.0                       # live mic level 0..1 (drives the wave pill)
         self._cfg: dict = {}                          # snapshot of config for this session
+        self._offered_tasks: queue.Queue = queue.Queue()
+        self._offered_tids: set = set()
+        self._offered_lock = threading.Lock()
 
     # ----- lifecycle (called from main thread) -----
     def start(self) -> None:
@@ -502,6 +511,31 @@ class LiveSession(AudioMixin):
                                            "Result:\n" + txt + "\n]")}]},
         }))
         await self._ws.send(json.dumps({"type": "response.create"}))
+        tid, self._announce_tid = self._announce_tid, None
+        if tid and self._on_task_spoken:
+            try:
+                self._on_task_spoken(tid)
+            except Exception as e:
+                _log(f"task spoken callback failed: {e!r}")
+
+    def offer_task(self, tid: str, text: str) -> bool:
+        """Queue one completed task for the next natural response boundary."""
+        if not tid:
+            return False
+        with self._offered_lock:
+            if tid in self._offered_tids:
+                return False
+            self._offered_tids.add(tid)
+            self._offered_tasks.put((tid, text))
+        return True
+
+    def _drain_offered_tasks(self) -> list:
+        tasks = []
+        while True:
+            try:
+                tasks.append(self._offered_tasks.get_nowait())
+            except queue.Empty:
+                return tasks
 
     async def _inject_context_and_respond(self) -> None:
         self.on_state("thinking")
@@ -534,7 +568,30 @@ class LiveSession(AudioMixin):
                                           + ("(A screenshot of my screen is attached above.)\n" if shot else "")
                                           + "]"}]},
         }))
-        await self._ws.send(json.dumps({"type": "response.create"}))
+        finished = self._drain_offered_tasks()
+        try:
+            if finished:
+                preamble = ("One background task finished." if len(finished) == 1 else
+                            f"{len(finished)} background tasks finished.")
+                results = "\n\n".join(f"Task {tid}:\n{text}" for tid, text in finished)
+                await self._ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text",
+                                          "text": (f"[{preamble} Work their results naturally into "
+                                                   f"your next spoken reply:\n{results}\n]")}]},
+                }))
+            await self._ws.send(json.dumps({"type": "response.create"}))
+        except Exception:
+            for task in finished:
+                self._offered_tasks.put(task)
+            raise
+        if finished and self._on_task_spoken:
+            for tid, _text in finished:
+                try:
+                    self._on_task_spoken(tid)
+                except Exception as e:
+                    _log(f"task spoken callback failed: {e!r}")
 
     async def _do_tool(self, ev: dict) -> None:
         self.on_state("acting")          # running a tool/command — distinct from thinking
@@ -588,20 +645,30 @@ class LiveSession(AudioMixin):
                          f"recall \"<query>\"`.)")
             out = await self._loop.run_in_executor(
                 None, delegate_task, instr, self._cfg, args.get("task_name", ""),
-                self._run_in_shell)
+                self._run_in_shell, args.get("reuse_pane", ""))
             config.activity(f"🚀  delegated: {args.get('instruction', '')[:80]}")
-        elif name == "delegate_status":
-            out = await self._loop.run_in_executor(None, delegate_status, args)
-            _log(f"delegate_status: {out}")
-            config.activity("🛤  checked delegated tasks")
+        elif name == "fleet":
+            out = await self._loop.run_in_executor(None, fleet, args)
+            _log(f"fleet: {out}")
+            config.activity("🛤  checked herdr fleet")
         elif name == "continue_task":
             out = await self._loop.run_in_executor(None, continue_task, args)
             _log(f"continue_task: {out}")
             config.activity(f"🛤  follow-up → {args.get('task_name', '')[:40]}")
         elif name == "close_finished_tasks":
-            out = await self._loop.run_in_executor(None, close_finished_tasks, args)
-            _log(f"close_finished_tasks: {out}")
-            config.activity("🛤  closed finished task lanes")
+            needs_confirmation = await self._loop.run_in_executor(None, close_gate, args)
+            if needs_confirmation:
+                if getattr(self, "_pending_action", None):
+                    _log("close_finished_tasks: superseded a previously staged action")
+                self._pending_action = {"tool": name, "args": args, "ts": time.time()}
+                out = (f"CONFIRMATION REQUIRED: {_confirmation_preview(name, args)}. "
+                       "Ask the user to confirm out loud.")
+                _log(f"close_finished_tasks staged for confirmation: {args!r}")
+                config.activity("⏸  close finished tasks awaiting confirmation")
+            else:
+                out = await self._loop.run_in_executor(None, close_finished_tasks, args)
+                _log(f"close_finished_tasks: {out}")
+                config.activity("🛤  closed finished task lanes")
         elif name in self._high_stakes:
             # Irreversible or outward-facing → stage it; nothing runs until Robin says
             # yes out loud. Membership is DATA (kernel manifest highStakes ∪ the local
