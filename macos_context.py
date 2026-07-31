@@ -89,6 +89,21 @@ def _collect_text(el, out, depth=0, max_depth=8, max_items=60, child_cap=25):
             _collect_text(k, out, depth + 1, max_depth, max_items, child_cap)
 
 
+_BROWSER_URL_SCRIPT = {
+    "Safari": 'tell application "Safari" to get URL of current tab of front window',
+    "Google Chrome": 'tell application "Google Chrome" to get URL of active tab of front window',
+    "Brave Browser": 'tell application "Brave Browser" to get URL of active tab of front window',
+    "Microsoft Edge": 'tell application "Microsoft Edge" to get URL of active tab of front window',
+    "Arc": 'tell application "Arc" to get URL of active tab of front window',
+}
+
+
+def _browser_url(app: str) -> str:
+    """Active tab URL if `app` is a known browser, else '' (best-effort, silent)."""
+    script = _BROWSER_URL_SCRIPT.get(app)
+    return osa(script) if script else ""
+
+
 def _selected_text():
     """Whatever the user has highlighted, via the focused element (fast, no Cmd-C)."""
     try:
@@ -168,6 +183,11 @@ def grab_context():
     grab_window_screenshot.)"""
     app = osa('tell application "System Events" to name of first process whose frontmost is true')
     parts = []
+
+    if config.get("privacy.read_cursor_context", True) or config.get("privacy.read_window_context", False):
+        url = _browser_url(app)
+        if url:
+            parts.append(f"Page URL: {url}")
 
     if config.get("privacy.read_cursor_context", True):
         selected = _selected_text()

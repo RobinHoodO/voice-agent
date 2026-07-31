@@ -249,11 +249,15 @@ class VoiceAgent(rumps.App):
         try:
             config.activity("— watching —")   # guarantees the file exists for tail
             path = config.ACTIVITY_PATH.replace('"', '\\"')
+            # Capture the ID via the tab `do script` actually returns, not "window 1"
+            # (frontmost) — a concurrent osascript call opening another Terminal window
+            # (e.g. a delegate task) can interleave and steal frontmost first, making
+            # "window 1" resolve to the WRONG window (see _close_activity_window guard).
             script = (
                 'tell application "Terminal"\n'
                 ' activate\n'
-                f' do script "clear; tail -n 50 -f \\"{path}\\""\n'
-                ' return id of window 1\n'
+                f' set _tab to do script "clear; tail -n 50 -f \\"{path}\\""\n'
+                ' return id of (first window whose tabs contains _tab)\n'
                 'end tell')
             r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
             self._term_win_id = r.stdout.strip() or None
@@ -261,7 +265,9 @@ class VoiceAgent(rumps.App):
             LOG(f"activity window failed: {e!r}")
 
     def _close_activity_window(self):
-        """Close the Activity window when the conversation ends (if we opened one)."""
+        """Close the Activity window when the conversation ends (if we opened one).
+        Delegate tasks live in herdr lanes now (tools.py), so this Activity window is
+        the only Terminal window the app owns — no cross-tracker close race remains."""
         wid, self._term_win_id = self._term_win_id, None
         if not wid:
             return

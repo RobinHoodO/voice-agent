@@ -21,6 +21,14 @@ def _log(msg: str) -> None:
         pass
 
 
+# Tools that exist ONLY on this Mac (no kernel manifest entry) and must still be
+# confirmed out loud before they execute. Kernel-backed tools declare this through the
+# manifest's highStakes flag instead — never list one in both places; check_tool_drift
+# fails on double-declaration precisely because two sources of truth for "is this
+# dangerous" is how a gate silently goes missing.
+LOCAL_HIGH_STAKES = frozenset({"gmail_send"})
+
+
 # Realtime tool schema is flat (name/parameters at top level), unlike the
 # chat-completions nested {"function": {...}} shape in agent.py.
 TOOLS = [
@@ -61,18 +69,142 @@ TOOLS = [
     {
         "type": "function",
         "name": "delegate",
-        "description": "Hand a slow coding/research task to a background AI agent. Returns immediately and survives the conversation; when it finishes the voice agent automatically comes back and speaks the result. Don't wait or poll.",
+        "description": "Hand a slow coding/research task to a background AI agent in its own named herdr lane. Returns immediately and survives the conversation; when it finishes the voice agent automatically comes back and speaks the result. Don't wait or poll. Give it a short task_name so Robin can refer to it later ('continue the routing fix').",
+        "parameters": {"type": "object",
+                       "properties": {"instruction": {"type": "string"},
+                                      "task_name": {"type": "string",
+                                                    "description": "Short kebab-case handle, e.g. 'routing-fix'. Optional; derived from the instruction if omitted."}},
+                       "required": ["instruction"]},
+    },
+    {
+        "type": "function",
+        "name": "delegate_status",
+        "description": "List Robin's delegated background tasks: each task's name and whether it is working, blocked, waiting for input, or finished. Use before continue_task if unsure which task Robin means.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "continue_task",
+        "description": "Send follow-up feedback into a specific running delegated task by name. If it's ambiguous which task Robin means, check delegate_status and ask him instead of guessing.",
+        "parameters": {"type": "object",
+                       "properties": {"task_name": {"type": "string"},
+                                      "feedback": {"type": "string"}},
+                       "required": ["task_name", "feedback"]},
+    },
+    {
+        "type": "function",
+        "name": "close_finished_tasks",
+        "description": "Close the lanes of finished delegated tasks. Never touches running or blocked ones. Pass task_name to close one specific task explicitly (allowed even if unfinished, when Robin says so).",
+        "parameters": {"type": "object",
+                       "properties": {"task_name": {"type": "string"}},
+                       "required": []},
+    },
+    {
+        "type": "function",
+        "name": "os_delegate",
+        "description": "Hand BUSINESS/SYSTEM work to Robin's thrivbe-os worker: CRM updates, approvals, follow-ups/chasing, or anything in Robin's operating system. This only waits for the OS to accept the job; Robin gets a Telegram approval or summary later. For plain task capture use notion_create_task instead (instant, no approval loop); for Mac coding/research use the local `delegate` tool.",
         "parameters": {"type": "object",
                        "properties": {"instruction": {"type": "string"}},
                        "required": ["instruction"]},
     },
     {
         "type": "function",
-        "name": "os_delegate",
-        "description": "Hand BUSINESS/SYSTEM work to Robin's thrivbe-os worker: tasks, CRM updates, approvals, follow-ups/chasing, or anything in Robin's operating system such as 'create a task', 'update...', or 'chase...'. This only waits for the OS to accept the job; Robin gets a Telegram approval or summary later. Use the local `delegate` tool instead for Mac coding/research tasks.",
+        "name": "notion_create_task",
+        "description": "Create a task directly in Robin's Notion Tasks database. Instant — no approval loop. Defaults are applied automatically (assigned to Robin, status Next Up, near-term due date if none given).",
         "parameters": {"type": "object",
-                       "properties": {"instruction": {"type": "string"}},
-                       "required": ["instruction"]},
+                       "properties": {"title": {"type": "string"},
+                                      "due": {"type": "string", "description": "YYYY-MM-DD; omit to default near-term"},
+                                      "notes": {"type": "string"},
+                                      "status": {"type": "string", "description": "Defaults to 'Next Up'"}},
+                       "required": ["title"]},
+    },
+    {
+        "type": "function",
+        "name": "notion_search",
+        "description": "Search Robin's Notion workspace (pages and databases) by keyword; speaks the top hits.",
+        "parameters": {"type": "object",
+                       "properties": {"query": {"type": "string"}},
+                       "required": ["query"]},
+    },
+    {
+        "type": "function",
+        "name": "notion_list_tasks",
+        "description": "Read tasks from Robin's Notion Tasks database — filter by status (e.g. Focus, Backlog, Next Up, In Progress, Done) and/or a title keyword. Defaults to everything not Done. Use to answer what's on my list, what's in Focus, or what's overdue-sounding.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "status": {"type": "string",
+                                      "description": "Exact status name, e.g. Focus, Backlog, Next Up, Waiting, In Progress, Done. Omit for all open tasks."},
+                           "query": {"type": "string", "description": "Optional title keyword filter."}},
+                       "required": []},
+    },
+    {
+        "type": "function",
+        "name": "notion_update_task",
+        "description": "Update an existing Notion task's status and/or due date, found by its title (e.g. move a task from Focus to Backlog, or push a due date). If the title matches more than one task ambiguously, this asks Robin to say the exact title instead of guessing.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "title": {"type": "string", "description": "The task's title, as close to exact as possible."},
+                           "status": {"type": "string",
+                                      "description": "New status, e.g. Focus, Backlog, Next Up, Waiting, In Progress, Done."},
+                           "due": {"type": "string", "description": "New due date, YYYY-MM-DD."}},
+                       "required": ["title"]},
+    },
+    {
+        "type": "function",
+        "name": "front_search",
+        "description": "Search Robin's Front email conversations (client communication) by keyword.",
+        "parameters": {"type": "object",
+                       "properties": {"query": {"type": "string"}},
+                       "required": ["query"]},
+    },
+    {
+        "type": "function",
+        "name": "front_draft",
+        "description": "Create an email DRAFT in Front (never sends — Robin reviews and sends it there). Use for client/outreach email.",
+        "parameters": {"type": "object",
+                       "properties": {"to": {"type": "string"},
+                                      "subject": {"type": "string"},
+                                      "body": {"type": "string", "description": "HTML or plain text body"}},
+                       "required": ["to", "subject", "body"]},
+    },
+    {
+        "type": "function",
+        "name": "gmail_search",
+        "description": "Search Robin's Gmail (robin@thrivbe.com) with normal Gmail search syntax; speaks a short summary of the top mails.",
+        "parameters": {"type": "object",
+                       "properties": {"query": {"type": "string"}},
+                       "required": ["query"]},
+    },
+    {
+        "type": "function",
+        "name": "gmail_send",
+        "description": "Send an email from robin@thrivbe.com. This STAGES the send and requires Robin's spoken confirmation before anything goes out — state the recipient and subject, then ask him to confirm.",
+        "parameters": {"type": "object",
+                       "properties": {"to": {"type": "string"},
+                                      "subject": {"type": "string"},
+                                      "body": {"type": "string"}},
+                       "required": ["to", "subject", "body"]},
+    },
+    {
+        "type": "function",
+        "name": "calendar_add",
+        "description": "Create a Google Calendar event (Oslo time).",
+        "parameters": {"type": "object",
+                       "properties": {"title": {"type": "string"},
+                                      "date": {"type": "string", "description": "YYYY-MM-DD"},
+                                      "time": {"type": "string", "description": "HH:MM 24h"},
+                                      "duration": {"type": "integer", "description": "minutes, default 30"},
+                                      "attendees": {"type": "string", "description": "comma-separated emails"},
+                                      "meet": {"type": "boolean", "description": "add a Google Meet link"}},
+                       "required": ["title", "date", "time"]},
+    },
+    {
+        "type": "function",
+        "name": "drive_search",
+        "description": "Search Robin's Google Drive by file name/content; speaks the top matches.",
+        "parameters": {"type": "object",
+                       "properties": {"query": {"type": "string"}},
+                       "required": ["query"]},
     },
     {
         "type": "function",
@@ -250,6 +382,21 @@ TOOLS = [
                                       "limit": {"type": "integer"}},
                        "required": []},
     },
+    {
+        "type": "function",
+        "name": "hermes_fleet",
+        "description": "Read-only status of Robin's Hermes agent fleets: what each is running, reviewing, blocked on, or has queued. Omit pod for a summary of every fleet; pass pod for that one's task list. This only REPORTS — it never creates or assigns work, so use os_delegate to hand off a task.",
+        # No enum on `pod` — the roster is data (bridge/context/hermes-fleet.json) and
+        # the kernel's 400 names the valid ids, so a new pod needs no schema edit.
+        "parameters": {"type": "object",
+                       "properties": {"pod": {"type": "string",
+                                              "description": "Pod id from the fleet summary — currently helm (Helm org), grown (grown shop), pod-01 (Mingle), pod-02 (Ania), pod-03 (grown front desk). Omit for a fleet-wide summary."},
+                                      "status": {"type": "string",
+                                                 "enum": ["todo", "ready", "running", "review",
+                                                          "scheduled", "blocked", "triage", "done", "archived"],
+                                                 "description": "Optional filter; open tasks only by default."}},
+                       "required": []},
+    },
 ]
 
 
@@ -258,22 +405,25 @@ TOOLS = [
 # forces it to, instead of declaring success off a proxy (a script's "done" echo, a
 # tool's own success message). The closing VERIFIED/UNVERIFIED/FAILED tag is what the
 # voice agent relays out loud, so an honest "couldn't confirm" reaches the user.
-VERIFY_HARNESS = """Work to a VERIFIED end-state — not an "I ran the command" proxy.
-
-1. GOAL AS OBSERVABLE STATE: before acting, restate the task as a concrete, checkable end-state — what should be TRUE and directly observable when it's done (a file's contents, a command's output, a value on screen, a process running).
-2. ACT: do the task.
-3. VERIFY INDEPENDENTLY: confirm that end-state by OBSERVING it directly — read the file back, re-run the query, check the actual result. Never trust a tool's own "done"/success message or a script's echo: that is a proxy, not proof.
-4. ITERATE: if verification fails, diagnose and try a DIFFERENT approach. Repeat act→verify until the end-state actually holds, or you've genuinely exhausted reasonable approaches.
-5. REPORT HONESTLY — end your final message with exactly one tag line:
-   VERIFIED: <what's true now, and how you observed it>
-   UNVERIFIED: <what you did, what you could NOT confirm, and why>
-   FAILED: <what blocked it, what you tried>
-Never claim success you didn't independently observe. An honest "couldn't confirm" beats a false "done"."""
+#
+# The text lives in delegate-harness.md and is POINTED AT, not inlined: it's ~250 words
+# on every delegated call, and having it in a file means it can be edited and iterated
+# without touching code. A pointer also works for both `claude` and `pi` delegates —
+# both can read a file, whereas a Claude-Code skill would only load for one of them.
+HARNESS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delegate-harness.md")
 
 
 def _verify_wrap(instruction: str) -> str:
-    """Prepend the verify-or-be-honest harness to a delegated instruction."""
-    return f"{VERIFY_HARNESS}\n\n--- TASK ---\n{instruction}"
+    """Point the delegate at its working contract, then give it the task.
+
+    Raises if the harness file is missing rather than silently delegating without it —
+    an unharnessed agent reports success it never checked, which is the exact failure
+    this whole mechanism exists to prevent. Callers turn this into a spoken refusal.
+    """
+    if not os.path.isfile(HARNESS_PATH):
+        raise FileNotFoundError(f"delegation harness missing: {HARNESS_PATH}")
+    return (f"FIRST: read {HARNESS_PATH} and follow it exactly — it is your working "
+            f"contract for this task.\n\n--- TASK ---\n{instruction}")
 
 
 # Claude-mode delegation runs Sonnet as an ORCHESTRATOR: it plans and does routine
@@ -310,67 +460,345 @@ def _completion_signal(out: str, done: str) -> str:
             "Without this, the user never hears your result.")
 
 
+# --- herdr lanes: the registry for delegated background agents ---------------
+# Watched delegate tasks run as named lanes in a dedicated `voice` herdr
+# workspace instead of anonymous Terminal.app windows. herdr's own registry
+# (`agent list`) supplies liveness (working/idle/blocked); our `<tid>.lane`
+# sidecar files in TASKS_DIR join tasks to panes; the `.done` sentinel remains
+# the ONLY signal of completion (herdr `idle` just means claude finished a turn).
+
+HERDR = os.path.expanduser("~/.local/bin/herdr")
+LANE_PREFIX = "voice-"
+
+
+def _herdr(*args, timeout: int = 10):
+    """Run one herdr CLI command; return its parsed `result` dict, or None on any
+    failure (server down, timeout, bad JSON). Single seam for all herdr access."""
+    try:
+        r = subprocess.run([HERDR, *args], capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        return json.loads(r.stdout).get("result")
+    except Exception:
+        return None
+
+
+def _herdr_up() -> bool:
+    # NOT via _herdr(): `status --json` has a different shape (no `result` wrapper)
+    # and exits 0 even when the server is down — liveness is in server.running.
+    try:
+        r = subprocess.run([HERDR, "status", "--json"],
+                           capture_output=True, text=True, timeout=3)
+        return bool(json.loads(r.stdout).get("server", {}).get("running"))
+    except Exception:
+        return False
+
+
+def _voice_workspace(ws_dir: str):
+    """Workspace id of the `voice` herdr workspace, creating it if missing.
+    Discovered by label each time — stateless across app restarts."""
+    listed = _herdr("workspace", "list")
+    for w in (listed or {}).get("workspaces", []):
+        if w.get("label") == "voice":
+            return w.get("workspace_id")
+    created = _herdr("workspace", "create", "--cwd", ws_dir, "--label", "voice", "--no-focus")
+    return ((created or {}).get("workspace") or {}).get("workspace_id")
+
+
+def _voice_lanes() -> list:
+    """Live voice-owned lanes from herdr's registry."""
+    listed = _herdr("agent", "list")
+    return [a for a in (listed or {}).get("agents", [])
+            if (a.get("name") or "").startswith(LANE_PREFIX)]
+
+
+def _lane_sidecars() -> dict:
+    """pane_id -> {'name','pane_id','tid','mtime'} from the newest sidecar per pane.
+    Sidecars are `<tid>.lane` files; the newest one for a pane names the tid whose
+    .done sentinel decides whether that lane's task is finished."""
+    out = {}
+    try:
+        for f in os.listdir(config.TASKS_DIR):
+            if not f.endswith(".lane"):
+                continue
+            p = os.path.join(config.TASKS_DIR, f)
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    rec = json.load(fh)
+                rec["tid"] = f[:-5]
+                rec["mtime"] = os.path.getmtime(p)
+            except Exception:
+                continue
+            prev = out.get(rec.get("pane_id"))
+            if prev is None or rec["mtime"] > prev["mtime"]:
+                out[rec["pane_id"]] = rec
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _own_pane(pane_id: str, lanes=None) -> bool:
+    """Ownership chokepoint: True only if this pane is a live voice-prefixed lane
+    AND one of our sidecars points at it. Every mutating herdr call must pass
+    through this — it is the mechanical 'never touch foreign/active work' guarantee."""
+    if not pane_id or pane_id not in _lane_sidecars():
+        return False
+    for a in (lanes if lanes is not None else _voice_lanes()):
+        if a.get("pane_id") == pane_id and (a.get("name") or "").startswith(LANE_PREFIX):
+            return True
+    return False
+
+
+def _lane_send(pane_id: str, text: str, lanes=None) -> bool:
+    if not _own_pane(pane_id, lanes):
+        return False
+    if _herdr("agent", "send", pane_id, text) is None:
+        return False
+    _herdr("pane", "send-keys", pane_id, "enter")
+    # Documented gotcha: a multi-line paste may need a second Enter to submit.
+    time.sleep(1.5)
+    for a in _voice_lanes():
+        if a.get("pane_id") == pane_id and a.get("agent_status") == "idle":
+            _herdr("pane", "send-keys", pane_id, "enter")
+    return True
+
+
+def _lane_close(pane_id: str, lanes=None) -> bool:
+    if not _own_pane(pane_id, lanes):
+        return False
+    return _herdr("pane", "close", pane_id) is not None
+
+
+def _slug(text: str) -> str:
+    words = [w.strip(".,:;!?\"'").lower() for w in (text or "").split()[:3]]
+    return "-".join(w for w in words if w) or "task"
+
+
+def _lane_done(rec) -> bool:
+    """A lane's task is finished iff its newest tid's .done sentinel exists."""
+    return bool(rec) and os.path.exists(os.path.join(config.TASKS_DIR, f"{rec['tid']}.done"))
+
+
+def _age_min(mtime: float) -> int:
+    return max(0, int((time.time() - mtime) / 60))
+
+
+def _task_paths():
+    """Fresh (tid, prompt, out, done) paths; de-collides same-second builds."""
+    config.ensure_dirs()
+    tid = time.strftime("%H%M%S")
+    while os.path.exists(os.path.join(config.TASKS_DIR, f"{tid}.prompt")):
+        tid += "b"
+    j = lambda ext: os.path.join(config.TASKS_DIR, f"{tid}{ext}")
+    return tid, j(".prompt"), j(".out"), j(".done")
+
+
 def _build_delegate_cmd(instruction: str, cfg: dict):
-    """Write the instruction to a prompt file and return (shell command, out_path) that
-    runs the background agent DETACHED, capturing output to TASKS_DIR/<id>.out and
-    dropping a .done sentinel on completion (the menubar watcher polls for it to
-    auto-wake and speak the result). Returns None if delegation is off or empty."""
+    """HEADLESS fallback: write the instruction to a prompt file and return
+    (shell command, out_path) that runs the background agent DETACHED, capturing
+    output to TASKS_DIR/<id>.out and dropping a .done sentinel on completion (the
+    menubar watcher polls for it to auto-wake and speak the result). Returns None
+    if delegation is off or empty. Watched delegation goes via delegate_task."""
     instruction = (instruction or "").strip()
     live = cfg.get("live") or {}
     mode = live.get("delegate", "pi")
     if not instruction or mode == "off":
         return None
-    instruction = _verify_wrap(_orchestrator_wrap(instruction, mode))
     if mode == "claude":
         agent_cmd = f"claude -p --model {live.get('claude_model', 'sonnet')} --permission-mode acceptEdits"
     else:
         agent_cmd = f"pi -p --model {live.get('pi_model', 'deepseek-v4-flash')}"
     try:
-        config.ensure_dirs()
-        tid = time.strftime("%H%M%S")
-        pf = os.path.join(config.TASKS_DIR, f"{tid}.prompt")
-        out = os.path.join(config.TASKS_DIR, f"{tid}.out")
-        done = os.path.join(config.TASKS_DIR, f"{tid}.done")
-        watch = bool(live.get("show_task_terminals"))
-        # Watched tasks self-report completion (the agent writes <out> + touches <done>);
-        # headless tasks have the shell do it via the runner below.
-        prompt_text = instruction + _completion_signal(out, done) if watch else instruction
+        # Inside the try: a missing harness file must degrade to "couldn't start it",
+        # never to an unharnessed delegate.
+        instruction = _verify_wrap(_orchestrator_wrap(instruction, mode))
+        _tid, pf, out, done = _task_paths()
         with open(pf, "w", encoding="utf-8") as f:
-            f.write(prompt_text)
+            f.write(instruction)
         # $(cat prompt) avoids any shell-injection from the instruction text itself.
         # </dev/null is essential: detached under the live shell, the agent would
         # otherwise inherit an open stdin that never EOFs and block forever (0% CPU,
-        # no output, no .done — so the auto-wake never fires).
-        runner = (f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null > {shlex.quote(out)} 2>&1; '
+        # no output, no .done — so the auto-wake never fires). cd into the workspace
+        # first — the live shell's cwd drifts with the conversation, and the agent
+        # must always start in the trusted workspace (loads CLAUDE.md, no trust prompt).
+        ws = os.path.expanduser(live.get("workspace") or "~")
+        runner = (f'cd {shlex.quote(ws)} && '
+                  f'{agent_cmd} "$(cat {shlex.quote(pf)})" </dev/null > {shlex.quote(out)} 2>&1; '
                   f'touch {shlex.quote(done)}')
-        if watch:
-            # Open the agent INTERACTIVELY in its own Terminal (real TTY → the full live
-            # agent UI: tool calls, streaming, progress). The instruction is passed as the
-            # initial message, exactly as if the user typed it. NO `-p` and NO pipe — a pipe
-            # strips the TTY and pi falls back to writing only its final answer. The agent
-            # self-reports completion (see _completion_signal) so the watcher still auto-wakes
-            # and speaks the result — watching AND a spoken result, from one run.
-            interactive_cmd = agent_cmd.replace("pi -p", "pi").replace("claude -p", "claude")
-            # A new Terminal window opens in $HOME, so claude/pi would prompt "trust this
-            # folder?" every time. cd into the workspace (already a trusted folder) first so
-            # the agent starts where the project lives and the trust dialog never fires.
-            ws = os.path.expanduser(live.get("workspace") or "~")
-            term = f'cd {shlex.quote(ws)} && {interactive_cmd} "$(cat {shlex.quote(pf)})"'
-            osa = f'tell application "Terminal" to do script {json.dumps(term)}'
-            cmd = f"osascript -e {shlex.quote(osa)} >/dev/null 2>&1"
-        else:
-            # Headless: detached, no window, auto-wakes + speaks the result. </dev/null so
-            # it doesn't block on stdin. cd into the workspace first — the live shell's
-            # cwd drifts with the conversation, and the agent must always start in the
-            # trusted workspace (loads its CLAUDE.md, no trust prompt).
-            ws = os.path.expanduser(live.get("workspace") or "~")
-            runner = f"cd {shlex.quote(ws)} && {runner}"
-            cmd = f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown"
-        # Return the out-path too so the caller can open a live log window on it.
+        cmd = f"nohup sh -c {shlex.quote(runner)} >/dev/null 2>&1 & disown"
         return (cmd, out)
     except Exception as e:
         _log(f"delegate build failed: {e!r}")
         return None
+
+
+def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=None) -> str:
+    """Launch a watched delegate as a named herdr lane in the `voice` workspace.
+    Falls back to the headless path (via run_shell) when herdr is down or watching
+    is disabled. Returns the spoken confirmation string."""
+    instruction = (instruction or "").strip()
+    live = cfg.get("live") or {}
+    mode = live.get("delegate", "pi")
+    if not instruction or mode == "off":
+        return "couldn't start it (delegation is off or the instruction was empty)"
+    watch = bool(live.get("show_task_terminals"))
+
+    def _headless(reason: str = "") -> str:
+        built = _build_delegate_cmd(instruction, cfg)
+        if not built:
+            return ("couldn't start it (delegation is off, the instruction was empty, "
+                    "or the delegation harness file is missing — check the log)")
+        cmd, _out = built
+        if run_shell:
+            run_shell(cmd)
+        else:
+            subprocess.Popen(["sh", "-c", cmd])
+        base = "Started it in the background — I'll come back with the result when it's done."
+        return f"{reason} {base}".strip()
+
+    if not watch:
+        return _headless()
+    if not _herdr_up():
+        return _headless("herdr isn't running, so you can't watch this one —")
+
+    name = LANE_PREFIX + _slug(task_name or instruction)
+    taken = {a.get("name") for a in _voice_lanes()}
+    n, i = name, 2
+    while n in taken:
+        n, i = f"{name}-{i}", i + 1
+    name = n
+
+    try:
+        wrapped = _verify_wrap(_orchestrator_wrap(instruction, mode))
+        _tid, pf, out, done = _task_paths()
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write(wrapped + _completion_signal(out, done))
+        ws = os.path.expanduser(live.get("workspace") or "~")
+        wsid = _voice_workspace(ws)
+        if not wsid:
+            return _headless("I couldn't reach the voice workspace, so")
+        # Shell first, never the raw binary: the `claude` zsh function (with bypass
+        # permissions baked in) only resolves through zsh — the raw binary would
+        # silently hang lanes on permission prompts nobody answers.
+        started = _herdr("agent", "start", name, "--cwd", ws, "--workspace", wsid,
+                         "--split", "right", "--no-focus", "--", "zsh")
+        pane_id = ((started or {}).get("agent") or {}).get("pane_id")
+        if not pane_id:
+            return _headless("I couldn't open a lane, so")
+        if mode == "claude":
+            run_cmd = f"claude --model {live.get('claude_model', 'sonnet')}"
+        else:
+            run_cmd = f"pi --model {live.get('pi_model', 'deepseek-v4-flash')}"
+        # pane run = text + Enter atomically; the pane's shell expands $(cat …), so
+        # the multi-KB prompt never gets typed and the Enter gotcha never applies.
+        _herdr("pane", "run", pane_id, f'{run_cmd} "$(cat {shlex.quote(pf)})"')
+        with open(os.path.join(config.TASKS_DIR, f"{_tid}.lane"), "w", encoding="utf-8") as f:
+            json.dump({"name": name, "pane_id": pane_id}, f)
+        spoken = name[len(LANE_PREFIX):].replace("-", " ")
+        return (f"Started it as '{spoken}' in your voice workspace — "
+                "I'll come back with the result when it's done.")
+    except Exception as e:
+        _log(f"lane launch failed: {e!r}")
+        return _headless("the lane launch failed, so")
+
+
+def _lane_state(a, sidecars) -> str:
+    """One word of speakable state for a live lane."""
+    rec = sidecars.get(a.get("pane_id"))
+    if _lane_done(rec):
+        return "finished"
+    st = a.get("agent_status")
+    if st == "working":
+        return "working"
+    if st == "blocked":
+        return "blocked, probably on a permission prompt"
+    if st == "unknown":
+        return "starting up"
+    return "paused, probably waiting for your input"
+
+
+def delegate_status(args: dict = None) -> str:
+    if not _herdr_up():
+        return "herdr isn't running, so there are no watchable tasks. Headless ones still announce themselves when done."
+    lanes = _voice_lanes()
+    if not lanes:
+        return "No delegated tasks in the voice workspace right now."
+    sidecars = _lane_sidecars()
+    parts = []
+    for a in lanes:
+        spoken = (a.get("name") or "")[len(LANE_PREFIX):].replace("-", " ")
+        rec = sidecars.get(a.get("pane_id"))
+        age = f", started {_age_min(rec['mtime'])} minutes ago" if rec else ""
+        parts.append(f"{spoken}: {_lane_state(a, sidecars)}{age}")
+    n = len(lanes)
+    return f"{n} task{'s' if n > 1 else ''} — " + "; ".join(parts) + "."
+
+
+def _find_lane(task_name: str, lanes):
+    """Resolve a spoken/kebab name to a live lane, forgiving the voice- prefix."""
+    want = _slug(task_name) if " " in (task_name or "") else (task_name or "").lower().strip()
+    want = want[len(LANE_PREFIX):] if want.startswith(LANE_PREFIX) else want
+    want = want.replace(" ", "-")
+    for a in lanes:
+        if (a.get("name") or "")[len(LANE_PREFIX):] == want:
+            return a
+    return None
+
+
+def continue_task(args: dict) -> str:
+    task_name = (args.get("task_name") or "").strip()
+    feedback = (args.get("feedback") or "").strip()
+    if not task_name or not feedback:
+        return "I need both the task name and the feedback."
+    if not _herdr_up():
+        return "herdr isn't running — I can't reach that task's lane."
+    lanes = _voice_lanes()
+    lane = _find_lane(task_name, lanes)
+    if lane is None:
+        return f"I don't see a task called {task_name}. Ask me for the task list."
+    # New tid + sentinel so the auto-wake fires again for this follow-up. Keep the
+    # message single-line: multi-line pastes need extra Enters to submit.
+    _tid, _pf, out, done = _task_paths()
+    open(_pf, "w", encoding="utf-8").write(feedback)  # de-collision marker + audit trail
+    msg = (" ".join(feedback.split())
+           + f" — when this follow-up is done, write your updated summary to {out} "
+           f"and then run: touch {shlex.quote(done)}")
+    if not _lane_send(lane["pane_id"], msg, lanes):
+        return "That lane didn't accept input — it may have just closed."
+    with open(os.path.join(config.TASKS_DIR, f"{_tid}.lane"), "w", encoding="utf-8") as f:
+        json.dump({"name": lane["name"], "pane_id": lane["pane_id"]}, f)
+    spoken = lane["name"][len(LANE_PREFIX):].replace("-", " ")
+    return f"Passed that on to {spoken} — I'll speak up when it reports back."
+
+
+def close_finished_tasks(args: dict = None) -> str:
+    task_name = ((args or {}).get("task_name") or "").strip()
+    if not _herdr_up():
+        return "herdr isn't running — nothing to close."
+    lanes = _voice_lanes()
+    sidecars = _lane_sidecars()
+    if task_name:
+        lane = _find_lane(task_name, lanes)
+        if lane is None:
+            return f"I don't see a task called {task_name}."
+        spoken = lane["name"][len(LANE_PREFIX):].replace("-", " ")
+        if _lane_close(lane["pane_id"], lanes):
+            return f"Closed {spoken}."
+        return f"I couldn't close {spoken} — it isn't a lane I own."
+    closed, kept = [], []
+    for a in lanes:
+        spoken = (a.get("name") or "")[len(LANE_PREFIX):].replace("-", " ")
+        if _lane_done(sidecars.get(a.get("pane_id"))):
+            (closed if _lane_close(a["pane_id"], lanes) else kept).append(spoken)
+        else:
+            kept.append(f"{spoken} ({_lane_state(a, sidecars)})")
+    if not closed:
+        return "Nothing was finished, so I closed nothing. " + (
+            f"Still open: {'; '.join(kept)}." if kept else "")
+    res = f"Closed {len(closed)}: {', '.join(closed)}."
+    if kept:
+        res += f" Left open: {'; '.join(kept)}."
+    return res
 
 
 def _extract_json(text: str):
@@ -418,50 +846,108 @@ def _put_text(text: str, paste: bool = True) -> str:
 
 
 if __name__ == "__main__":
-    # Self-check: every built delegate command must carry the verify harness (so the
-    # background agent verifies the real end-state), and delegation-off must return None.
+    # Self-check: delegate prompts must carry the verify harness; herdr lanes must be
+    # launched, continued, and closed ONLY through the voice- ownership chokepoint;
+    # herdr-down must fall back headless. herdr itself is faked — no server needed.
     import tempfile
     cfg = {"live": {"delegate": "pi", "show_task_terminals": False}}
     orig_tasks = config.TASKS_DIR
     config.TASKS_DIR = tempfile.mkdtemp()
     try:
+        # --- headless path -------------------------------------------------
         cmd, out = _build_delegate_cmd("organize my desktop icons", cfg)
         pf = os.path.join(config.TASKS_DIR,
                           [f for f in os.listdir(config.TASKS_DIR) if f.endswith(".prompt")][0])
-        with open(pf, encoding="utf-8") as f:
-            written = f.read()
-        assert written.startswith(VERIFY_HARNESS), "harness missing from delegated prompt"
+        written = open(pf, encoding="utf-8").read()
+        assert written.startswith("FIRST: read "), "harness pointer missing from delegated prompt"
+        assert HARNESS_PATH in written, "harness pointer does not name the harness file"
+        # The pointer is only as good as the file it points at.
+        assert os.path.isfile(HARNESS_PATH), "harness file missing"
+        assert "VERIFIED:" in open(HARNESS_PATH, encoding="utf-8").read(), \
+            "harness file lost its VERIFIED/UNVERIFIED/FAILED tag contract"
         assert "--- TASK ---" in written and "desktop icons" in written
+        assert "SIGNAL COMPLETION" not in written, "headless prompt must not carry the completion signal"
+        assert "ORCHESTRATOR" not in written, "pi mode must not get the orchestrator harness"
         assert _build_delegate_cmd("anything", {"live": {"delegate": "off"}}) is None
         assert _build_delegate_cmd("", cfg) is None
-        # Watch mode: the Terminal must cd into the trusted workspace (no trust prompt),
-        # and the prompt must carry the self-report completion signal so the watcher still
-        # auto-wakes and speaks — referencing this task's own .out and .done paths.
-        wcmd, wout = _build_delegate_cmd("x", {"live": {"delegate": "claude",
-                                                        "show_task_terminals": True,
-                                                        "workspace": "~/Thrivbe-AI"}})
-        assert "cd " in wcmd and "Thrivbe-AI" in wcmd, "watch-mode cmd must cd into workspace"
-        wdone = wout[:-4] + ".done"
-        wprompt = next(p for p in (os.path.join(config.TASKS_DIR, f)
-                                   for f in os.listdir(config.TASKS_DIR) if f.endswith(".prompt"))
-                       if "SIGNAL COMPLETION" in open(p, encoding="utf-8").read())
-        wtext = open(wprompt, encoding="utf-8").read()
-        assert wout in wtext and wdone in wtext, "completion signal must name this task's out+done"
-        # Headless prompts must NOT carry it (the shell drops .done for them).
-        hcmd, hout = _build_delegate_cmd("y", {"live": {"delegate": "pi"}})
-        hprompt = hout[:-4] + ".prompt"
-        htext = open(hprompt, encoding="utf-8").read()  # read now — same-second builds share a tid and overwrite
-        assert "SIGNAL COMPLETION" not in htext, \
-            "headless prompt must not carry the completion signal"
-        # pi mode must NOT get the orchestrator harness.
-        assert "ORCHESTRATOR" not in htext
-        # Claude mode: Sonnet orchestrator, headless cd into workspace, orchestrator harness.
         ccmd, cout = _build_delegate_cmd("z", {"live": {"delegate": "claude",
                                                         "workspace": "~/Thrivbe-AI"}})
         assert "--model sonnet" in ccmd, "claude mode must pin the sonnet orchestrator"
         assert "Thrivbe-AI" in ccmd, "headless claude cmd must cd into the workspace"
         ctext = open(cout[:-4] + ".prompt", encoding="utf-8").read()
         assert "ORCHESTRATOR" in ctext, "claude prompt must carry the orchestrator harness"
-        print("tools self-check OK — verify harness + watch self-report + orchestrator wired")
+        # same-second builds must NOT share a tid anymore
+        c2cmd, c2out = _build_delegate_cmd("z2", {"live": {"delegate": "claude"}})
+        assert cout != c2out, "tid de-collision failed"
+
+        # Fail LOUD, not silent: no harness file => refuse to launch. An unharnessed
+        # delegate reports success it never verified, which is worse than not running.
+        _real_harness = HARNESS_PATH
+        globals()["HARNESS_PATH"] = "/nonexistent/delegate-harness.md"
+        try:
+            assert _build_delegate_cmd("x", cfg) is None, "must refuse to delegate without the harness"
+        finally:
+            globals()["HARNESS_PATH"] = _real_harness
+
+        # --- fake herdr ----------------------------------------------------
+        calls = []
+        FAKE = {"agents": [], "workspaces": [{"label": "voice", "workspace_id": "w9"}]}
+
+        def fake_herdr(*args, timeout=10):
+            calls.append(args)
+            if args[:2] == ("workspace", "list"):
+                return {"workspaces": FAKE["workspaces"]}
+            if args[:2] == ("agent", "list"):
+                return {"agents": FAKE["agents"]}
+            if args[:2] == ("agent", "start"):
+                a = {"name": args[2], "pane_id": "w9:p7", "agent_status": "working"}
+                FAKE["agents"].append(a)
+                return {"agent": a}
+            return {}
+        globals()["_herdr"] = fake_herdr
+        globals()["_herdr_up"] = lambda: FAKE.get("up", True)
+
+        wcfg = {"live": {"delegate": "claude", "show_task_terminals": True,
+                         "workspace": "~/Thrivbe-AI"}}
+        spoken = delegate_task("fix the routing bug", wcfg, task_name="routing-fix")
+        assert "routing fix" in spoken, spoken
+        lanes = [f for f in os.listdir(config.TASKS_DIR) if f.endswith(".lane")]
+        assert len(lanes) == 1, "lane sidecar not written"
+        rec = json.load(open(os.path.join(config.TASKS_DIR, lanes[0])))
+        assert rec == {"name": "voice-routing-fix", "pane_id": "w9:p7"}
+        wtext = next(open(os.path.join(config.TASKS_DIR, f), encoding="utf-8").read()
+                     for f in os.listdir(config.TASKS_DIR)
+                     if f.endswith(".prompt")
+                     and "SIGNAL COMPLETION" in open(os.path.join(config.TASKS_DIR, f)).read())
+        assert "ORCHESTRATOR" in wtext, "watched claude prompt must carry harness + signal"
+        run_calls = [c for c in calls if c[:2] == ("pane", "run")]
+        assert run_calls and "claude --model sonnet" in run_calls[0][3], "lane must run claude via the zsh function"
+
+        # ownership chokepoint: foreign panes are untouchable even if live
+        FAKE["agents"].append({"name": "orchestrator", "pane_id": "w2:p1", "agent_status": "idle"})
+        assert not _lane_close("w2:p1"), "must refuse to close a non-voice lane"
+        assert not _lane_send("w2:p1", "hi"), "must refuse to send into a non-voice lane"
+        assert not _lane_close("w9:p99"), "must refuse a pane with no sidecar"
+
+        # status + continue + close
+        st = delegate_status()
+        assert "routing fix" in st and ("working" in st), st
+        globals()["time"].sleep = lambda s: None  # skip the 1.5s re-enter wait
+        cont = continue_task({"task_name": "routing fix", "feedback": "also check the fallback"})
+        assert "routing fix" in cont, cont
+        assert any(c[:2] == ("agent", "send") and c[2] == "w9:p7" for c in calls), "feedback must land in the named lane"
+        res = close_finished_tasks({})
+        assert "closed nothing" in res.lower(), "must not close an unfinished lane"
+        # mark the newest tid done -> now closable
+        newest = max((f for f in os.listdir(config.TASKS_DIR) if f.endswith(".lane")),
+                     key=lambda f: os.path.getmtime(os.path.join(config.TASKS_DIR, f)))
+        open(os.path.join(config.TASKS_DIR, newest[:-5] + ".done"), "w").close()
+        res = close_finished_tasks({})
+        assert "routing fix" in res and "Closed 1" in res, res
+        # herdr down -> headless fallback that still says so
+        FAKE["up"] = False
+        spoken = delegate_task("quick job", wcfg, run_shell=lambda c: None)
+        assert "herdr isn't running" in spoken, spoken
+        print("tools self-check OK — harness + herdr lanes + ownership chokepoint + headless fallback wired")
     finally:
         config.TASKS_DIR = orig_tasks

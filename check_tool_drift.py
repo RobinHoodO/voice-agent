@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Live check for drift between agent Realtime tools and the kernel manifest."""
+"""Live check for drift between agent Realtime tools and the kernel manifest.
+
+This guards a SAFETY property, not just schema hygiene: the manifest's `highStakes`
+flags decide which tools require a spoken confirmation gate (see live_session.py).
+A tool that drifts out of the manifest loses its gate, so a red run here is not
+cosmetic — fix it before trusting the confirm behaviour.
+
+There is deliberately NO allowlist of "expected local" tools. Anything the agent has
+that the manifest doesn't is simply reported as agent-local; that way a new tool can
+never be *silently* unclassified (the old LOCAL_NAMES set rotted exactly that way).
+"""
 
 import ast
 import json
@@ -11,7 +21,6 @@ import urllib.request
 
 ENV_PATH = "/Users/robinsverd/Thrivbe-AI/.env"
 MANIFEST_URL = "http://127.0.0.1:8790/tools"
-LOCAL_NAMES = {"run_shell", "remember", "recall", "put_text", "delegate", "set_prompt", "os_delegate"}
 
 
 def fail(message, code):
@@ -85,18 +94,49 @@ def compare(name, agent_tool, manifest_tool):
     return bool(drift)
 
 
+def local_high_stakes():
+    """The agent's locally-declared confirm-gated tools, or None if unreadable.
+
+    Only works on the import path; under the AST fallback we can't evaluate the module,
+    so the cross-check below is skipped rather than guessed at.
+    """
+    try:
+        import tools
+        return set(getattr(tools, "LOCAL_HIGH_STAKES", set()))
+    except Exception:
+        return None
+
+
 def main():
     agent = schemas(load_agent_tools())
     manifest = fetch_manifest(load_token())
-    kernel = {name: item for name, item in schemas(manifest["tools"]).items() if item.get("kernel") is not None}
+    all_manifest = schemas(manifest["tools"])
+    kernel = {name: item for name, item in all_manifest.items() if item.get("kernel") is not None}
     print(f"Kernel manifest: version={manifest.get('version', 'unknown')}")
     drift = any(compare(name, agent[name], kernel[name]) for name in sorted(set(agent) & set(kernel)))
     missing = sorted(set(kernel) - set(agent))
     if missing:
         print("Kernel-backed missing from agent: " + ", ".join(missing))
-    local = sorted(name for name in agent if name in LOCAL_NAMES)
-    if local:
-        print("Agent-local (expected): " + ", ".join(local))
+    agent_only = sorted(set(agent) - set(all_manifest))
+    if agent_only:
+        print("Agent-local (informational): " + ", ".join(agent_only))
+
+    # Safety surface: report the manifest's gate set, and refuse double-declaration.
+    # A tool listed BOTH locally and in the manifest has two sources of truth for
+    # whether it's dangerous — that is exactly the rot this check exists to stop.
+    gated = sorted(name for name, item in all_manifest.items() if item.get("highStakes"))
+    print("Manifest highStakes: " + (", ".join(gated) if gated else "(none)"))
+    local_gated = local_high_stakes()
+    if local_gated is None:
+        print("Local highStakes: (skipped — tools module not importable)")
+    else:
+        print("Local highStakes: " + (", ".join(sorted(local_gated)) if local_gated else "(none)"))
+        double = sorted(local_gated & set(all_manifest))
+        if double:
+            print("DRIFT double-declared highStakes (move the gate to the manifest): "
+                  + ", ".join(double))
+            drift = True
+
     if not drift:
         print("No required/property drift found on the kernel-backed intersection.")
     raise SystemExit(1 if drift else 0)

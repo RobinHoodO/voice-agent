@@ -4,7 +4,9 @@ from setuptools import setup
 APP = ["agent.py"]
 
 # settings.html is the WebView UI loaded at runtime; ship it into Contents/Resources.
-DATA_FILES = ["settings.html"]
+# delegate-harness.md is not decoration: tools._verify_wrap refuses to delegate at all
+# if it's missing, so a bundle without it silently loses the delegate feature.
+DATA_FILES = ["settings.html", "delegate-harness.md"]
 
 PLIST = {
     "CFBundleName": "Thrivbe Voice",
@@ -47,6 +49,7 @@ OPTIONS = {
         "realtime_client",
         "audio",
         "tools",
+        "services",          # Notion/Front/Google direct-access handlers
         "live_prompt",
         "shell",
         "macos_context",     # lazily imported by live_session — name it so py2app bundles it

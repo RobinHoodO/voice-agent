@@ -22,11 +22,15 @@ from audio import AudioMixin
 from live_prompt import _build_live_instructions
 from realtime_client import SR, URL, VOICE, _headers, _selftest
 from shell import Shell
-from tools import TOOLS, _build_delegate_cmd, _extract_json, _put_text
+import services
+from tools import (TOOLS, LOCAL_HIGH_STAKES, _extract_json, _put_text,
+                   delegate_task, delegate_status, continue_task, close_finished_tasks)
 
 
 # Rough all-in OpenAI Realtime audio estimate; tune without code changes if billing shifts.
-VOICE_REALTIME_NOK_PER_MIN = float(os.getenv("VOICE_REALTIME_NOK_PER_MIN", "3.0"))
+# Reconciled 2026-07-30 against actual OpenAI usage ($2.49 / 26.15 NOK for 16.6 min that day
+# the old 3.0 default estimated at 49.73 NOK — ~1.9x too high) — see project_voice_agent memory.
+VOICE_REALTIME_NOK_PER_MIN = float(os.getenv("VOICE_REALTIME_NOK_PER_MIN", "1.6"))
 
 
 def _log(msg: str) -> None:
@@ -48,6 +52,28 @@ def _is_short_affirm(text: str) -> bool:
 
 def _is_short_deny(text: str) -> bool:
     return len(text.strip().split()) <= 4 and bool(DENY_RE.search(text))
+
+
+# What a confirmed high-stakes tool actually runs. A gated tool with no entry here is
+# staged and confirmable but not executable on this surface — handled explicitly rather
+# than silently, so a spoken "yes" is never swallowed.
+HIGH_STAKES_EXECUTORS = {
+    "gmail_send": lambda args: services.gmail_send(args),
+    "kernel_decide": lambda args: kernel_tools.kernel_decide(args),
+}
+
+
+def _confirmation_preview(tool: str, args: dict) -> str:
+    """The sentence the model reads back before Robin says yes. Specific beats generic —
+    'send an email to X' is checkable by ear; 'run gmail_send' is not."""
+    if tool == "gmail_send":
+        return (f"about to send an email to {args.get('to')} "
+                f"with subject '{args.get('subject')}'")
+    if tool == "kernel_decide":
+        return (f"about to record decision {args.get('decision')} for approval "
+                f"{args.get('approvalId', args.get('approval_id'))}")
+    known = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3]) or "no arguments"
+    return f"about to run {tool.replace('_', ' ')} with {known}"
 
 
 def _pending_confirmation_outcome(pending: dict, transcript: str, now: float | None = None) -> str:
@@ -87,6 +113,11 @@ class LiveSession(AudioMixin):
         self._speaking = False
         self._shell: Shell | None = None             # persistent zsh for this session
         self._fn_names: dict = {}                     # call_id -> tool name (from output_item.added)
+        self._pending_action: dict | None = None      # the one staged high-stakes action
+        # Fail closed until the manifest says otherwise: assume every kernel-backed tool
+        # needs confirmation. _configure narrows this to the real highStakes set once the
+        # kernel answers; if it never does, we over-confirm instead of under-confirming.
+        self._high_stakes: set = set(kernel_tools.KERNEL_TOOL_NAMES) | set(LOCAL_HIGH_STAKES)
         self._turns: list = []                        # ["you: …", "agent: …"] for this conversation
         self.level: float = 0.0                       # live mic level 0..1 (drives the wave pill)
         self._cfg: dict = {}                          # snapshot of config for this session
@@ -313,6 +344,16 @@ class LiveSession(AudioMixin):
 
     async def _configure(self, ws) -> None:
         ctx = await self._loop.run_in_executor(None, _grab_context)
+        # Narrow the fail-closed gate set to what the kernel actually flags. None means
+        # the manifest was unreadable — keep the conservative set from __init__.
+        declared = await self._loop.run_in_executor(None, kernel_tools.kernel_high_stakes)
+        if declared is None:
+            _log(f"high-stakes manifest unavailable — failing closed on "
+                 f"{len(self._high_stakes)} tools")
+            config.activity("⚠️  gate list unavailable — confirming all kernel actions")
+        else:
+            self._high_stakes = set(declared) | set(LOCAL_HIGH_STAKES)
+            _log(f"high-stakes gate set: {sorted(self._high_stakes)}")
         live = self._cfg.get("live") or {}
         instructions = _build_live_instructions(ctx, self._cfg)
         voice = live.get("voice") or VOICE
@@ -394,7 +435,7 @@ class LiveSession(AudioMixin):
         elif t == "conversation.item.input_audio_transcription.completed":
             heard = ev.get("transcript", "").strip()
             if heard:
-                await self._resolve_pending_kernel_decision(heard)
+                await self._resolve_pending_action(heard)
             _log(f"live heard: {heard!r}")
             if heard:
                 config.activity(f"🗣  you: {heard}")
@@ -407,28 +448,36 @@ class LiveSession(AudioMixin):
         elif t == "error":
             _log(f"realtime error event: {ev.get('error')}")
 
-    async def _resolve_pending_kernel_decision(self, transcript: str) -> None:
-        pending = getattr(self, "_pending_kernel_decision", None)
+    async def _resolve_pending_action(self, transcript: str) -> None:
+        """Execute (or drop) the one staged high-stakes action, per the deterministic
+        spoken gate. Which tools land here is data — see self._high_stakes — but the
+        gate machinery itself (TTL, affirm/deny regex) is unchanged and deliberate."""
+        pending = getattr(self, "_pending_action", None)
         if not pending:
             return
+        tool = pending["tool"]
         outcome = _pending_confirmation_outcome(pending, transcript)
-        self._pending_kernel_decision = None
-        if outcome == "expired":
-            _log("kernel_decide confirmation dropped: expired")
-            return
+        self._pending_action = None
         if outcome != "confirmed":
-            _log(f"kernel_decide confirmation dropped: {outcome}")
+            _log(f"{tool} confirmation dropped: {outcome}")
+            return
+        executor = HIGH_STAKES_EXECUTORS.get(tool)
+        if executor is None:
+            # Gated but not executable from here (e.g. a manifest tool this surface
+            # doesn't implement). Say so rather than silently swallowing the yes.
+            _log(f"{tool} confirmed but has no executor on this surface")
+            config.activity(f"⚠️  {tool} confirmed but not executable here")
             return
         args = pending["args"]
-        out = await self._loop.run_in_executor(None, kernel_tools.kernel_decide, args)
-        _log(f"kernel_decide confirmation executed: {args!r} -> {out}")
-        config.activity(f"🧠  kernel decision confirmed: {out}")
+        out = await self._loop.run_in_executor(None, executor, args)
+        _log(f"{tool} confirmation executed: {args!r} -> {out}")
+        config.activity(f"✅  {tool.replace('_', ' ')} confirmed: {out}")
         if self._ws:
             await self._ws.send(json.dumps({
                 "type": "conversation.item.create",
                 "item": {"type": "message", "role": "user",
                          "content": [{"type": "input_text",
-                                      "text": f"[System context: the confirmed kernel decision has executed. Result: {out}]"}]},
+                                      "text": f"[System context: the confirmed {tool} has executed. Result: {out}]"}]},
             }))
 
     async def _speak_announcement(self) -> None:
@@ -537,31 +586,44 @@ class LiveSession(AudioMixin):
                          f"(You can also search memory yourself: run "
                          f"`python {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'memory.py')} "
                          f"recall \"<query>\"`.)")
-            built = _build_delegate_cmd(instr, self._cfg)
-            if not built:
-                out = "couldn't start it (delegation is off or the instruction was empty)"
-            else:
-                cmd, _out_path = built
-                self._run_in_shell(cmd)   # returns instantly; runs detached or in a Terminal
-                if (self._cfg.get("live") or {}).get("show_task_terminals"):
-                    out = "Opened it in a Terminal so you can watch it work."
-                else:
-                    out = "Started it in the background — I'll come back with the result when it's done."
+            out = await self._loop.run_in_executor(
+                None, delegate_task, instr, self._cfg, args.get("task_name", ""),
+                self._run_in_shell)
             config.activity(f"🚀  delegated: {args.get('instruction', '')[:80]}")
+        elif name == "delegate_status":
+            out = await self._loop.run_in_executor(None, delegate_status, args)
+            _log(f"delegate_status: {out}")
+            config.activity("🛤  checked delegated tasks")
+        elif name == "continue_task":
+            out = await self._loop.run_in_executor(None, continue_task, args)
+            _log(f"continue_task: {out}")
+            config.activity(f"🛤  follow-up → {args.get('task_name', '')[:40]}")
+        elif name == "close_finished_tasks":
+            out = await self._loop.run_in_executor(None, close_finished_tasks, args)
+            _log(f"close_finished_tasks: {out}")
+            config.activity("🛤  closed finished task lanes")
+        elif name in self._high_stakes:
+            # Irreversible or outward-facing → stage it; nothing runs until Robin says
+            # yes out loud. Membership is DATA (kernel manifest highStakes ∪ the local
+            # set), so adding a gate is a manifest edit, not a code change here.
+            if getattr(self, "_pending_action", None):
+                _log(f"{name}: superseded a previously staged action awaiting confirmation")
+            self._pending_action = {"tool": name, "args": args, "ts": time.time()}
+            out = (f"CONFIRMATION REQUIRED: {_confirmation_preview(name, args)}. "
+                   "Ask the user to confirm out loud.")
+            _log(f"{name} staged for confirmation: {args!r}")
+            config.activity(f"⏸  {name.replace('_', ' ')} awaiting confirmation")
+        elif name in ("notion_create_task", "notion_search", "notion_list_tasks",
+                      "notion_update_task", "front_search", "front_draft",
+                      "gmail_search", "calendar_add", "drive_search"):
+            handler = getattr(services, name)
+            out = await self._loop.run_in_executor(None, handler, args)
+            _log(f"{name}: {out[:120]}")
+            config.activity(f"🔗  {name.replace('_', ' ')}")
         elif name == "kernel_status":
             out = await self._loop.run_in_executor(None, kernel_tools.kernel_status)
             _log("kernel_status")
             config.activity("🧠  checked kernel status")
-        elif name == "kernel_decide":
-            if getattr(self, "_pending_kernel_decision", None):
-                _log("kernel_decide confirmation dropped: superseded by a new staged decision")
-            self._pending_kernel_decision = {"args": args, "ts": time.time()}
-            decision = args.get("decision")
-            approval_id = args.get("approvalId", args.get("approval_id"))
-            out = ("CONFIRMATION REQUIRED: about to record decision "
-                   f"{decision} for approval {approval_id}. Ask the user to confirm out loud.")
-            _log(f"kernel_decide confirmation staged: {args!r}")
-            config.activity(f"🧠  kernel decision awaiting confirmation: {approval_id}")
         elif name == "kernel_memo":
             out = await self._loop.run_in_executor(None, kernel_tools.kernel_memo, args)
             _log(f"kernel_memo: {out}")
@@ -622,6 +684,10 @@ class LiveSession(AudioMixin):
             out = await self._loop.run_in_executor(None, kernel_tools.bloom_list_tasks, args)
             _log(f"bloom_list_tasks: {args!r}")
             config.activity("🧠  listed Bloom tasks")
+        elif name == "hermes_fleet":
+            out = await self._loop.run_in_executor(None, kernel_tools.hermes_fleet, args)
+            _log(f"hermes_fleet({args}): {out[:120]}")
+            config.activity(f"🐝  hermes fleet: {args.get('pod') or 'all pods'}")
         elif name == "list_inbox_items":
             out = await self._loop.run_in_executor(None, kernel_tools.list_inbox_items, args)
             _log(f"list_inbox_items: {args!r}")

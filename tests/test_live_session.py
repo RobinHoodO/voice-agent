@@ -81,10 +81,11 @@ def test_kernel_decision_is_staged_then_executes_only_after_affirm(monkeypatch):
             "arguments": json.dumps({"approvalId": 9, "decision": "approve"}),
         })
         assert calls == []
-        assert session._pending_kernel_decision["args"]["approvalId"] == 9
+        assert session._pending_action["tool"] == "kernel_decide"
+        assert session._pending_action["args"]["approvalId"] == 9
         assert "CONFIRMATION REQUIRED" in sent[0]["item"]["output"]
 
-        await session._resolve_pending_kernel_decision("yes")
+        await session._resolve_pending_action("yes")
 
     asyncio.run(scenario())
     assert calls == [{"approvalId": 9, "decision": "approve"}]

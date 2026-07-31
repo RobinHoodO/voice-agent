@@ -131,7 +131,9 @@ def kernel_attention_brief(timeout: float = 2.5) -> str:
         parts.append(f"{len(approvals)} approval{'s' if len(approvals) != 1 else ''} pending")
     if attention:
         parts.append(f"{len(attention)} attention item{'s' if len(attention) != 1 else ''}")
-    return "KERNEL ATTENTION: " + ", ".join(parts) + " — mention this to the user at the first natural opening, briefly."
+    return ("KERNEL ATTENTION: " + ", ".join(parts)
+            + " — background only. Don't volunteer this; mention it only if the user "
+              "asks what's pending or their request touches it.")
 
 
 def kernel_decide(args: dict) -> str:
@@ -476,6 +478,110 @@ def cognee_ask(args: dict) -> str:
     if not answer:
         return "The community graph returned nothing for that."
     return answer[:2000]
+
+
+def _pod_sentence(pod: dict) -> str:
+    """One speakable clause for one pod. Counts, not tables — this is voice."""
+    spoken = pod.get("spoken") or pod.get("name") or pod.get("id") or "a pod"
+    counts = pod.get("counts") or {}
+    running = int(counts.get("running", 0))
+    review = int(counts.get("review", 0))
+    blocked = int(counts.get("blocked", 0))
+    queued = sum(int(counts.get(k, 0)) for k in ("todo", "ready", "scheduled", "triage"))
+    if not (running or review or blocked or queued):
+        return f"{spoken} is idle"
+    parts = []
+    # 1-2 running tasks are worth naming; beyond that a count is more useful spoken.
+    tasks = [t for t in (pod.get("tasks") or []) if t.get("status") == "running"]
+    if running and 1 <= running <= 2 and tasks:
+        named = " and ".join(_short(t.get("title"), 60) for t in tasks[:2])
+        parts.append(f"running {named}")
+    elif running:
+        parts.append(f"{running} running")
+    if review:
+        parts.append(f"{review} in review")
+    if blocked:
+        parts.append(f"{blocked} blocked")
+    if queued:
+        parts.append(f"{queued} queued")
+    return f"{spoken}: " + ", ".join(parts)
+
+
+def hermes_fleet(args: dict) -> str:
+    params = {}
+    if args.get("pod"):
+        params["pod"] = args["pod"]
+    if args.get("status"):
+        params["status"] = args["status"]
+    try:
+        # Four pods queried in parallel server-side, each behind a 20s cap.
+        data = _kernel_call("GET", "/hermes-fleet", params=params, timeout=30)
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        try:
+            return f"That fleet query was rejected: {_error_message(json.loads(e.read().decode('utf-8')))}."
+        except Exception:
+            return f"That fleet query was rejected: {e.code}."
+
+    pods = _items(data, "pods")
+    if not pods:
+        return "No Hermes pods are registered."
+    healthy = [p for p in pods if isinstance(p, dict) and p.get("ok")]
+    down = [p for p in pods if isinstance(p, dict) and not p.get("ok")]
+
+    # Single-pod mode: counts, then a few titles.
+    if args.get("pod") and healthy:
+        pod = healthy[0]
+        lines = [_pod_sentence(pod) + "."]
+        tasks = pod.get("tasks") or []
+        if tasks:
+            titles = "; ".join(
+                f"{_short(t.get('title'), 60)}"
+                + (f" ({t.get('assignee')})" if t.get("assignee") else "")
+                for t in tasks[:5])
+            more = f", and {len(tasks) - 5} more" if len(tasks) > 5 else ""
+            lines.append(f"Top tasks: {titles}{more}.")
+        return "\n".join(lines)
+
+    lines = [_pod_sentence(p) + "." for p in healthy]
+    if down:
+        names = ", ".join(str(p.get("spoken") or p.get("id")) for p in down)
+        lines.append(f"I couldn't reach {names}.")
+    return "\n".join(lines) or "No fleet status available."
+
+
+# Every tool this module proxies to the kernel. Used as the fail-closed gate set: if
+# the manifest can't be read we can't learn which tools are high-stakes, so we treat
+# ALL of these as high-stakes rather than silently ungating something like
+# kernel_decide. A spurious confirmation costs three seconds; a missed one costs an
+# irreversible action.
+KERNEL_TOOL_NAMES = frozenset({
+    "kernel_status", "kernel_decide", "kernel_memo", "kernel_remember", "kernel_recall",
+    "os_delegate", "bloom_create_task", "bloom_update_task", "bloom_comment_task",
+    "bloom_list_projects", "bloom_list_tasks", "twenty_search_contacts", "semsearch_query",
+    "hybrid_rag_search", "graph_get_node", "graph_get_document", "list_inbox_items",
+    "cognee_ask", "hermes_fleet",
+})
+
+
+def kernel_high_stakes(timeout: float = 3):
+    """Tool names the kernel manifest flags as needing a spoken confirmation gate.
+
+    Returns None — not an empty set — when the manifest can't be read, so callers can
+    tell "nothing is gated" apart from "we don't know" and fail closed on the latter.
+    """
+    try:
+        data = _kernel_call("GET", "/tools", timeout=timeout)
+    except Exception as e:
+        _log(f"high-stakes manifest fetch failed: {e!r}")
+        return None
+    entries = data.get("tools") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        _log("high-stakes manifest malformed: no tools list")
+        return None
+    return {e.get("name") for e in entries
+            if isinstance(e, dict) and e.get("highStakes") and e.get("name")}
 
 
 def kernel_persona(timeout: float = 3) -> str:

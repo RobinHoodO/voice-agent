@@ -56,6 +56,9 @@ def reset_activity() -> None:
 _ENV_FALLBACK = {
     "openai": ["OPENAI_API_KEY"],
     "VOICE_API_TOKEN": ["VOICE_API_TOKEN"],
+    "notion": ["NOTION_KEY"],          # direct Notion REST (services.py)
+    "front": ["FRONT_API_TOKEN"],      # Front scripts read it themselves; listed here so
+                                       # it's scrubbed from the agentic shell's env too
 }
 
 # Env var names that hold secrets — never expose these to spawned shells/subprocesses.
@@ -80,7 +83,7 @@ DEFAULTS = {
         "shell_timeout": 20,
         "delegate": "pi",                 # "pi" | "claude" | "off"
         "pi_model": "deepseek-v4-flash",
-        "show_task_terminals": False,     # open a Terminal tailing each delegated task's output
+        "show_task_terminals": False,     # run delegated tasks as visible herdr lanes (False = headless)
         "workspace": None,                # optional context/home folder; None = $HOME
         "custom_prompt": "",              # user/agent-authored persona+context, reloaded every session
         "memory": {                       # conversation recall + learning — see memory.py

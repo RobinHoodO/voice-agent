@@ -81,6 +81,17 @@ The model is given two function tools (OpenAI Realtime "flat" tool schema):
   terminal": ask it to do something, it issues real commands as you.
 - **`remember(note)`** — appends a timestamped line to `.voice-memory.log`.
 
+Beyond those two, `tools.py` declares a longer list of function tools — herdr task
+delegation, kernel/Bloom/CRM calls, and a set of direct service tools in
+`services.py` (Notion, Front, Gmail, Calendar, Drive) that `live_session.py`
+dispatches generically by name. The Notion ones cover the full task lifecycle:
+`notion_create_task` (capture, with Robin's defaults), `notion_list_tasks` (read —
+filter by status and/or a title keyword), and `notion_update_task` (change status —
+e.g. Focus → Backlog — and/or push a due date, resolved by title; an ambiguous
+title match is surfaced for Robin to disambiguate rather than guessed at). All three
+talk to Notion's REST API directly with the key from `config.secret("notion")`
+(Keychain, `NOTION_KEY` env fallback in dev) — no MCP layer in the hot path.
+
 When a tool result comes back, the agent loops (`response.create` again), so it can
 chain commands — run something, read the output, decide the next command, then
 finally speak — without you saying anything in between.
