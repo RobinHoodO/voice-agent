@@ -27,6 +27,11 @@ if [ -d "$APP_NAME" ]; then
   rm -rf "$APP_NAME"
 fi
 cp -R "dist/$APP_NAME" "$APP_NAME"
+# ponytail: a second copy at dist/ with the SAME bundle id confuses System Settings'
+# permission lists (Accessibility/Input Monitoring show two ambiguous "Thrivbe Voice"
+# rows, and toggling the wrong one silently no-ops) — py2app regenerates dist/ fresh
+# every build anyway, so there's nothing lost deleting it right after the copy.
+rm -rf "dist/$APP_NAME"
 
 # Sign with the stable self-signed identity if present, so the designated requirement
 # (and thus TCC grants for Input Monitoring / Accessibility) survive every rebuild.

@@ -4,8 +4,6 @@ Extracted from realtime.py as AudioMixin — LiveSession mixes it in, so these m
 share the session's state (self._mic_q/_out_q/_in_stream/_out_stream/_loop/level/...).
 Kept as a mixin (not a standalone collaborator) so the move is behavior-preserving.
 """
-import base64
-import json
 import queue
 import threading
 import time
@@ -45,7 +43,7 @@ def _find_device(substr: str, want_input: bool):
 class AudioMixin:
     """Audio capture/playback methods for LiveSession. Relies on session attributes
     set in LiveSession.__init__ (_cfg, _mic_q, _out_q, _in_stream, _out_stream,
-    _loop, _running, _player_thread, level, _shell, _ws)."""
+    _loop, _running, _player_thread, level, _shell, _ws, _backend)."""
 
     async def _pump_mic(self) -> None:
         n = 0
@@ -57,11 +55,28 @@ class AudioMixin:
             if data is None or self._ws is None:
                 continue
             self._update_level(data)   # metering off the PortAudio callback thread
+            if self._backend.manual_vad:
+                # ponytail: match OpenAI's familiar 700ms turn boundary locally.
+                if self.level > 0.10:
+                    if not self._local_speaking:
+                        self._local_speaking = True
+                        self._local_silence_since = None
+                        await self._backend.send_activity_start()
+                        await self._on_speech_started()
+                    else:
+                        self._local_silence_since = None
+                elif self._local_speaking:
+                    if self._local_silence_since is None:
+                        self._local_silence_since = self._loop.time()
+                    elif self._loop.time() - self._local_silence_since >= 0.7:
+                        self._local_speaking = False
+                        self._local_silence_since = None
+                        await self._backend.send_activity_end()
+                        for extra in self._backend.drain_extra_events():
+                            await self._handle_normalized(extra)
+                        await self._on_speech_stopped()
             try:
-                await self._ws.send(json.dumps({
-                    "type": "input_audio_buffer.append",
-                    "audio": base64.b64encode(data).decode(),
-                }))
+                await self._backend.send_audio_chunk(data)
                 n += 1
                 if n == 1 or n % 50 == 0:
                     _log(f"mic frames sent: {n}")
@@ -71,6 +86,19 @@ class AudioMixin:
 
     def _start_audio(self) -> None:
         import sounddevice as sd
+        # PortAudio snapshots the device list at init and never refreshes it. This is a
+        # long-running menubar daemon, so a headset connected AFTER launch is invisible
+        # (and indexes shift as devices come and go) — the headset "isn't recognized"
+        # until a full app restart. Re-enumerate per session; both streams are closed
+        # by _teardown_audio before we get here. Best-effort: on failure keep the old
+        # behaviour rather than losing audio entirely.
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception as e:
+            _log(f"portaudio re-init failed (using cached device list): {e!r}")
+        mic_rate = self._backend.mic_rate
+        mic_block = mic_rate // 10
         want_mic = (self._cfg.get("audio") or {}).get("input_device") or MIC_NAME
         mic = _find_device(want_mic, want_input=True)
         try:
@@ -80,8 +108,8 @@ class AudioMixin:
             _log(f"query input device failed: {e!r}")
         try:
             self._in_stream = sd.RawInputStream(
-                samplerate=SR, channels=1, dtype="int16",
-                blocksize=BLOCK, callback=self._mic_cb, device=mic)
+                samplerate=mic_rate, channels=1, dtype="int16",
+                blocksize=mic_block, callback=self._mic_cb, device=mic)
             self._in_stream.start()
         except Exception as e:
             # Device lost / in use / permission denied — fall back to the system default
@@ -89,8 +117,8 @@ class AudioMixin:
             _log(f"mic open failed (device={mic}): {e!r} — trying default input")
             try:
                 self._in_stream = sd.RawInputStream(
-                    samplerate=SR, channels=1, dtype="int16",
-                    blocksize=BLOCK, callback=self._mic_cb)
+                    samplerate=mic_rate, channels=1, dtype="int16",
+                    blocksize=mic_block, callback=self._mic_cb)
                 self._in_stream.start()
             except Exception as e2:
                 _log(f"mic open failed on default too: {e2!r}")

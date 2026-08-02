@@ -1,12 +1,12 @@
 """LiveSession — one live Realtime conversation: orchestration only.
 
-The split-out collaborators live in: realtime_client.py (protocol/constants/auth),
-audio.py (AudioMixin: mic/playback), shell.py (Shell), tools.py (TOOLS + helpers),
-live_prompt.py (instructions), macos_context.py (screen capture). This module wires
-them together and runs the asyncio event loop + the OpenAI Realtime event handler.
+The split-out collaborators live in: backends/ (wire protocol per provider),
+realtime_client.py (OpenAI constants/auth), audio.py (AudioMixin: mic/playback),
+shell.py (Shell), tools.py (TOOLS + helpers), live_prompt.py (instructions),
+macos_context.py (screen capture). This module wires them together and runs the
+asyncio event loop + the normalized-event handler.
 """
 import asyncio
-import base64
 import json
 import os
 import queue
@@ -19,8 +19,10 @@ import uuid
 import config
 import kernel_tools
 from audio import AudioMixin
+from backends import base as events
+from backends.openai_backend import OpenAIBackend
 from live_prompt import _build_live_instructions
-from realtime_client import SR, URL, VOICE, _headers, _selftest
+from realtime_client import VOICE, _selftest
 from shell import Shell
 import services
 from tools import (TOOLS, LOCAL_HIGH_STAKES, _extract_json, _put_text,
@@ -31,6 +33,15 @@ from tools import (TOOLS, LOCAL_HIGH_STAKES, _extract_json, _put_text,
 # Reconciled 2026-07-30 against actual OpenAI usage ($2.49 / 26.15 NOK for 16.6 min that day
 # the old 3.0 default estimated at 49.73 NOK — ~1.9x too high) — see project_voice_agent memory.
 VOICE_REALTIME_NOK_PER_MIN = float(os.getenv("VOICE_REALTIME_NOK_PER_MIN", "1.6"))
+
+# Tools that hand free text to a background agent, and how to frame it:
+# {tool: (args field, label, attach the memory pointer?)}. continue_task goes into a
+# lane already mid-task with full context — and flattens newlines — so no pointer there.
+DELEGATING_TOOLS = {
+    "delegate":     ("instruction", "Task",        True),
+    "os_delegate":  ("instruction", "Instruction", False),
+    "continue_task": ("feedback",   "Feedback",    False),
+}
 
 
 def _log(msg: str) -> None:
@@ -108,7 +119,7 @@ class LiveSession(AudioMixin):
         self._wall_start = 0.0             # wall-clock time when this session opened
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
-        self._ws = None
+        self._backend = OpenAIBackend()
         self._mic_q: asyncio.Queue | None = None      # mic bytes -> ws (loop thread)
         self._out_q: queue.Queue = queue.Queue(maxsize=256)  # model audio -> speaker; bounded (drop-oldest)
         self._in_stream = None
@@ -125,11 +136,30 @@ class LiveSession(AudioMixin):
         # kernel answers; if it never does, we over-confirm instead of under-confirming.
         self._high_stakes: set = set(kernel_tools.KERNEL_TOOL_NAMES) | set(LOCAL_HIGH_STAKES)
         self._turns: list = []                        # ["you: …", "agent: …"] for this conversation
+        self._delegated_upto: int = 0                 # cursor into _turns: what's already been handed off
         self.level: float = 0.0                       # live mic level 0..1 (drives the wave pill)
+        self._local_speaking = False
+        self._local_silence_since: float | None = None
         self._cfg: dict = {}                          # snapshot of config for this session
         self._offered_tasks: queue.Queue = queue.Queue()
         self._offered_tids: set = set()
         self._offered_lock = threading.Lock()
+
+    @property
+    def _ws(self):
+        # The backend owns the socket; stop()/audio/tests keep reaching it here.
+        return self._backend.ws
+
+    @_ws.setter
+    def _ws(self, value):
+        self._backend.ws = value
+
+    def _make_backend(self, cfg: dict):
+        name = (cfg.get("live") or {}).get("backend", "openai")
+        if name == "gemini":
+            from backends.gemini_backend import GeminiBackend
+            return GeminiBackend()
+        return OpenAIBackend()
 
     # ----- lifecycle (called from main thread) -----
     def start(self) -> None:
@@ -233,6 +263,49 @@ class LiveSession(AudioMixin):
             _log("realtime session closed")
             self._persist_conversation()
 
+    async def _await_transcript(self, timeout: float = 2.0) -> None:
+        """Wait (briefly) for Whisper's transcript of the utterance that triggered this
+        handoff. Transcription is a side-channel running in parallel with the model's
+        response, so ~15% of turns it lands AFTER the tool call — without this, the
+        verbatim block would carry the PREVIOUS turn's words under a "Robin's own words"
+        label, which is worse than carrying none. Delegation runs for minutes; up to 2s
+        here is invisible, and it costs nothing in the common case where it already
+        arrived."""
+        if any(t.startswith("you: ") for t in self._turns[self._delegated_upto:]):
+            return
+        deadline = self._loop.time() + timeout
+        while self._loop.time() < deadline:
+            await asyncio.sleep(0.1)
+            if any(t.startswith("you: ") for t in self._turns[self._delegated_upto:]):
+                return
+        _log("verbatim: transcript did not arrive in time — handing off without it")
+
+    def _verbatim_since_handoff(self) -> str:
+        """Robin's own ASR-transcribed turns since the last delegate/continue_task/
+        os_delegate call — ground truth, independent of how faithfully the model's
+        own tool-call argument reflects what he actually said."""
+        raw = [t for t in self._turns[self._delegated_upto:] if t.startswith("you: ")]
+        self._delegated_upto = len(self._turns)
+        return "\n".join(raw)
+
+    def _wrap_delegate_text(self, instruction: str, label: str = "Task",
+                             memory_pointer: bool = True) -> str:
+        """Prefix a delegated instruction/feedback with Robin's verbatim recent turns
+        (ground truth, independent of how the model phrased its own tool-call argument).
+        `claude`/`pi` herdr-pane agents already get MEMORY.md/claude-mem automatically,
+        so this points at past voice conversations rather than pre-fetching them —
+        pull, not push."""
+        parts = []
+        raw = self._verbatim_since_handoff()
+        if raw:
+            parts.append(f"Robin's own words (verbatim):\n{raw}")
+        parts.append(f"{label}:\n{instruction}")
+        if memory_pointer:
+            mem_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.py")
+            parts.append(f"(Past voice conversations are searchable via "
+                         f"`python {mem_path} recall \"<query>\"` if relevant.)")
+        return "\n\n".join(parts)
+
     def _persist_conversation(self) -> None:
         """On close, store this conversation's transcript, then summarize it in the
         background (non-blocking) so future sessions can recall it. Best-effort."""
@@ -319,17 +392,16 @@ class LiveSession(AudioMixin):
             _log(f"learn failed: {e!r}")
 
     async def _session(self) -> None:
-        import websockets
         self._mic_q = asyncio.Queue()
-        async with websockets.connect(URL, additional_headers=_headers(),
-                                      max_size=None) as ws:
-            self._ws = ws
-            self._cfg = config.load()
+        self._cfg = config.load()
+        self._backend = self._make_backend(self._cfg)
+        ws = await self._backend.connect()
+        try:
             try:
                 self._shell = Shell()
             except Exception as e:
                 _log(f"persistent shell start failed: {e!r}")
-            await self._configure(ws)
+            await self._configure()
             self._start_audio()
             self._mic_task = asyncio.ensure_future(self._pump_mic())
             self._mic_task.add_done_callback(self._on_mic_task_done)
@@ -350,8 +422,10 @@ class LiveSession(AudioMixin):
                         _log(f"realtime handle error: {e!r}")
             finally:
                 wd.cancel()
+        finally:
+            await self._backend.close()
 
-    async def _configure(self, ws) -> None:
+    async def _configure(self) -> None:
         ctx = await self._loop.run_in_executor(None, _grab_context)
         # Narrow the fail-closed gate set to what the kernel actually flags. None means
         # the manifest was unreadable — keep the conservative set from __init__.
@@ -372,90 +446,70 @@ class LiveSession(AudioMixin):
         # (clipboard/paste) and remember stay available either way.
         tools = TOOLS if live.get("agentic_shell", False) else [
             t for t in TOOLS if t.get("name") not in ("run_shell", "delegate")]
-        await ws.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "type": "realtime",
-                "output_modalities": ["audio"],
-                "instructions": instructions,
-                "audio": {
-                    "input": {
-                        "format": {"type": "audio/pcm", "rate": SR},
-                        # create_response:false so we can inject fresh cursor context
-                        # AFTER the user stops talking, then trigger the response ourselves.
-                        # threshold raised (default 0.5) so a sensitive/bone-conduction mic
-                        # doesn't false-trigger barge-in and cancel replies mid-sentence.
-                        "turn_detection": {"type": "server_vad", "threshold": 0.6,
-                                           "prefix_padding_ms": 300, "silence_duration_ms": 700,
-                                           "create_response": False},
-                        "transcription": {"model": "whisper-1"},
-                    },
-                    "output": {"format": {"type": "audio/pcm", "rate": SR}, "voice": voice},
-                },
-                "tools": tools,
-                "tool_choice": "auto",
-            },
-        }))
+        await self._backend.send_setup(instructions, tools, voice)
 
     # ----- realtime events -----
     async def _handle(self, ev: dict) -> None:
-        t = ev.get("type", "")
-        if t in ("session.updated", "input_audio_buffer.speech_started",
-                 "input_audio_buffer.speech_stopped", "response.created",
-                 "error"):
-            _log(f"ev {t}" + (f" {ev.get('error')}" if t == "error" else ""))
-        if t == "response.created":
+        ne = self._backend.parse_event(ev)
+        await self._handle_normalized(ne)
+        for extra in self._backend.drain_extra_events():
+            await self._handle_normalized(extra)
+
+    async def _handle_normalized(self, ne) -> None:
+        k = ne.kind
+        if k == events.RESPONSE_CREATED:
             self._audio_n = 0
-        elif t == "response.done":
-            resp = ev.get("response") or {}
+        elif k == events.RESPONSE_DONE:
+            resp = ne.detail or {}
             status = resp.get("status")
             details = resp.get("status_details")
             _log(f"ev response.done status={status} audio_deltas={getattr(self, '_audio_n', 0)} "
                  f"details={details}")
-        if t in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
-            self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
-        if t == "input_audio_buffer.speech_started":
-            self._flush_out()                       # barge-in: stop talking
-            if self._speaking:
-                await self._ws.send(json.dumps({"type": "response.cancel"}))
-                self._speaking = False
-            self.on_state("listening")
-        elif t == "input_audio_buffer.speech_stopped":
-            await self._inject_context_and_respond()
-        elif t == "response.output_audio.delta":
-            self._enqueue_audio(base64.b64decode(ev["delta"]))
+        if k == events.SPEECH_STARTED:
+            await self._on_speech_started()
+        elif k == events.SPEECH_STOPPED:
+            await self._on_speech_stopped()
+        elif k == events.AUDIO_DELTA:
+            self._enqueue_audio(ne.audio)
             self._audio_n = getattr(self, "_audio_n", 0) + 1
             if self._audio_n == 1:
                 _log("first audio delta -> speaking")
             if not self._speaking:
                 self._speaking = True
                 self.on_state("speaking")
-        elif t == "response.output_audio.done":
+        elif k == events.AUDIO_DONE:
             self._speaking = False
             self.on_state("listening")
-        elif t == "response.output_item.added":
-            # function_call items carry the tool name + call_id; remember it so
-            # _do_tool can route (the .arguments.done event may omit the name).
-            item = ev.get("item") or {}
-            if item.get("type") == "function_call" and item.get("call_id"):
-                self._fn_names[item["call_id"]] = item.get("name", "")
-        elif t == "response.function_call_arguments.done":
-            await self._do_tool(ev)
-        elif t == "conversation.item.input_audio_transcription.completed":
-            heard = ev.get("transcript", "").strip()
+        elif k == events.TOOL_CALL:
+            await self._do_tool({"call_id": ne.call_id, "name": ne.name,
+                                 "arguments": ne.args})
+        elif k == events.USER_TRANSCRIPT:
+            heard = ne.text
             if heard:
                 await self._resolve_pending_action(heard)
             _log(f"live heard: {heard!r}")
             if heard:
                 config.activity(f"🗣  you: {heard}")
                 self._turns.append(f"you: {heard}")
-        elif t == "response.output_audio_transcript.done":
-            said = (ev.get("transcript") or "").strip()
+        elif k == events.AGENT_TRANSCRIPT:
+            said = ne.text
             if said:
                 config.activity(f"💬  agent: {said}")
                 self._turns.append(f"agent: {said}")
-        elif t == "error":
-            _log(f"realtime error event: {ev.get('error')}")
+        elif k == events.ERROR:
+            _log(f"realtime error event: {ne.detail}")
+
+    async def _on_speech_started(self) -> None:
+        self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
+        self._flush_out()                       # barge-in: stop talking
+        if self._speaking:
+            await self._backend.cancel_response()
+            self._speaking = False
+        self.on_state("listening")
+
+    async def _on_speech_stopped(self) -> None:
+        self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
+        await self._inject_context_and_respond()
 
     async def _resolve_pending_action(self, transcript: str) -> None:
         """Execute (or drop) the one staged high-stakes action, per the deterministic
@@ -482,12 +536,8 @@ class LiveSession(AudioMixin):
         _log(f"{tool} confirmation executed: {args!r} -> {out}")
         config.activity(f"✅  {tool.replace('_', ' ')} confirmed: {out}")
         if self._ws:
-            await self._ws.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {"type": "message", "role": "user",
-                         "content": [{"type": "input_text",
-                                      "text": f"[System context: the confirmed {tool} has executed. Result: {out}]"}]},
-            }))
+            await self._backend.send_text_context(
+                f"[System context: the confirmed {tool} has executed. Result: {out}]")
 
     async def _speak_announcement(self) -> None:
         """Auto-wake greeting: the menubar watcher opened this session because a
@@ -497,20 +547,16 @@ class LiveSession(AudioMixin):
         txt = (self._announce or "")[-2500:]
         self._announce = None
         config.activity("🔔  task finished — speaking result")
-        await self._ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {"type": "message", "role": "user",
-                     "content": [{"type": "input_text",
-                                  "text": ("[A background task you started earlier just finished. "
-                                           "Greet me briefly and tell me out loud, in 1-3 sentences, "
-                                           "what it found. The result ends with a status tag — "
-                                           "VERIFIED means it confirmed the end-state (say it's done); "
-                                           "UNVERIFIED means it could NOT confirm it (say so plainly — "
-                                           "tell me what couldn't be confirmed, don't imply success); "
-                                           "FAILED means it didn't work. Be honest about which it is. "
-                                           "Result:\n" + txt + "\n]")}]},
-        }))
-        await self._ws.send(json.dumps({"type": "response.create"}))
+        await self._backend.send_text_context(
+            "[A background task you started earlier just finished. "
+            "Greet me briefly and tell me out loud, in 1-3 sentences, "
+            "what it found. The result ends with a status tag — "
+            "VERIFIED means it confirmed the end-state (say it's done); "
+            "UNVERIFIED means it could NOT confirm it (say so plainly — "
+            "tell me what couldn't be confirmed, don't imply success); "
+            "FAILED means it didn't work. Be honest about which it is. "
+            "Result:\n" + txt + "\n]")
+        await self._backend.trigger_response()
         tid, self._announce_tid = self._announce_tid, None
         if tid and self._on_task_spoken:
             try:
@@ -552,36 +598,21 @@ class LiveSession(AudioMixin):
             _log("context grab timed out (>2s) — replying without screen context")
             ctx, shot = "", ""
         _log(f"context injected ({len(ctx)} chars, screenshot={'yes' if shot else 'no'})")
-        if shot:
-            # Separate item so a rejected image never blocks the text context.
-            await self._ws.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {"type": "message", "role": "user",
-                         "content": [{"type": "input_image",
-                                      "image_url": f"data:image/jpeg;base64,{shot}"}]},
-            }))
-        await self._ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {"type": "message", "role": "user",
-                     "content": [{"type": "input_text",
-                                  "text": f"[What I'm looking at right now:\n{ctx}\n"
-                                          + ("(A screenshot of my screen is attached above.)\n" if shot else "")
-                                          + "]"}]},
-        }))
+        await self._backend.send_text_context(
+            f"[What I'm looking at right now:\n{ctx}\n"
+            + ("(A screenshot of my screen is attached above.)\n" if shot else "")
+            + "]",
+            image_b64=shot or None)
         finished = self._drain_offered_tasks()
         try:
             if finished:
                 preamble = ("One background task finished." if len(finished) == 1 else
                             f"{len(finished)} background tasks finished.")
                 results = "\n\n".join(f"Task {tid}:\n{text}" for tid, text in finished)
-                await self._ws.send(json.dumps({
-                    "type": "conversation.item.create",
-                    "item": {"type": "message", "role": "user",
-                             "content": [{"type": "input_text",
-                                          "text": (f"[{preamble} Work their results naturally into "
-                                                   f"your next spoken reply:\n{results}\n]")}]},
-                }))
-            await self._ws.send(json.dumps({"type": "response.create"}))
+                await self._backend.send_text_context(
+                    f"[{preamble} Work their results naturally into "
+                    f"your next spoken reply:\n{results}\n]")
+            await self._backend.trigger_response()
         except Exception:
             for task in finished:
                 self._offered_tasks.put(task)
@@ -601,6 +632,15 @@ class LiveSession(AudioMixin):
             args = json.loads(ev.get("arguments") or "{}")
         except Exception:
             args = {}
+        # Attach Robin's verbatim words BEFORE the elif chain: os_delegate is in the
+        # fail-closed high-stakes set, so a branch further down would be unreachable
+        # whenever the kernel manifest can't be read. One place, order-independent.
+        if name in DELEGATING_TOOLS:
+            field, label, pointer = DELEGATING_TOOLS[name]
+            await self._await_transcript()
+            args = dict(args)
+            args[field] = self._wrap_delegate_text(args.get(field, ""), label=label,
+                                                   memory_pointer=pointer)
         if name == "remember":
             import memory
             note = args.get("note", "")
@@ -631,22 +671,10 @@ class LiveSession(AudioMixin):
             _log(f"set_prompt ({len(text)} chars)")
             config.activity(f"🧠  custom prompt updated ({len(text)} chars)")
         elif name == "delegate":
-            instr = args.get("instruction", "")
-            try:
-                import memory
-                mem_ctx = memory.recall(instr, k=3)
-            except Exception:
-                mem_ctx = ""
-            if mem_ctx:
-                instr = (f"Relevant context from prior conversations/memory:\n{mem_ctx}\n\n"
-                         f"Task:\n{instr}\n\n"
-                         f"(You can also search memory yourself: run "
-                         f"`python {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'memory.py')} "
-                         f"recall \"<query>\"`.)")
             out = await self._loop.run_in_executor(
-                None, delegate_task, instr, self._cfg, args.get("task_name", ""),
-                self._run_in_shell, args.get("reuse_pane", ""))
-            config.activity(f"🚀  delegated: {args.get('instruction', '')[:80]}")
+                None, delegate_task, args.get("instruction", ""), self._cfg,
+                args.get("task_name", ""), self._run_in_shell, args.get("reuse_pane", ""))
+            config.activity(f"🚀  delegated: {args.get('task_name', '') or 'task'}")
         elif name == "fleet":
             out = await self._loop.run_in_executor(None, fleet, args)
             _log(f"fleet: {out}")
@@ -761,11 +789,8 @@ class LiveSession(AudioMixin):
             config.activity("🧠  listed inbox items")
         else:
             out = await self._loop.run_in_executor(None, self._run_in_shell, args.get("command", ""))
-        await self._ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {"type": "function_call_output", "call_id": call_id, "output": out},
-        }))
-        await self._ws.send(json.dumps({"type": "response.create"}))
+        await self._backend.send_tool_result(call_id, out)
+        await self._backend.trigger_response()
 
     def _enqueue_audio(self, chunk: bytes) -> None:
         # Bounded playback queue: if the model outruns the speaker, drop the OLDEST

@@ -24,7 +24,8 @@ VOICES = ["marin", "cedar", "alloy", "ash", "ballad", "coral",
 VERSION = "1.0"
 
 # Security & Privacy panes the UI may deep-link to (the only valid openPane args).
-_SECURITY_PANES = {"Privacy_Microphone", "Privacy_Accessibility", "Privacy_ListenEvent"}
+_SECURITY_PANES = {"Privacy_Microphone", "Privacy_Accessibility", "Privacy_ListenEvent",
+                   "Privacy_ScreenCapture"}
 
 _window = None
 _webview = None
@@ -170,6 +171,7 @@ def _state() -> dict:
         "mics": ins, "spk": outs, "voices": VOICES,
         "mic": config.get("audio.input_device"),
         "speaker": config.get("audio.output_device"),
+        "backend": config.get("live.backend", "openai"),
         "voice": config.get("live.voice", "alloy"),
         "workspace": config.get("live.workspace", "") or "",
         "mem_provider": config.get("live.memory.provider", "none"),
@@ -190,6 +192,7 @@ def _state() -> dict:
         "open_at_login": bool(config.get("system.open_at_login", False)),
         "live_on": bool(getattr(_agent, "live_on", False)),
         "key_present": bool(config.secret("openai")),
+        "gemini_key_present": bool(config.secret("gemini")),
         "hotkey": "Double-tap Control",
     }
 
@@ -222,6 +225,10 @@ def _handle(fn, arg):
         return None
     if fn == "setKey":
         ok = config.set_secret("openai", str(arg).strip())
+        _push_toast("Key saved" if ok else "Could not save key")
+        return _state()
+    if fn == "setGeminiKey":
+        ok = config.set_secret("gemini", str(arg).strip())
         _push_toast("Key saved" if ok else "Could not save key")
         return _state()
     if fn == "refresh":

@@ -79,6 +79,7 @@ DEFAULTS = {
     "onboarding_complete": False,
     "live": {
         "voice": "alloy",
+        "backend": "openai",             # "openai" | "gemini"
         "agentic_shell": False,           # off by default — running shell is opt-in (menu toggle)
         "shell_timeout": 20,
         "delegate": "pi",                 # "pi" | "claude" | "off"

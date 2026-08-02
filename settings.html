@@ -134,9 +134,18 @@
           <button class="btn" onclick="rpc('test','spk')">Test</button>
         </div></div></div>
 
+      <div class="row"><div class="ic">🔀</div><div class="body">
+        <div class="lbl">Backend</div>
+        <div class="desc">Which live-conversation provider powers the agent. Needs the matching API key below. Applies on the next conversation.</div>
+        <div class="ctl"><select id="backend" onchange="setVal('live.backend', this.value)">
+          <option value="openai">OpenAI Realtime</option>
+          <option value="gemini">Gemini Live</option>
+        </select></div>
+      </div></div>
+
       <div class="row"><div class="ic">🗣</div><div class="body">
         <div class="lbl">Voice <span class="desc">· OpenAI Realtime</span></div>
-        <div class="desc">The voice the agent speaks with. Applies on the next conversation.</div>
+        <div class="desc">The voice the agent speaks with. Applies on the next conversation. (Gemini Live picks its own closest-match voice automatically.)</div>
         <div class="ctl"><select id="voice" onchange="setVal('live.voice', this.value)"></select></div>
       </div></div>
 
@@ -166,11 +175,13 @@
       <div class="row"><div class="ic">🪟</div><div class="body">
         <div class="lbl">Full window text</div>
         <div class="desc">Read the whole window you're in, not just under the cursor — more context for "what am I looking at". Text only, via Accessibility; fast.</div>
+        <div class="ctl"><button class="btn" onclick="openPane('Privacy_Accessibility')">Open Accessibility settings…</button></div>
       </div><span class="sw" id="t_winctx" onclick="toggle('privacy.read_window_context',this)"></span></div>
 
       <div class="row"><div class="ic">📸</div><div class="body">
         <div class="lbl">Window screenshot (vision)</div>
         <div class="desc">Send a small screenshot of your focused window each turn so the agent can actually see the UI — images, layout, buttons. Needs Screen Recording permission; adds a little latency.</div>
+        <div class="ctl"><button class="btn" onclick="openPane('Privacy_ScreenCapture')">Open Screen Recording settings…</button></div>
       </div><span class="sw" id="t_shot" onclick="toggle('privacy.read_window_screenshot',this)"></span></div>
 
       <div class="row"><div class="ic">⚡</div><div class="body">
@@ -270,10 +281,19 @@
     <div class="card">
       <div class="row"><div class="ic">🔑</div><div class="body">
         <div class="lbl">OpenAI API key <span id="keystat" class="desc"></span></div>
-        <div class="desc">Required — powers the live voice conversation. Get one at platform.openai.com/api-keys</div>
+        <div class="desc">Required for the OpenAI Realtime backend. Get one at platform.openai.com/api-keys</div>
         <div class="ctl inline">
           <input id="key" type="password" placeholder="sk-…">
           <button class="btn" onclick="saveKey()">Save</button>
+        </div>
+      </div></div>
+
+      <div class="row"><div class="ic">🔑</div><div class="body">
+        <div class="lbl">Gemini API key <span id="geministat" class="desc"></span></div>
+        <div class="desc">Required for the Gemini Live backend. Get one at aistudio.google.com/apikey</div>
+        <div class="ctl inline">
+          <input id="geminikey" type="password" placeholder="AQ.…">
+          <button class="btn" onclick="saveGeminiKey()">Save</button>
         </div>
       </div></div>
     </div>
@@ -282,6 +302,14 @@
     <div class="card">
       <div class="keyrow"><span>Start / stop live conversation</span>
         <span class="keycap" id="hotkey">Double-tap Control</span></div>
+      <div class="row"><div class="ic">⌨️</div><div class="body">
+        <div class="lbl">Not working?</div>
+        <div class="desc">The double-tap hotkey needs both Accessibility and Input Monitoring granted to Thrivbe Voice, then a full quit + relaunch (use <code>./reload_app.sh</code> after any rebuild).</div>
+        <div class="ctl inline">
+          <button class="btn" onclick="openPane('Privacy_Accessibility')">Accessibility…</button>
+          <button class="btn" onclick="openPane('Privacy_ListenEvent')">Input Monitoring…</button>
+        </div>
+      </div></div>
     </div>
 
     <div class="sec">SYSTEM</div>
@@ -328,6 +356,7 @@
     if(t) t.scrollIntoView({behavior:'smooth', block:'start'});
   }
   function setVal(key,val){ rpc('set',{key:key,value:val}); }
+  function openPane(anchor){ rpc('openPane', anchor); }
   async function pickFolder(){ const p=await rpc('pickFolder'); if(p){ document.getElementById('workspace').value=p; } }
   function clearFolder(){ setVal('live.workspace', null); document.getElementById('workspace').value=''; }
   async function pickMemDb(){ const p=await rpc('pickMemDb'); if(p){ document.getElementById('mem_claude_db').value=p; } }
@@ -364,6 +393,10 @@
     const r=await rpc('setKey',v); document.getElementById('key').value='';
     if(r) window.__push(r); }
 
+  async function saveGeminiKey(){ const v=document.getElementById('geminikey').value.trim(); if(!v) return;
+    const r=await rpc('setGeminiKey',v); document.getElementById('geminikey').value='';
+    if(r) window.__push(r); }
+
   // Python pushes the full state here.
   window.__push = function(s){
     document.getElementById('hello').textContent = s.greeting || 'Settings';
@@ -373,6 +406,7 @@
     fillSelect('mic', [{value:'',label:'System default'}].concat(dev(s.mics)), s.mic);
     fillSelect('spk', [{value:'',label:'System default'}].concat(dev(s.spk)), s.speaker);
     fillSelect('voice', dev(s.voices), s.voice);
+    document.getElementById('backend').value = s.backend || 'openai';
     document.getElementById('workspace').value = s.workspace || '';
     document.getElementById('mem_provider').value = s.mem_provider || 'none';
     document.getElementById('mem_recall_count').value = String(s.mem_recall_count || 5);
@@ -396,6 +430,9 @@
     const ks=document.getElementById('keystat');
     ks.textContent = s.key_present ? '· connected' : '· not set';
     ks.className = 'desc ' + (s.key_present?'ok':'bad');
+    const gks=document.getElementById('geministat');
+    gks.textContent = s.gemini_key_present ? '· connected' : '· not set';
+    gks.className = 'desc ' + (s.gemini_key_present?'ok':'bad');
   };
   rpc('ready');
 </script>

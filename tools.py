@@ -6,6 +6,7 @@ LiveSession._do_tool dispatches to these.
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -71,7 +72,8 @@ TOOLS = [
         "name": "delegate",
         "description": "Hand a slow coding/research task to a background AI agent in its own named herdr lane. Returns immediately and survives the conversation; when it finishes the voice agent automatically comes back and speaks the result. Don't wait or poll. Give it a short task_name so Robin can refer to it later ('continue the routing fix').",
         "parameters": {"type": "object",
-                       "properties": {"instruction": {"type": "string"},
+                       "properties": {"instruction": {"type": "string",
+                                                       "description": "Robin's request in his own words, as close to verbatim as you can reconstruct it — do not summarize, compress, or reinterpret."},
                                       "task_name": {"type": "string",
                                                     "description": "Short kebab-case handle, e.g. 'routing-fix'. Optional; derived from the instruction if omitted."},
                                       "reuse_pane": {"type": "string",
@@ -81,10 +83,12 @@ TOOLS = [
     {
         "type": "function",
         "name": "fleet",
-        "description": "List every herdr pane across Robin's workspaces, including named agent lanes and bare shells. Pass pane to zoom into its recent output and process information before choosing where to continue work.",
+        "description": "List every herdr pane across Robin's workspaces, including named agent lanes and bare shells. Pass detail='topics' to also get what EVERY pane is actually working on (a gist of each one's recent output plus its folder) — use that whenever Robin asks what the panes are about, or wants a summary across all of them, rather than peeking into them one at a time. Pass pane to zoom into a single pane's full recent output and process information.",
         "parameters": {"type": "object",
                        "properties": {"pane": {"type": "string",
-                                                "description": "Spoken pane name from a previous fleet listing."}},
+                                                "description": "Spoken pane name from a previous fleet listing."},
+                                      "detail": {"type": "string", "enum": ["status", "topics"],
+                                                 "description": "'status' (default) is just working/idle per pane; 'topics' also says what each pane is about, for all panes in one call."}},
                        "required": []},
     },
     {
@@ -93,7 +97,8 @@ TOOLS = [
         "description": "Send follow-up feedback into any named herdr pane. If the pane is not already Pam's lane, it is adopted first; never target the protected orchestrator pane.",
         "parameters": {"type": "object",
                        "properties": {"task_name": {"type": "string"},
-                                      "feedback": {"type": "string"}},
+                                      "feedback": {"type": "string",
+                                                   "description": "Robin's follow-up in his own words, as close to verbatim as you can reconstruct it — do not summarize, compress, or reinterpret."}},
                        "required": ["task_name", "feedback"]},
     },
     {
@@ -109,7 +114,8 @@ TOOLS = [
         "name": "os_delegate",
         "description": "Hand BUSINESS/SYSTEM work to Robin's thrivbe-os worker: CRM updates, approvals, follow-ups/chasing, or anything in Robin's operating system. This only waits for the OS to accept the job; Robin gets a Telegram approval or summary later. For plain task capture use notion_create_task instead (instant, no approval loop); for Mac coding/research use the local `delegate` tool.",
         "parameters": {"type": "object",
-                       "properties": {"instruction": {"type": "string"}},
+                       "properties": {"instruction": {"type": "string",
+                                                       "description": "Robin's request in his own words, as close to verbatim as you can reconstruct it — do not summarize, compress, or reinterpret."}},
                        "required": ["instruction"]},
     },
     {
@@ -405,6 +411,43 @@ TOOLS = [
 ]
 
 
+# Live-verified against the real API 2026-08-02: Gemini's function-declaration Schema
+# rejects a JSON-Schema type UNION (`"type": ["integer", "string"]`, used by a few
+# tools for flexible id fields) with a hard 1007 close — it wants exactly one type.
+# "string" is the safe collapse: every downstream handler that reads one of these ids
+# already accepts/coerces a string, and the model can always emit digits as text.
+_GEMINI_TYPE_UNION_PRIORITY = ["string", "number", "integer", "boolean", "array", "object"]
+
+
+def _gemini_safe_schema(node):
+    """Recursively collapse JSON-Schema type unions for Gemini's parameters schema.
+    Everything else (default, enum, description, required, nested objects/arrays)
+    passed a live setup call unchanged — only `type: [...]` needed fixing."""
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for k, v in node.items():
+        if k == "type" and isinstance(v, list):
+            v = next((t for t in _GEMINI_TYPE_UNION_PRIORITY if t in v), v[0])
+        elif k == "properties" and isinstance(v, dict):
+            v = {pk: _gemini_safe_schema(pv) for pk, pv in v.items()}
+        elif k == "items":
+            v = _gemini_safe_schema(v)
+        out[k] = v
+    return out
+
+
+def to_gemini_schema(tools: list[dict]) -> list[dict]:
+    """Reshape the flat OpenAI Realtime tool list into Gemini's function-declaration
+    shape: [{"functionDeclarations": [{name, description, parameters}, ...]}].
+    Drops the "type" key (OpenAI's "function" tag), sanitizes `parameters` for
+    Gemini's schema dialect (see _gemini_safe_schema) — passes everything else through
+    unchanged."""
+    return [{"functionDeclarations": [
+        {k: (_gemini_safe_schema(v) if k == "parameters" else v)
+         for k, v in t.items() if k != "type"} for t in tools]}]
+
+
 # Verify-or-be-honest harness wrapped around EVERY delegated instruction. The
 # background agent has file/bash tools, so it can observe the real end-state — this
 # forces it to, instead of declaring success off a proxy (a script's "done" echo, a
@@ -415,7 +458,15 @@ TOOLS = [
 # on every delegated call, and having it in a file means it can be edited and iterated
 # without touching code. A pointer also works for both `claude` and `pi` delegates —
 # both can read a file, whereas a Claude-Code skill would only load for one of them.
-HARNESS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delegate-harness.md")
+# In a py2app bundle this module lives INSIDE Contents/Resources/lib/python312.zip, so
+# dirname(__file__) is a path into a zip archive, not a real directory — the harness
+# resolved there never exists and every delegation failed in the shipped app (it only
+# worked from source). py2app sets RESOURCEPATH to Contents/Resources, where the file is
+# shipped via data_files; in dev that var is unset, so fall back to the module's own dir.
+# Same pattern settings.py already uses to find settings.html.
+HARNESS_PATH = os.path.join(
+    os.environ.get("RESOURCEPATH") or os.path.dirname(os.path.abspath(__file__)),
+    "delegate-harness.md")
 
 
 def _verify_wrap(instruction: str) -> str:
@@ -729,6 +780,46 @@ def _mint_task(instruction: str, cfg: dict):
     return tid, pf, out, done
 
 
+# --- pi <-> claude-mem parity ------------------------------------------------
+# `claude` mode delegates get claude-mem's search/get_observations/timeline tools
+# automatically via the plugin. `pi` is a separate CLI with no plugin system, so it
+# needs the same stdio MCP server registered explicitly via --mcp-config. The plugin
+# cache path is version-pinned (.../claude-mem/<version>/...), so resolve it fresh
+# each call instead of hardcoding a version that will go stale on the next update.
+def _claude_mem_mcp_server():
+    base = os.path.expanduser("~/.claude/plugins/cache/thedotmack/claude-mem")
+    try:
+        # Numeric sort: a plain string sort puts 9.0.9 above 9.0.17, and 9.x above 10.x.
+        versions = sorted(os.listdir(base),
+                          key=lambda s: [int(n) for n in re.findall(r"\d+", s)] or [0])
+    except OSError:
+        return None
+    for v in reversed(versions):
+        script = os.path.join(base, v, "scripts", "mcp-server.cjs")
+        if os.path.isfile(script):
+            return script
+    return None
+
+
+def _pi_mcp_config_path():
+    """Write a tiny MCP config pointing pi at claude-mem, fresh each call so plugin
+    version bumps never go stale. None if the plugin isn't installed — pi then just
+    runs without it, same as before this existed."""
+    script = _claude_mem_mcp_server()
+    if not script:
+        return None
+    path = os.path.join(config.TASKS_DIR, "pi-mcp-config.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": {"claude-mem": {"type": "stdio", "command": script}}}, f)
+    return path
+
+
+def _pi_cmd(pi_model: str, headless: bool = False) -> str:
+    mcp_cfg = _pi_mcp_config_path()
+    mcp_flag = f" --mcp-config {shlex.quote(mcp_cfg)}" if mcp_cfg else ""
+    return f"pi {'-p ' if headless else ''}--model {pi_model}{mcp_flag}"
+
+
 def _build_delegate_cmd(instruction: str, cfg: dict):
     """HEADLESS fallback: write the instruction to a prompt file and return
     (shell command, out_path) that runs the background agent DETACHED, capturing
@@ -743,7 +834,7 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
     if mode == "claude":
         agent_cmd = f"claude -p --model {live.get('claude_model', 'sonnet')} --permission-mode acceptEdits"
     else:
-        agent_cmd = f"pi -p --model {live.get('pi_model', 'deepseek-v4-flash')}"
+        agent_cmd = _pi_cmd(live.get('pi_model', 'deepseek-v4-flash'), headless=True)
     try:
         # Inside the try: a missing harness file must degrade to "couldn't start it",
         # never to an unharnessed delegate.
@@ -824,7 +915,7 @@ def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=No
             if mode == "claude":
                 run_cmd = f"claude --model {live.get('claude_model', 'sonnet')}"
             else:
-                run_cmd = f"pi --model {live.get('pi_model', 'deepseek-v4-flash')}"
+                run_cmd = _pi_cmd(live.get('pi_model', 'deepseek-v4-flash'))
             # pane run = text + Enter atomically; the pane's shell expands $(cat …), so
             # the multi-KB prompt never gets typed and the Enter gotcha never applies.
             _herdr("pane", "run", pane_id, f'{run_cmd} "$(cat {shlex.quote(pf)})"')
@@ -880,7 +971,7 @@ def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=No
             else:
                 run_cmd = (f"claude --model {live.get('claude_model', 'sonnet')}"
                            if mode == "claude" else
-                           f"pi --model {live.get('pi_model', 'deepseek-v4-flash')}")
+                           _pi_cmd(live.get('pi_model', 'deepseek-v4-flash')))
                 _herdr("pane", "run", pane_id, f'{run_cmd} "$(cat {shlex.quote(pf)})"')
             spoken = adopted[len(LANE_PREFIX):].replace("-", " ")
             return (f"Cleared and reused '{target['_label']}' as '{spoken}' — "
@@ -910,6 +1001,65 @@ def _lane_state(a, sidecars) -> str:
     return "paused, probably waiting for your input"
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
+# A coding TUI's tail is mostly live chrome — progress bars, token counters, spinners,
+# key hints. Dropping it is what separates "what this pane is about" from "37% ⏵⏵".
+_CHROME_RE = re.compile(
+    r"[█░▓]|bypass permissions|shift\+tab|esc to interrupt|ctrl\+[a-z]|"
+    # spinner glyphs vary run to run (✳ ✻ ✽ ✴ …) — match the whole Dingbats block
+    # rather than chasing whichever one a given TUI build happens to use.
+    r"[\d.]+k? tokens|/clear to save|new task\?|to cycle|^[✀-➿●○◐·*]|"
+    r"^\d+m \d+s|⏵|^/[a-z]+$|"
+    # the delegate harness preamble is identical on every lane — pure boilerplate here
+    r"delegate-harness\.md|your working contract|disable recaps in",
+    re.IGNORECASE)
+
+
+def _gist_from_text(text: str, max_chars: int = 200) -> str:
+    """Pure text -> one-line gist; see _pane_gist. Split out so the heuristic is
+    testable without a live herdr server."""
+    # TUIs pad with non-breaking spaces, which str.strip() leaves behind.
+    lines = [ln.replace(" ", " ").strip()
+             for ln in _ANSI_RE.sub("", text or "").splitlines()]
+    lines = [ln for ln in lines
+             if len(ln) > 15 and sum(c.isalpha() for c in ln) >= 8
+             and not _CHROME_RE.search(ln)]
+    if not lines:
+        return ""
+    # The typed prompt ("> unify the voice agent…") states a pane's purpose far better
+    # than whatever its agent happens to be printing at this instant.
+    asks = [ln.lstrip("❯>» ").strip() for ln in lines if ln[0] in "❯>»"]
+    if asks:
+        return asks[-1][:max_chars]
+    return " ".join(lines[-3:])[-max_chars:]
+
+
+def _pane_gist(pane, max_chars: int = 200) -> str:
+    """What a pane is ABOUT, from its recent terminal output. Reading one pane costs
+    ~10ms, so the whole fleet can be gisted in a single fleet call instead of Robin
+    naming panes one at a time to peek into them."""
+    read = (_herdr("agent", "read", pane["pane_id"], "--source", "recent",
+                   timeout=5) or {}).get("read") or {}
+    return _gist_from_text((read or {}).get("text") or "", max_chars)
+
+
+def _fleet_topics(panes, sidecars, cap: int = 12) -> str:
+    """Every pane plus a gist of its work, for 'what are they all about' questions."""
+    ws_count = len({p["_workspace_label"] for p in panes})
+    out = [f"{len(panes)} panes across {ws_count} workspace{'s' if ws_count != 1 else ''}. "
+           f"Summarize these out loud for Robin in your own words, grouped sensibly — "
+           f"don't read them verbatim:"]
+    for pane in panes[:cap]:
+        where = os.path.basename((pane.get("cwd") or "").rstrip("/")) or "unknown folder"
+        gist = _pane_gist(pane)
+        out.append(f"- {pane['_label']} ({pane['_workspace_label']}, in {where}) is "
+                   f"{_lane_state(pane, sidecars)}"
+                   + (f": {gist}" if gist else " — nothing in its recent output."))
+    if len(panes) > cap:
+        out.append(f"(and {len(panes) - cap} more panes beyond the first {cap} — say so.)")
+    return "\n".join(out)
+
+
 def fleet(args: dict = None) -> str:
     if not _herdr_up():
         return "herdr isn't running, so there are no watchable tasks. Headless ones still announce themselves when done."
@@ -918,6 +1068,8 @@ def fleet(args: dict = None) -> str:
     if not panes:
         return "No herdr panes are open right now."
     sidecars = _lane_sidecars()
+    if (args.get("detail") or "").strip().lower() == "topics" and not (args.get("pane") or "").strip():
+        return _fleet_topics(panes, sidecars)
     wanted = (args.get("pane") or "").strip()
     if wanted:
         pane = _find_lane(wanted, panes)
