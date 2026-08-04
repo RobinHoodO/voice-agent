@@ -39,6 +39,7 @@ class Backend(ABC):
     ws = None
     mic_rate: int = 24000
     manual_vad: bool = False
+    resume_handle: str | None = None   # providers that can resume a dropped session
 
     @abstractmethod
     async def connect(self):

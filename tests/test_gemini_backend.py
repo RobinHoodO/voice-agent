@@ -27,6 +27,32 @@ def test_parse_setup_complete_is_ignored():
     assert GeminiBackend().parse_event({"setupComplete": {}}).kind == OTHER
 
 
+def test_setup_asks_for_resumption_handles_when_it_has_none():
+    assert GeminiBackend().build_setup("i", _tools(), "alloy")["setup"]["sessionResumption"] == {}
+
+
+def test_setup_replays_a_stored_handle():
+    backend = GeminiBackend()
+    backend.resume_handle = "h-123"
+    setup = backend.build_setup("i", _tools(), "alloy")
+    assert setup["setup"]["sessionResumption"] == {"handle": "h-123"}
+
+
+def test_resumable_handle_is_stored_and_non_resumable_never_clobbers_it():
+    backend = GeminiBackend()
+    assert backend.parse_event({"sessionResumptionUpdate": {
+        "newHandle": "h-1", "resumable": True}}).kind == OTHER
+    assert backend.resume_handle == "h-1"
+    backend.parse_event({"sessionResumptionUpdate": {"newHandle": "", "resumable": False}})
+    assert backend.resume_handle == "h-1"
+    backend.parse_event({"sessionResumptionUpdate": {"newHandle": "h-2", "resumable": True}})
+    assert backend.resume_handle == "h-2"
+
+
+def test_go_away_is_survivable():
+    assert GeminiBackend().parse_event({"goAway": {"timeLeft": "5s"}}).kind == OTHER
+
+
 def test_parse_interrupted_as_speech_started():
     assert GeminiBackend().parse_event({"serverContent": {"interrupted": True}}).kind == SPEECH_STARTED
 

@@ -179,6 +179,8 @@ def test_mic_callback_is_silenced_by_the_stop_event():
 
 # --- 4. stall watchdog (the 72 silent seconds) ------------------------------
 class _FakeBackend:
+    resume_handle = None
+
     def __init__(self):
         self.contexts, self.triggers, self.closed = [], 0, False
 
@@ -296,6 +298,40 @@ def test_earcon_produces_playable_pcm():
     s._earcon()
     assert chunks and len(chunks[0]) > 1000, "earcon produced no audio"
     assert len(chunks[0]) % 2 == 0, "not int16-aligned PCM"
+
+
+# --- 5. silent recovery (16:39 on 2026-08-04) -------------------------------
+# The watchdog above worked: it dropped the dead socket and reconnected in one second.
+# Then it said nothing, so Robin sat in silence and killed the session a minute later.
+def _run_reconnect(resume_handle=None):
+    import asyncio
+
+    import live_session as ls
+
+    s = ls.LiveSession.__new__(ls.LiveSession)
+    s._backend = _FakeBackend()
+    s._backend.resume_handle = resume_handle
+    s._reconnected = True
+    s._awaiting_reply_since = None
+    s._loop = type("L", (), {"time": lambda self: 42.0})()
+    asyncio.run(s._speak_reconnect())
+    return s
+
+
+def test_reconnect_is_never_silent():
+    s = _run_reconnect(resume_handle="h-1")
+    assert s._backend.triggers == 1, "reconnected without saying anything"
+    assert "say that again" in s._backend.contexts[0].lower()
+    assert not s._reconnected, "flag must clear or every turn re-announces"
+    assert s._awaiting_reply_since == 42.0, "the recovery line itself must be watched too"
+
+
+def test_reconnect_without_a_handle_admits_the_thread_is_gone():
+    """Resumed, she only lost a sentence. Cold, she lost the conversation — and saying
+    'go on' as if she still had it is worse than admitting the gap."""
+    resumed = _run_reconnect(resume_handle="h-1")._backend.contexts[0]
+    cold = _run_reconnect(resume_handle=None)._backend.contexts[0]
+    assert "conversation" in cold.lower() and "conversation" not in resumed.lower()
 
 
 if __name__ == "__main__":

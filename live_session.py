@@ -159,6 +159,8 @@ class LiveSession(AudioMixin):
         self._delegated_upto: int = 0                 # cursor into _turns: what's already been handed off
         self._recent_tools: list = []                 # [(ts, "tool:args")] — loop guard window
         self._awaiting_reply_since: float | None = None  # loop.time() a turn went silent
+        self._resume_handle: str | None = None        # provider handle, survives a reconnect
+        self._reconnected = False                     # next session must say it dropped out
         self.level: float = 0.0                       # live mic level 0..1 (drives the wave pill)
         self._local_speaking = False
         self._local_silence_since: float | None = None
@@ -346,8 +348,10 @@ class LiveSession(AudioMixin):
                 # Unexpected drop while still live: back off and reconnect, so the daemon
                 # doesn't go silently deaf on a network blip / idle timeout / server close.
                 self.on_state("reconnecting")
+                self._reconnected = True   # the next session opens with a spoken apology
                 self._notify(f"Connection lost — reconnecting in {int(backoff)}s")
-                _log(f"session dropped; reconnecting in {backoff:.0f}s")
+                _log(f"session dropped; reconnecting in {backoff:.0f}s"
+                     + (" (resuming)" if self._resume_handle else ""))
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
         finally:
@@ -501,6 +505,7 @@ class LiveSession(AudioMixin):
         self._mic_q = asyncio.Queue()
         self._cfg = config.load()
         self._backend = self._make_backend(self._cfg)
+        self._backend.resume_handle = self._resume_handle
         ws = await self._backend.connect()
         try:
             try:
@@ -519,6 +524,8 @@ class LiveSession(AudioMixin):
             sw = asyncio.ensure_future(self._stall_watchdog())
             if self._announce:
                 await self._speak_announcement()
+            elif self._reconnected:
+                await self._speak_reconnect()
             try:
                 async for raw in ws:
                     if not self._running:
@@ -531,6 +538,9 @@ class LiveSession(AudioMixin):
                 wd.cancel()
                 sw.cancel()
         finally:
+            # Keep whatever handle the provider last issued: it's what lets the NEXT
+            # attempt resume this conversation instead of starting cold.
+            self._resume_handle = self._backend.resume_handle
             await self._backend.close()
 
     async def _configure(self) -> None:
@@ -650,6 +660,24 @@ class LiveSession(AudioMixin):
         if self._ws:
             await self._backend.send_text_context(
                 f"[System context: the confirmed {tool} has executed. Result: {out}]")
+
+    async def _speak_reconnect(self) -> None:
+        """The previous socket died mid-conversation. Say so out loud — a silent
+        reconnect is indistinguishable from a dead app, which is exactly how Robin lost
+        a session on 2026-08-04: the watchdog recovered in one second and he never knew."""
+        self._reconnected = False
+        config.activity("🔌  reconnected — asking him to repeat")
+        resumed = bool(self._backend.resume_handle)
+        await self._backend.send_text_context(
+            "[Your connection to Robin just dropped and came back. Whatever he said last "
+            "never reached you. Say ONE short sentence out loud right now — that you "
+            + ("dropped out for a second and to say that again"
+               if resumed else
+               "lost the connection and the last bit of the conversation with it, "
+               "so he should say that again")
+            + ". Do not call a tool.]")
+        await self._backend.trigger_response()
+        self._awaiting_reply_since = self._loop.time()   # arm the stall watchdog
 
     async def _speak_announcement(self) -> None:
         """Auto-wake greeting: the menubar watcher opened this session because a

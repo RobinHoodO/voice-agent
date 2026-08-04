@@ -38,6 +38,7 @@ class GeminiBackend(Backend):
         self._pending_extra: list[NormalizedEvent] = []
         self._out_transcript_buf = ""
         self._in_transcript_buf = ""
+        self.resume_handle: str | None = None   # carried across reconnects by LiveSession
 
     async def connect(self):
         import websockets
@@ -64,6 +65,12 @@ class GeminiBackend(Backend):
                     "automaticActivityDetection": {"disabled": True},
                     "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                 },
+                # Gemini's own resume mechanism: with this present the server hands out
+                # rolling handles, and passing the last one back on reconnect restores the
+                # conversation server-side. Without it every drop was a cold start — on
+                # 2026-08-04 a dead socket cost Robin the whole thread mid-sentence.
+                "sessionResumption": ({"handle": self.resume_handle}
+                                      if self.resume_handle else {}),
                 "outputAudioTranscription": {},
                 # Without a hint Gemini re-detects the language every utterance, so
                 # short ones ("what about now?") came back as Spanish. The field is
@@ -81,7 +88,7 @@ class GeminiBackend(Backend):
             if "error" in ev:
                 raise RuntimeError(ev["error"])
             if "setupComplete" in ev:
-                _log("ev setupComplete")
+                _log("ev setupComplete" + (" (resumed prior session)" if self.resume_handle else ""))
                 return
 
     async def send_audio_chunk(self, pcm_bytes: bytes) -> None:
@@ -141,7 +148,18 @@ class GeminiBackend(Backend):
             return NormalizedEvent(TOOL_CALL, call_id=call["id"], name=call["name"],
                                    args=json.dumps(call.get("args") or {}))
         if "setupComplete" in ev:
-            _log("ev setupComplete")
+            return NormalizedEvent(OTHER)
+        if "sessionResumptionUpdate" in ev:
+            upd = ev["sessionResumptionUpdate"] or {}
+            # Only a resumable handle is worth keeping; mid-turn updates arrive with
+            # resumable=false and must not overwrite the last good one.
+            if upd.get("resumable") and upd.get("newHandle"):
+                self.resume_handle = upd["newHandle"]
+            return NormalizedEvent(OTHER)
+        if "goAway" in ev:
+            # Gemini's advance warning that it's about to close the socket. Nothing to do
+            # but say so in the log — _run reconnects, and the handle above resumes.
+            _log(f"ev goAway {ev['goAway']} — server closing, will resume on reconnect")
             return NormalizedEvent(OTHER)
         if "serverContent" in ev:
             sc = ev["serverContent"]
