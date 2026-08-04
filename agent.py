@@ -54,6 +54,32 @@ def _prune_old_tasks() -> None:
         LOG(f"task prune failed: {e!r}")
 
 
+def _in_quiet_hours() -> bool:
+    """True if auto-wake-and-speak on a finished background task should stay silent
+    right now (config.live.quiet_hours). Doesn't affect user-initiated (double-tap) live
+    sessions — only the unattended announce path that spoke unprompted at 3am."""
+    cfg = config.get("live.quiet_hours", {})
+    if not cfg or not cfg.get("enabled", False):
+        return False
+    now = time.localtime()
+    if cfg.get("weekdays_only", True) and now.tm_wday >= 5:   # Sat=5, Sun=6
+        return False
+
+    def to_min(hhmm, fallback):
+        try:
+            h, m = hhmm.split(":")
+            return int(h) * 60 + int(m)
+        except Exception:
+            return fallback
+
+    cur = now.tm_hour * 60 + now.tm_min
+    start = to_min(cfg.get("start", "00:00"), 0)
+    end = to_min(cfg.get("end", "07:00"), 420)
+    if start <= end:
+        return start <= cur < end
+    return cur >= start or cur < end   # window wraps past midnight
+
+
 def _seed_announced_tasks() -> set:
     try:
         config.ensure_dirs()
@@ -335,6 +361,8 @@ class VoiceAgent(rumps.App):
                     if live.offer_task(tid, self._read_task_out(tid)):
                         LOG(f"task {tid} done while live — queued for next turn")
                     continue
+                if _in_quiet_hours():
+                    continue   # leave un-announced; retried each tick until quiet hours end
                 LOG(f"task {tid} done -> waking to speak result")
                 if self._wake_and_speak(self._read_task_out(tid), tid):
                     self._announcing.add(tid)

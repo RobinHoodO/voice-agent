@@ -7,6 +7,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import config
 from backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, OTHER,
                            SPEECH_STARTED, TOOL_CALL, USER_TRANSCRIPT, Backend,
                            NormalizedEvent)
@@ -64,7 +65,11 @@ class GeminiBackend(Backend):
                     "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                 },
                 "outputAudioTranscription": {},
-                "inputAudioTranscription": {},
+                # Without a hint Gemini re-detects the language every utterance, so
+                # short ones ("what about now?") came back as Spanish. The field is
+                # languageCodes (plural list) — singular languageCode is rejected.
+                "inputAudioTranscription": {
+                    "languageCodes": config.get("live.languages") or ["en-US"]},
             },
         }
 

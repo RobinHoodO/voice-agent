@@ -53,6 +53,8 @@ OPTIONS = {
         "live_prompt",
         "shell",
         "macos_context",     # lazily imported by live_session — name it so py2app bundles it
+        "focus",             # ditto — imported inside _do_tool, invisible to py2app's scan
+        "web",               # ditto
         "memory",
         "pill",
         "config",

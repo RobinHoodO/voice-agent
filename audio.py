@@ -57,24 +57,45 @@ class AudioMixin:
             self._update_level(data)   # metering off the PortAudio callback thread
             if self._backend.manual_vad:
                 # ponytail: match OpenAI's familiar 700ms turn boundary locally.
-                if self.level > 0.10:
-                    if not self._local_speaking:
+                # While the agent is TALKING the bar is higher and the loud input must
+                # be sustained: an open-ear/bone-conduction headset leaks her own voice
+                # back into the mic, and a single fixed threshold read that as a barge-in
+                # — cancelling her mid-word, then restarting the same answer. Real speech
+                # clears both; a leak clears neither. Tunable per mic/headset (live.vad).
+                speaking = bool(self._speaking)
+                bar = self._vad_bar_speaking if speaking else self._vad_bar
+                hold = self._vad_hold if speaking else 0.0
+                if self.level > bar:
+                    if self._local_loud_since is None:
+                        self._local_loud_since = self._loop.time()
+                    # Never `continue` here — the frame still has to reach the backend,
+                    # or the hold window would swallow the first word of a real barge-in.
+                    if (not self._local_speaking
+                            and self._loop.time() - self._local_loud_since >= hold):
                         self._local_speaking = True
                         self._local_silence_since = None
+                        if speaking:
+                            # Rare (only real interruptions) and the one number worth
+                            # having: if she still cuts herself off, this is the echo
+                            # level to raise live.vad.threshold_while_speaking above.
+                            _log(f"barge-in accepted at level {self.level:.2f} "
+                                 f"(bar {bar:.2f}) — she was speaking")
                         await self._backend.send_activity_start()
                         await self._on_speech_started()
-                    else:
+                    elif self._local_speaking:
                         self._local_silence_since = None
-                elif self._local_speaking:
-                    if self._local_silence_since is None:
-                        self._local_silence_since = self._loop.time()
-                    elif self._loop.time() - self._local_silence_since >= 0.7:
-                        self._local_speaking = False
-                        self._local_silence_since = None
-                        await self._backend.send_activity_end()
-                        for extra in self._backend.drain_extra_events():
-                            await self._handle_normalized(extra)
-                        await self._on_speech_stopped()
+                else:
+                    self._local_loud_since = None
+                    if self._local_speaking:
+                        if self._local_silence_since is None:
+                            self._local_silence_since = self._loop.time()
+                        elif self._loop.time() - self._local_silence_since >= 0.7:
+                            self._local_speaking = False
+                            self._local_silence_since = None
+                            await self._backend.send_activity_end()
+                            for extra in self._backend.drain_extra_events():
+                                await self._handle_normalized(extra)
+                            await self._on_speech_stopped()
             try:
                 await self._backend.send_audio_chunk(data)
                 n += 1

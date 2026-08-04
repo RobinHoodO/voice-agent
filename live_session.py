@@ -140,6 +140,14 @@ class LiveSession(AudioMixin):
         self.level: float = 0.0                       # live mic level 0..1 (drives the wave pill)
         self._local_speaking = False
         self._local_silence_since: float | None = None
+        self._local_loud_since: float | None = None   # start of the current loud run (barge-in hold)
+        # Local-VAD tuning (Gemini path). Mic/headset dependent — an open-ear or
+        # bone-conduction headset leaks the agent's own voice into the mic, so the bar
+        # to INTERRUPT her is higher than the bar to start a turn while she's silent.
+        vad = (config.get("live.vad") or {})
+        self._vad_bar = float(vad.get("threshold", 0.10))
+        self._vad_bar_speaking = float(vad.get("threshold_while_speaking", 0.28))
+        self._vad_hold = float(vad.get("barge_in_hold_sec", 0.25))
         self._cfg: dict = {}                          # snapshot of config for this session
         self._offered_tasks: queue.Queue = queue.Queue()
         self._offered_tids: set = set()
@@ -751,6 +759,29 @@ class LiveSession(AudioMixin):
             out = await self._loop.run_in_executor(None, kernel_tools.twenty_search_contacts, args)
             _log(f"twenty_search_contacts: {args.get('name_query', '')!r}")
             config.activity(f"🧠  CRM search: {args.get('name_query', '')}")
+        elif name == "focus":
+            import focus as focus_mod
+            import shlex
+            out = await self._loop.run_in_executor(None, focus_mod.focus, args)
+            self._cfg = config.load()   # so the rest of this session sees the new focus
+            # Move the ALREADY-RUNNING shell into the folder (Shell._spawn only covers a
+            # fresh session). Without this a mid-conversation switch leaves the shell in
+            # the old folder and every relative path the model tries silently misses.
+            dest = focus_mod.current().get("dir") or config.get("live.workspace")
+            if dest:
+                await self._loop.run_in_executor(
+                    None, self._run_in_shell, f"cd {shlex.quote(os.path.expanduser(dest))}")
+            _log(f"focus: {args.get('subject', '')!r} -> shell cwd {dest!r}")
+        elif name == "web_search":
+            import web
+            out = await self._loop.run_in_executor(None, web.web_search, args)
+            _log(f"web_search: {args.get('query', '')!r}")
+            config.activity(f"🌐  searched the web: {args.get('query', '')}")
+        elif name == "read_url":
+            import web
+            out = await self._loop.run_in_executor(None, web.read_url, args)
+            _log(f"read_url: {args.get('url', '')!r}")
+            config.activity(f"🌐  read: {args.get('url', '')}")
         elif name == "semsearch_query":
             out = await self._loop.run_in_executor(None, kernel_tools.semsearch_query, args)
             _log(f"semsearch_query: {args.get('corpus', 'people')}: {args.get('query', '')!r}")

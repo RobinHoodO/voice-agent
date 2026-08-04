@@ -80,6 +80,9 @@ DEFAULTS = {
     "live": {
         "voice": "alloy",
         "backend": "openai",             # "openai" | "gemini"
+        # Speech-recognition language hints. Without these Gemini auto-detects per
+        # utterance and short ones land as Spanish/other; first entry is primary.
+        "languages": ["en-US", "nb-NO"],
         "agentic_shell": False,           # off by default — running shell is opt-in (menu toggle)
         "shell_timeout": 20,
         "delegate": "pi",                 # "pi" | "claude" | "off"
@@ -87,6 +90,13 @@ DEFAULTS = {
         "show_task_terminals": False,     # run delegated tasks as visible herdr lanes (False = headless)
         "workspace": None,                # optional context/home folder; None = $HOME
         "custom_prompt": "",              # user/agent-authored persona+context, reloaded every session
+        "focus": None,                    # {subject, name, dir} — current client/project (focus.py)
+        "focus_budget": 150000,           # chars of folder text loaded per focus (~40k tokens)
+        "vad": {                          # local voice-detection (Gemini backend), per-mic
+            "threshold": 0.10,                # level that starts a turn when she's silent
+            "threshold_while_speaking": 0.28, # higher bar to INTERRUPT her — rejects headset echo
+            "barge_in_hold_sec": 0.25,        # loud input must persist this long to interrupt
+        },
         "memory": {                       # conversation recall + learning — see memory.py
             "provider": "none",           # "none" | "claude-mem" | "command"
             "recall_count": 5,
@@ -94,6 +104,12 @@ DEFAULTS = {
             "command": None,              # custom KB query, e.g. "my-kb search {query}"
             "learn": True,                # extract durable learnings on conversation close
             "mirror_claude_mem": False,   # also write learnings into claude-mem (off by default)
+        },
+        "quiet_hours": {                  # suppress auto-wake-and-speak on finished bg tasks
+            "enabled": True,
+            "start": "00:00",             # HH:MM, local time
+            "end": "07:00",
+            "weekdays_only": True,        # Mon-Fri only; False = every day
         },
     },
     "audio": {"input_device": None, "output_device": None},   # device-name substring; null = smart default

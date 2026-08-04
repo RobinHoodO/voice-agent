@@ -5,6 +5,7 @@ realtime_client.py.
 import base64
 import json
 
+import config
 from backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, ERROR, OTHER,
                            RESPONSE_CREATED, RESPONSE_DONE, SPEECH_STARTED,
                            SPEECH_STOPPED, TOOL_CALL, USER_TRANSCRIPT, Backend,
@@ -18,6 +19,15 @@ def _log(msg: str) -> None:
         LOG(msg)
     except Exception:
         pass
+
+
+def _transcription_cfg() -> dict:
+    """whisper-1, plus a language pin when the user speaks exactly one language."""
+    langs = config.get("live.languages") or []
+    cfg = {"model": "whisper-1"}
+    if len(langs) == 1:
+        cfg["language"] = langs[0].split("-")[0]   # whisper wants ISO-639-1 ("en")
+    return cfg
 
 
 class OpenAIBackend(Backend):
@@ -54,7 +64,10 @@ class OpenAIBackend(Backend):
                         "turn_detection": {"type": "server_vad", "threshold": 0.6,
                                            "prefix_padding_ms": 300, "silence_duration_ms": 700,
                                            "create_response": False},
-                        "transcription": {"model": "whisper-1"},
+                        # whisper's `language` forces ONE language, so only pin it when
+                        # exactly one is configured — with several (en + nb) letting it
+                        # auto-detect beats transcribing Norwegian as English phonetics.
+                        "transcription": _transcription_cfg(),
                     },
                     "output": {"format": {"type": "audio/pcm", "rate": SR}, "voice": voice},
                 },

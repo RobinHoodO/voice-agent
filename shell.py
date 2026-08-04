@@ -34,8 +34,13 @@ class Shell:
     def _spawn(self) -> None:
         # Start in the configured base folder (live.workspace) so the agent's
         # project skills and files are in reach; fall back to home if unset/missing.
-        ws = config.get("live.workspace")
-        start = os.path.expanduser(ws) if ws else os.path.expanduser("~")
+        # A focused client/project folder (focus.py) wins over the workspace: the model
+        # naturally reaches for a bare `cat proposal.md`, which fails from the workspace
+        # root and leaves it answering from a half-remembered fragment. Doing it here
+        # also covers _respawn and a brand-new session resuming a saved focus.
+        foc = config.get("live.focus")
+        start = (foc or {}).get("dir") if isinstance(foc, dict) else None
+        start = os.path.expanduser(start or config.get("live.workspace") or "~")
         if not os.path.isdir(start):
             start = os.path.expanduser("~")
         # start_new_session=True puts the shell + its children in their own process
