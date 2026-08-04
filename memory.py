@@ -103,6 +103,68 @@ def record(transcript: str, summary: str = "") -> int:
         return 0
 
 
+# --- crash-safe turn journal ------------------------------------------------
+# The transcript used to reach SQLite only in LiveSession._run's `finally`. A SIGSEGV
+# doesn't run `finally` — on 2026-08-04 a CoreAudio segfault took a whole conversation
+# (an idea Robin had just spent three minutes describing) with it. Every turn now lands
+# in a plain append-only file the instant it's spoken; the DB write clears it, and the
+# next launch recovers anything still lying around.
+JOURNAL_PATH = os.path.join(config.SUPPORT_DIR, "live-turns.journal")
+
+
+def journal_append(turn: str) -> None:
+    """Append one "you: …"/"agent: …" line. Best-effort and unbuffered — worth ~nothing
+    if it isn't on disk before the crash it exists to survive."""
+    turn = (turn or "").strip()
+    if not turn:
+        return
+    try:
+        config.ensure_dirs()
+        with open(JOURNAL_PATH, "a", encoding="utf-8") as f:
+            f.write(turn.replace("\n", " ") + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(JOURNAL_PATH, 0o600)   # same PII as the DB
+        except OSError:
+            pass
+    except Exception as e:
+        _log(f"memory.journal_append failed: {e!r}")
+
+
+def journal_clear() -> None:
+    """Drop the journal — the conversation is safely in SQLite now."""
+    try:
+        os.remove(JOURNAL_PATH)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log(f"memory.journal_clear failed: {e!r}")
+
+
+def journal_recover() -> int:
+    """A leftover journal means the last session died without persisting. Store it as a
+    conversation so the words survive, and return its id (0 if there was nothing).
+    Called once at launch."""
+    try:
+        with open(JOURNAL_PATH, encoding="utf-8") as f:
+            text = f.read().strip()
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        _log(f"memory.journal_recover read failed: {e!r}")
+        return 0
+    if not text:
+        journal_clear()
+        return 0
+    cid = record(text, summary="(recovered after the app closed unexpectedly)")
+    if cid:
+        journal_clear()
+        _log(f"recovered unsaved conversation from journal (id={cid}, "
+             f"{len(text.splitlines())} turns)")
+    return cid
+
+
 def set_summary(conv_id: int, summary: str) -> None:
     """Fill in a conversation's summary once it's been generated; keeps FTS in sync."""
     if not conv_id:

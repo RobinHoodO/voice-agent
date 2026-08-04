@@ -43,7 +43,14 @@ def _find_device(substr: str, want_input: bool):
 class AudioMixin:
     """Audio capture/playback methods for LiveSession. Relies on session attributes
     set in LiveSession.__init__ (_cfg, _mic_q, _out_q, _in_stream, _out_stream,
-    _loop, _running, _player_thread, level, _shell, _ws, _backend)."""
+    _loop, _running, _player_thread, _audio_stop, _audio_dirty, level, _shell,
+    _ws, _backend)."""
+
+    # Per-ATTEMPT audio lifecycle, distinct from the per-SESSION _running flag. A
+    # reconnect tears audio down and back up while _running stays True, so the streams
+    # and the player thread need their own stop signal — see _teardown_audio.
+    _audio_stop: threading.Event
+    _audio_dirty: bool = False
 
     async def _pump_mic(self) -> None:
         n = 0
@@ -107,17 +114,28 @@ class AudioMixin:
 
     def _start_audio(self) -> None:
         import sounddevice as sd
+        self._audio_stop.clear()
         # PortAudio snapshots the device list at init and never refreshes it. This is a
         # long-running menubar daemon, so a headset connected AFTER launch is invisible
         # (and indexes shift as devices come and go) — the headset "isn't recognized"
         # until a full app restart. Re-enumerate per session; both streams are closed
         # by _teardown_audio before we get here. Best-effort: on failure keep the old
         # behaviour rather than losing audio entirely.
-        try:
-            sd._terminate()
-            sd._initialize()
-        except Exception as e:
-            _log(f"portaudio re-init failed (using cached device list): {e!r}")
+        #
+        # sd._terminate() frees PortAudio's GLOBAL state. Calling it while any stream or
+        # player thread from the previous attempt is still alive is a use-after-free on
+        # CoreAudio's IO thread — SIGSEGV in HALC_ProxyIOContext::IOWorkLoop, which is
+        # exactly how the app died mid-reconnect on 2026-08-04. _teardown_audio sets
+        # _audio_dirty when it could NOT prove everything was joined; skip the re-init
+        # then and keep the cached device list rather than gamble on a segfault.
+        if self._audio_dirty:
+            _log("portaudio re-init skipped — previous audio teardown did not fully join")
+        else:
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception as e:
+                _log(f"portaudio re-init failed (using cached device list): {e!r}")
         mic_rate = self._backend.mic_rate
         mic_block = mic_rate // 10
         want_mic = (self._cfg.get("audio") or {}).get("input_device") or MIC_NAME
@@ -152,6 +170,10 @@ class AudioMixin:
         # PortAudio realtime thread — do the MINIMUM here (copy bytes, hand to the loop).
         # numpy RMS metering moved to _pump_mic so heavy work never runs on this thread,
         # where a stall risks input glitches.
+        # _audio_stop (not _running) is the gate: on reconnect _running stays True, and a
+        # late callback from the CLOSING stream must not push into the next attempt's queue.
+        if self._audio_stop.is_set():
+            return
         if self._loop and self._running and self._mic_q is not None:
             data = bytes(indata)
             try:
@@ -189,33 +211,53 @@ class AudioMixin:
         builtin = _find_device("MacBook", want_input=False)
         attempts = [("preferred", out), ("preferred-retry", out),
                     ("built-in", builtin), ("default", None)]
+        stream = None
         for label, dev in attempts:
             if label == "built-in" and (dev is None or dev == out):
                 continue   # no distinct built-in to fall back to
             if label == "preferred-retry":
                 time.sleep(0.4)   # let a flaky BT output settle before the second try
             try:
-                self._out_stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16", device=dev)
-                self._out_stream.start()
+                stream = sd.RawOutputStream(samplerate=SR, channels=1, dtype="int16", device=dev)
+                stream.start()
+                self._out_stream = stream
                 if label != "preferred":
                     _log(f"player using {label} output (idx={dev})")
                 break
             except Exception as e:
+                stream = None
                 _log(f"player init failed ({label}): {e!r}")
         else:
             _log("player gave up — no usable output device")
             return
-        while self._running:
+        # Own the stream through a LOCAL, and exit on the per-attempt stop event rather
+        # than self._running (which stays True across a reconnect — the old player used
+        # to outlive its own streams and keep writing while teardown freed them).
+        try:
+            while self._running and not self._audio_stop.is_set():
+                try:
+                    chunk = self._out_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if not chunk or self._audio_stop.is_set():
+                    continue
+                try:
+                    stream.write(chunk)
+                except Exception as e:
+                    _log(f"player write: {e!r}")
+        finally:
+            # Whoever opened the stream closes it, on this thread, after the last write.
+            # Teardown only nulls the reference; closing here means no other thread can
+            # ever free it out from under an in-flight write.
+            self._out_stream = None
             try:
-                chunk = self._out_q.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if not chunk:
-                continue
-            try:
-                self._out_stream.write(chunk)
+                stream.stop()
             except Exception as e:
-                _log(f"player write: {e!r}")
+                _log(f"player stream stop: {e!r}")
+            try:
+                stream.close()
+            except Exception as e:
+                _log(f"player stream close: {e!r}")
 
     def _flush_out(self) -> None:
         # Barge-in: drop queued audio. The ~100ms chunk mid-write finishes — close enough.
@@ -226,14 +268,41 @@ class AudioMixin:
             pass
 
     def _teardown_audio(self) -> None:
-        for s in (self._in_stream, self._out_stream):
+        """Bring this attempt's audio fully to rest before anyone re-inits PortAudio.
+
+        Order matters and is the whole point: signal first, then close the input stream,
+        then JOIN the player (which closes its own output stream on the way out). Closing
+        a stream while its PortAudio callback is in flight — or letting a stray player
+        thread survive into the next attempt's sd._terminate() — is a use-after-free on
+        CoreAudio's IO thread. Sets _audio_dirty if it can't prove the player exited, so
+        _start_audio knows not to re-init PortAudio underneath it."""
+        self._audio_stop.set()
+        # Null the reference BEFORE touching the object: _mic_cb reads _in_stream-adjacent
+        # state and must see "gone" rather than "closing".
+        s, self._in_stream = self._in_stream, None
+        if s is not None:
             try:
-                if s:
-                    s.stop()
-                    s.close()
-            except Exception:
-                pass
-        self._in_stream = self._out_stream = None
+                s.stop()
+            except Exception as e:
+                _log(f"mic stream stop: {e!r}")
+            try:
+                s.close()
+            except Exception as e:
+                _log(f"mic stream close: {e!r}")
+        t, self._player_thread = self._player_thread, None
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=3.0)
+            if t.is_alive():
+                self._audio_dirty = True
+                _log("player thread still alive after 3s — audio marked dirty")
+        if self._out_stream is not None:
+            # The player normally closes this itself; only reachable if it never started.
+            s, self._out_stream = self._out_stream, None
+            try:
+                s.stop()
+                s.close()
+            except Exception as e:
+                _log(f"output stream close: {e!r}")
         if self._shell is not None:
             self._shell.close()
             self._shell = None

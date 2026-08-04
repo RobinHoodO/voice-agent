@@ -97,6 +97,11 @@ DEFAULTS = {
             "threshold_while_speaking": 0.28, # higher bar to INTERRUPT her — rejects headset echo
             "barge_in_hold_sec": 0.25,        # loud input must persist this long to interrupt
         },
+        # Stall escalation — silence is ambiguous (thinking / looping / dead all sound the
+        # same). Seconds of NO audio on a turn before each cue; 0 disables that step.
+        "stall_tone_s": 6,                # soft "still working" blip
+        "stall_nudge_s": 15,              # ask her to say one sentence out loud
+        "stall_reconnect_s": 35,          # presume the socket is dead; drop and reconnect
         "memory": {                       # conversation recall + learning — see memory.py
             "provider": "none",           # "none" | "claude-mem" | "command"
             "recall_count": 5,

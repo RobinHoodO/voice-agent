@@ -53,6 +53,14 @@ def _log(msg: str) -> None:
 
 
 PENDING_ACTION_TTL_SECONDS = 120
+
+# Loop guard. On 2026-08-04 the model fired `focus` + `semsearch_query` with byte-identical
+# arguments 16 times in 21 seconds — 21 silent seconds to Robin, and enough session churn
+# that the server aborted the connection (1008). Nothing upstream bounds this: every tool
+# result triggers another response, which can call the same tool again forever. Two
+# identical calls can be legitimate (a retry); the third in a short window is a loop.
+TOOL_REPEAT_WINDOW_S = 45.0
+TOOL_REPEAT_LIMIT = 3
 AFFIRM_RE = re.compile(r"\b(yes|yeah|yep|confirm|confirmed|approve|approved|go ahead|do it|send it|proceed|ja|kjør)\b", re.IGNORECASE)
 DENY_RE = re.compile(r"\b(no|nope|cancel|reject|rejected|stop|abort|don't|nei)\b", re.IGNORECASE)
 
@@ -90,6 +98,16 @@ def _confirmation_preview(tool: str, args: dict) -> str:
     return f"about to run {tool.replace('_', ' ')} with {known}"
 
 
+def _tool_repeat_count(recent: list, name: str, args: dict, now: float) -> int:
+    """How many times this exact (tool, args) pair has already run inside the window.
+    `recent` is a list of (timestamp, key) mutated in place — expired entries dropped."""
+    key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+    recent[:] = [(t, k) for (t, k) in recent if now - t < TOOL_REPEAT_WINDOW_S]
+    n = sum(1 for (_t, k) in recent if k == key)
+    recent.append((now, key))
+    return n
+
+
 def _pending_confirmation_outcome(pending: dict, transcript: str, now: float | None = None) -> str:
     """Return the deterministic disposition for a staged kernel decision."""
     now = time.time() if now is None else now
@@ -125,6 +143,8 @@ class LiveSession(AudioMixin):
         self._in_stream = None
         self._out_stream = None
         self._player_thread: threading.Thread | None = None
+        self._audio_stop = threading.Event()   # per-attempt audio stop (see AudioMixin)
+        self._audio_dirty = False              # teardown couldn't prove the player exited
         self._mic_task: asyncio.Future | None = None  # the mic->ws pump (kept so crashes surface)
         self._running = False
         self._speaking = False
@@ -137,6 +157,8 @@ class LiveSession(AudioMixin):
         self._high_stakes: set = set(kernel_tools.KERNEL_TOOL_NAMES) | set(LOCAL_HIGH_STAKES)
         self._turns: list = []                        # ["you: …", "agent: …"] for this conversation
         self._delegated_upto: int = 0                 # cursor into _turns: what's already been handed off
+        self._recent_tools: list = []                 # [(ts, "tool:args")] — loop guard window
+        self._awaiting_reply_since: float | None = None  # loop.time() a turn went silent
         self.level: float = 0.0                       # live mic level 0..1 (drives the wave pill)
         self._local_speaking = False
         self._local_silence_since: float | None = None
@@ -222,6 +244,70 @@ class LiveSession(AudioMixin):
                 self._on_auto_stop()
             except Exception as e:
                 _log(f"on_auto_stop callback failed: {e!r}")
+
+    async def _stall_watchdog(self) -> None:
+        """Silence is ambiguous: thinking, looping, and dead all sound identical, and on
+        2026-08-04 Robin talked for 72 seconds into a session that had already stopped
+        answering. Escalate on a turn that produces no audio: a soft tone so he knows
+        she's still working, one nudge to say SOMETHING, then force a reconnect rather
+        than let him keep talking to a dead socket."""
+        live = self._cfg.get("live") or {}
+        tone_s = float(live.get("stall_tone_s", 6) or 0)
+        nudge_s = float(live.get("stall_nudge_s", 15) or 0)
+        drop_s = float(live.get("stall_reconnect_s", 35) or 0)
+        toned = nudged = False
+        while self._running:
+            await asyncio.sleep(1.0)
+            since = self._awaiting_reply_since
+            if since is None:
+                toned = nudged = False
+                continue
+            waited = self._loop.time() - since
+            if tone_s and waited >= tone_s and not toned:
+                toned = True
+                self._earcon()
+                self.on_state("thinking")
+                _log(f"stall: {int(waited)}s with no audio — played working tone")
+                config.activity("⏳  still working…")
+            if nudge_s and waited >= nudge_s and not nudged:
+                nudged = True
+                _log(f"stall: {int(waited)}s with no audio — nudging for a spoken update")
+                try:
+                    await self._backend.send_text_context(
+                        "[You have gone silent for a while and Robin cannot tell whether "
+                        "you are working or stuck. Say one short sentence out loud RIGHT "
+                        "NOW about what you're doing or what you need. Do not call a tool.]")
+                    await self._backend.trigger_response()
+                except Exception as e:
+                    _log(f"stall nudge failed: {e!r}")
+            if drop_s and waited >= drop_s:
+                # Past this the socket is presumed dead. _run's loop reconnects because
+                # _running is still True; better a 1s gap than a one-way conversation.
+                _log(f"stall: {int(waited)}s with no audio — dropping the socket to reconnect")
+                config.activity("⚠️  no response — reconnecting")
+                self._notify("No response — reconnecting")
+                self._awaiting_reply_since = None
+                try:
+                    await self._backend.close()
+                except Exception:
+                    pass
+                return
+
+    def _earcon(self) -> None:
+        """A short soft two-tone 'still here' blip, synthesized locally and pushed through
+        the normal playback queue. Local on purpose: the point is to be audible exactly
+        when the model ISN'T."""
+        try:
+            import numpy as np
+            from realtime_client import SR
+            t = np.arange(int(SR * 0.09)) / SR
+            env = np.minimum(1.0, np.minimum(t, t[-1] - t) * 60.0)   # click-free fade
+            blip = np.concatenate([np.sin(2 * np.pi * 660 * t) * env,
+                                   np.zeros(int(SR * 0.05)),
+                                   np.sin(2 * np.pi * 880 * t) * env])
+            self._enqueue_audio((blip * 0.18 * 32767).astype(np.int16).tobytes())
+        except Exception as e:
+            _log(f"earcon failed: {e!r}")
 
     def _notify(self, msg: str) -> None:
         """Best-effort user-visible notification (so failures aren't silent)."""
@@ -314,6 +400,17 @@ class LiveSession(AudioMixin):
                          f"`python {mem_path} recall \"<query>\"` if relevant.)")
         return "\n\n".join(parts)
 
+    def _record_turn(self, turn: str) -> None:
+        """Keep the turn in memory for this session AND on disk immediately. The in-memory
+        list is what gets summarized at close; the journal is what survives a hard crash,
+        which `finally`-based persistence does not."""
+        self._turns.append(turn)
+        try:
+            import memory
+            memory.journal_append(turn)
+        except Exception as e:
+            _log(f"journal append failed: {e!r}")
+
     def _persist_conversation(self) -> None:
         """On close, store this conversation's transcript, then summarize it in the
         background (non-blocking) so future sessions can recall it. Best-effort."""
@@ -328,6 +425,7 @@ class LiveSession(AudioMixin):
             cid = memory.record(transcript)
             _log(f"conversation stored (id={cid}, {len(turns)} turns)")
             if cid:
+                memory.journal_clear()   # safely in SQLite — nothing left to recover
                 threading.Thread(target=self._learn, args=(cid, transcript),
                                  daemon=True).start()
         except Exception as e:
@@ -418,6 +516,7 @@ class LiveSession(AudioMixin):
             self._session_start = self._last_speech = self._loop.time()
             self._wall_start = time.time()
             wd = asyncio.ensure_future(self._idle_watchdog())
+            sw = asyncio.ensure_future(self._stall_watchdog())
             if self._announce:
                 await self._speak_announcement()
             try:
@@ -430,6 +529,7 @@ class LiveSession(AudioMixin):
                         _log(f"realtime handle error: {e!r}")
             finally:
                 wd.cancel()
+                sw.cancel()
         finally:
             await self._backend.close()
 
@@ -478,6 +578,7 @@ class LiveSession(AudioMixin):
         elif k == events.SPEECH_STOPPED:
             await self._on_speech_stopped()
         elif k == events.AUDIO_DELTA:
+            self._awaiting_reply_since = None   # she's talking — stall watchdog stands down
             self._enqueue_audio(ne.audio)
             self._audio_n = getattr(self, "_audio_n", 0) + 1
             if self._audio_n == 1:
@@ -498,17 +599,20 @@ class LiveSession(AudioMixin):
             _log(f"live heard: {heard!r}")
             if heard:
                 config.activity(f"🗣  you: {heard}")
-                self._turns.append(f"you: {heard}")
+                self._record_turn(f"you: {heard}")
         elif k == events.AGENT_TRANSCRIPT:
             said = ne.text
             if said:
                 config.activity(f"💬  agent: {said}")
-                self._turns.append(f"agent: {said}")
+                self._record_turn(f"agent: {said}")
         elif k == events.ERROR:
             _log(f"realtime error event: {ne.detail}")
 
     async def _on_speech_started(self) -> None:
         self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
+        # A new spoken turn is new intent: re-running the same tool is legitimate again.
+        self._recent_tools.clear()
+        self._awaiting_reply_since = None
         self._flush_out()                       # barge-in: stop talking
         if self._speaking:
             await self._backend.cancel_response()
@@ -621,6 +725,7 @@ class LiveSession(AudioMixin):
                     f"[{preamble} Work their results naturally into "
                     f"your next spoken reply:\n{results}\n]")
             await self._backend.trigger_response()
+            self._awaiting_reply_since = self._loop.time()   # arm the stall watchdog
         except Exception:
             for task in finished:
                 self._offered_tasks.put(task)
@@ -640,6 +745,22 @@ class LiveSession(AudioMixin):
             args = json.loads(ev.get("arguments") or "{}")
         except Exception:
             args = {}
+        # Loop guard, before ANY dispatch: refuse the Nth identical call and say why, so
+        # the model breaks out with an answer or a question instead of spinning silently.
+        repeats = _tool_repeat_count(self._recent_tools, name, args, time.time())
+        if repeats >= TOOL_REPEAT_LIMIT:
+            _log(f"loop guard: refused {name} — {repeats} identical calls in "
+                 f"{int(TOOL_REPEAT_WINDOW_S)}s")
+            config.activity(f"⛔  loop guard: {name.replace('_', ' ')} repeated {repeats}x — refused")
+            await self._backend.send_tool_result(
+                call_id,
+                f"LOOP GUARD: you have already called {name} with these exact arguments "
+                f"{repeats} times and it did not get you anywhere. It was NOT run again. "
+                "Do not call it again. Answer out loud with what you already have, or ask "
+                "Robin a specific question about what you're missing.")
+            await self._backend.trigger_response()
+            self._awaiting_reply_since = self._loop.time()
+            return
         # Attach Robin's verbatim words BEFORE the elif chain: os_delegate is in the
         # fail-closed high-stakes set, so a branch further down would be unreachable
         # whenever the kernel manifest can't be read. One place, order-independent.
@@ -822,6 +943,7 @@ class LiveSession(AudioMixin):
             out = await self._loop.run_in_executor(None, self._run_in_shell, args.get("command", ""))
         await self._backend.send_tool_result(call_id, out)
         await self._backend.trigger_response()
+        self._awaiting_reply_since = self._loop.time()   # arm the stall watchdog
 
     def _enqueue_audio(self, chunk: bytes) -> None:
         # Bounded playback queue: if the model outruns the speaker, drop the OLDEST

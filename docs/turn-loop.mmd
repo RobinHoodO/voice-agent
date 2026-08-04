@@ -1,0 +1,50 @@
+---
+config:
+  theme: base
+  themeVariables:
+    fontFamily: "ui-sans-serif, -apple-system, Helvetica, sans-serif"
+    fontSize: 15px
+    lineColor: "#8494ad"
+---
+flowchart LR
+
+    YOU(["🎙 <b>You speak</b><br/>double-tap Control"])
+    MIC["<b>1 · Capture</b><br/>PortAudio callback copies bytes<br/><i>nothing heavy on that thread</i>"]
+    VAD["<b>2 · Turn boundary</b><br/>server VAD (OpenAI)<br/>or local VAD (Gemini)<br/><i>raised bar while she talks</i>"]
+    CTX["<b>3 · Context injected</b><br/>cursor text · window text<br/>screenshot · pinned folder<br/><i>hard 2s cap</i>"]
+    MODEL{{"<b>4 · Model responds</b><br/>audio deltas and/or tool calls"}}
+
+    LOOP{"⛔ <b>loop guard</b><br/>3rd identical call<br/>in 45s?"}
+    HS{"🔒 <b>high-stakes?</b>"}
+    RUN["<b>5 · Run the tool</b><br/>result → next response"]
+    ASK["🗣 <b>read it back</b><br/>wait for a spoken yes<br/><i>120s TTL</i>"]
+    REFUSE["<b>refused</b><br/>'answer or ask Robin'"]
+
+    SPK["<b>6 · Speak</b><br/>bounded playback queue"]
+    JRN["📓 <b>journal</b><br/>fsync every turn"]
+
+    STALL["⏳ <b>stall watchdog</b><br/>no audio for…<br/>6s → tone<br/>15s → nudge<br/>35s → reconnect"]
+
+    YOU --> MIC --> VAD --> CTX --> MODEL
+    MODEL -- "audio" --> SPK --> YOU
+    MODEL -- "tool call" --> LOOP
+    LOOP -- "no" --> HS
+    LOOP -- "yes" --> REFUSE --> MODEL
+    HS -- "no" --> RUN --> MODEL
+    HS -- "yes" --> ASK --> MODEL
+
+    MODEL -. "transcript" .-> JRN
+    YOU -. "transcript" .-> JRN
+    MODEL -. "silence" .-> STALL
+    STALL -. "escalate" .-> YOU
+
+    classDef fix fill:#1e4620,stroke:#4ade80,stroke-width:2px,color:#eafff0
+    classDef you fill:#3b2f14,stroke:#f0b429,stroke-width:2px,color:#fff6e0
+    classDef cloud fill:#16283d,stroke:#5aa9e6,stroke-width:2px,color:#e6f2ff
+    classDef gate fill:#2e1f3d,stroke:#b083f0,color:#f3ebff
+    classDef stop fill:#4a1f1f,stroke:#f87171,stroke-width:2px,color:#ffe8e8
+    class LOOP,STALL,JRN fix
+    class REFUSE stop
+    class YOU,SPK you
+    class MODEL cloud
+    class HS,ASK gate

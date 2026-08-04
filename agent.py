@@ -185,6 +185,15 @@ class VoiceAgent(rumps.App):
         self.hotkey_listener.start()
         trusted = accessibility_trusted()
         LOG(f"STARTED. accessibility_trusted={trusted}  log={LOG_PATH}")
+        # A journal left on disk means the last run died mid-conversation (crash, force
+        # quit, power loss) without reaching the `finally` that stores transcripts. Fold
+        # it into the DB now so those words aren't lost — see memory.journal_recover.
+        try:
+            import memory
+            if memory.journal_recover():
+                config.activity("💾  recovered a conversation from the previous run")
+        except Exception as e:
+            LOG(f"journal recovery failed: {e!r}")
         if trusted is False:
             LOG("NOT TRUSTED — grant 'Thrivbe Voice' in Accessibility + Input Monitoring, then relaunch.")
             rumps.notification("Thrivbe Voice", "Permission needed",
