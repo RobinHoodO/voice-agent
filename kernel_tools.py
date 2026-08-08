@@ -1,6 +1,7 @@
 """Small stdlib client for the local thrivbe-os kernel voice API."""
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -205,12 +206,69 @@ def os_delegate(args: dict) -> str:
     if not instruction:
         return "I need an instruction to hand to the OS worker."
     try:
-        _kernel_call("POST", "/delegate", {"instruction": instruction, "source": "voice-agent"})
+        data = _kernel_call("POST", "/delegate", {"instruction": instruction, "source": "voice-agent"})
     except KernelUnavailable:
         return UNREACHABLE
     except urllib.error.HTTPError as e:
         return f"The kernel rejected that delegation: {e.code}."
-    return "Handed to the OS worker — Robin will get an approval or a summary on Telegram."
+    run_id = data.get("runId")
+    if not run_id:
+        # Accepted but unidentifiable — the old one-way behaviour is the honest fallback.
+        return "Handed to the OS worker — Robin will get an approval or a summary on Telegram."
+    # Close the loop: an .osrun sidecar makes the menubar poller watch this run and
+    # convert its finish into the same .out + .done sentinel herdr delegates use, so
+    # the result reaches Robin by voice instead of dying in a Telegram summary.
+    try:
+        import tools
+        tid, pf, _out, _done = tools._task_paths()
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write(instruction)          # claims the tid; _task_paths de-collides on .prompt
+        with open(os.path.join(os.path.dirname(pf), f"{tid}.osrun"), "w", encoding="utf-8") as f:
+            json.dump({"runId": int(run_id), "instruction": instruction,
+                       "started": time.time()}, f)
+    except Exception as e:
+        _log(f"osrun sidecar write failed for run {run_id}: {e!r}")
+        return (f"Handed to the OS worker as run {run_id}, but I couldn't arrange the "
+                "callback — Robin will get the result on Telegram instead.")
+    return f"Handed to the OS worker as run {run_id} — I'll speak the result when it lands."
+
+
+def kernel_runs(timeout: float = 6) -> list:
+    """The kernel's recent-runs window from GET /status (raises KernelUnavailable)."""
+    data = _kernel_call("GET", "/status", timeout=timeout)
+    return data.get("runs", []) or []
+
+
+# How long a sidecar may wait before "runId missing from the status window" means
+# lost-track rather than not-started: /status returns the newest 30 runs, so a busy
+# kernel can push an old run out of sight before the poller sees it finish.
+OSRUN_WINDOW_GRACE_S = 60 * 60
+
+
+def osrun_outcome(sidecar: dict, runs: list, now: float | None = None) -> str | None:
+    """Pure decision: the announcement text (tag LAST — the announcer keeps the tail)
+    for a finished/lost OS run, or None while it's still legitimately in flight."""
+    now = time.time() if now is None else now
+    run_id = sidecar.get("runId")
+    asked = _short(sidecar.get("instruction") or "", 200)
+    run = next((r for r in runs if r.get("id") == run_id), None)
+    if run is None:
+        if now - float(sidecar.get("started") or now) < OSRUN_WINDOW_GRACE_S:
+            return None
+        return (f"The OS delegation \"{asked}\" (run {run_id}) dropped off the kernel's "
+                "status window before I saw it finish, so I can't confirm how it ended. "
+                "UNVERIFIED")
+    status = run.get("status")
+    if status not in ("completed", "failed"):
+        return None
+    if status == "failed":
+        why = _short(run.get("error") or "no error detail", 300)
+        return f"The OS delegation \"{asked}\" (run {run_id}) failed: {why} FAILED"
+    report = (run.get("report") or "").strip()
+    if not report:
+        return (f"The OS delegation \"{asked}\" (run {run_id}) completed, but the worker "
+                "left no report, so I can't confirm what actually happened. UNVERIFIED")
+    return f"OS delegation \"{asked}\" (run {run_id}) finished. {report} VERIFIED"
 
 
 def session_log(source: str, cost_nok: float, duration_sec: float | None, summary: str) -> str:

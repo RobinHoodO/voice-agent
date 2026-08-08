@@ -6,7 +6,7 @@ conversation: OpenAI Realtime speech-to-speech (in realtime.py), with barge-in, 
 optional agentic shell, cross-session memory, and awareness of what's under your
 cursor. One mode, one voice (OpenAI) — no push-to-talk, no ElevenLabs.
 """
-import os, queue, socket, sys, subprocess, threading, time
+import json, os, queue, socket, sys, subprocess, threading, time
 
 # py2app puts the frozen python312.zip ahead of Contents/Resources on sys.path,
 # so `import realtime/pill/config` would load STALE zipped copies. Put our own dir
@@ -177,6 +177,11 @@ class VoiceAgent(rumps.App):
         # reflect status into the menubar icon from the main thread
         rumps.Timer(self._tick, 0.3).start()
         rumps.Timer(self._check_tasks, 2.0).start()
+        # OS delegations: .osrun sidecars are watched against the kernel's /status
+        # window and converted into the same .out/.done sentinels herdr tasks use,
+        # so _check_tasks above speaks them with zero extra plumbing.
+        self._kernel_poll_inflight = False
+        rumps.Timer(self._check_kernel, 15.0).start()
         rumps.Timer(self._pump_pill_level, 0.05).start()   # feed mic level into the wave
         self.hotkey_listener = keyboard.Listener(
             on_press=self._on_key_press,
@@ -379,6 +384,63 @@ class VoiceAgent(rumps.App):
             pass
         except Exception as e:
             LOG(f"task check failed: {e!r}")
+
+    def _check_kernel(self, _):
+        """Main-thread tick (15s): if any OS delegation sidecars exist, poll the kernel
+        for their runs on a daemon thread — mirroring _probe_kernel_tunnel so AppKit
+        never blocks on HTTP. Costs one listdir when nothing is delegated."""
+        try:
+            if self._kernel_poll_inflight:
+                return
+            sidecars = [f for f in os.listdir(config.TASKS_DIR) if f.endswith(".osrun")]
+            if not sidecars:
+                return
+            self._kernel_poll_inflight = True
+            threading.Thread(target=self._poll_kernel_runs, args=(sidecars,),
+                             daemon=True).start()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            LOG(f"kernel check failed: {e!r}")
+
+    def _poll_kernel_runs(self, sidecars):
+        """Background thread: convert finished OS runs into .out + .done sentinels.
+        Only file I/O and HTTP here — _check_tasks announces on its own main-thread
+        tick, so this thread never touches AppKit."""
+        try:
+            import kernel_tools
+            try:
+                runs = kernel_tools.kernel_runs()
+            except Exception:
+                return                      # tunnel down — retry on a later tick
+            for name in sidecars:
+                path = os.path.join(config.TASKS_DIR, name)
+                tid = name[:-6]
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        sidecar = json.load(fh)
+                except Exception as e:
+                    LOG(f"osrun sidecar {name} unreadable ({e!r}) — dropping")
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                    continue
+                text = kernel_tools.osrun_outcome(sidecar, runs)
+                if text is None:
+                    continue                # still running
+                out = os.path.join(config.TASKS_DIR, f"{tid}.out")
+                done = os.path.join(config.TASKS_DIR, f"{tid}.done")
+                with open(out, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                with open(done, "w", encoding="utf-8"):
+                    pass
+                os.unlink(path)             # sentinel written — this run is resolved
+                LOG(f"osrun {tid} (run {sidecar.get('runId')}) -> sentinel written")
+        except Exception as e:
+            LOG(f"kernel run poll failed: {e!r}")
+        finally:
+            self._kernel_poll_inflight = False
 
     def _read_task_out(self, tid):
         """Read a finished job's captured output, stripped of terminal escape codes."""

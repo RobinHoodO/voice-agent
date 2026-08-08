@@ -92,7 +92,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "fleet",
-        "description": "List every herdr pane across Robin's workspaces, including named agent lanes and bare shells. Pass detail='topics' to also get what EVERY pane is actually working on (a gist of each one's recent output plus its folder) — use that whenever Robin asks what the panes are about, or wants a summary across all of them, rather than peeking into them one at a time. Pass pane to zoom into a single pane's full recent output and process information.",
+        "description": "The one answer to 'what's running?': every herdr pane across Robin's workspaces (named agent lanes and bare shells) PLUS any OS delegations in flight on the thrivbe-os kernel. Pass detail='topics' to also get what EVERY pane is actually working on (a gist of each one's recent output plus its folder) — use that whenever Robin asks what the panes are about, or wants a summary across all of them, rather than peeking into them one at a time. Pass pane to zoom into a single pane's full recent output and process information.",
         "parameters": {"type": "object",
                        "properties": {"pane": {"type": "string",
                                                 "description": "Spoken pane name from a previous fleet listing."},
@@ -121,7 +121,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "os_delegate",
-        "description": "Hand BUSINESS/SYSTEM work to Robin's thrivbe-os worker: CRM updates, approvals, follow-ups/chasing, or anything in Robin's operating system. This only waits for the OS to accept the job; Robin gets a Telegram approval or summary later. For plain task capture use notion_create_task instead (instant, no approval loop); for Mac coding/research use the local `delegate` tool.",
+        "description": "Hand BUSINESS/SYSTEM work to Robin's thrivbe-os worker: CRM updates, approvals, follow-ups/chasing, or anything in Robin's operating system. This only waits for the OS to accept the job — the result is announced by voice when the run finishes (any writes still go through the kernel's approval gates). To follow up on a finished OS run, send another os_delegate referencing it. For plain task capture use notion_create_task instead (instant, no approval loop); for Mac coding/research use the local `delegate` tool.",
         "parameters": {"type": "object",
                        "properties": {"instruction": {"type": "string",
                                                        "description": "Robin's request in his own words, as close to verbatim as you can reconstruct it — do not summarize, compress, or reinterpret."}},
@@ -1165,13 +1165,39 @@ def _fleet_topics(panes, sidecars, cap: int = 12) -> str:
     return "\n".join(out)
 
 
+def _os_runs_line() -> str:
+    """One sentence about in-flight OS delegations (from .osrun sidecars joined against
+    the kernel's runs window). Empty string when there are none or the tunnel is down —
+    a kernel problem must never break the herdr half of the fleet answer."""
+    try:
+        import kernel_tools
+        config.ensure_dirs()
+        sidecars = []
+        for f in os.listdir(config.TASKS_DIR):
+            if f.endswith(".osrun"):
+                with open(os.path.join(config.TASKS_DIR, f), encoding="utf-8") as fh:
+                    sidecars.append(json.load(fh))
+        if not sidecars:
+            return ""
+        by_id = {r.get("id"): r for r in kernel_tools.kernel_runs()}
+        bits = []
+        for sc in sidecars:
+            run = by_id.get(sc.get("runId"))
+            state = (run or {}).get("status") or "not visible yet"
+            bits.append(f"run {sc.get('runId')} ({(sc.get('instruction') or '')[:60]}) is {state}")
+        return " Also on the kernel: " + "; ".join(bits) + "."
+    except Exception:
+        return ""
+
+
 def fleet(args: dict = None) -> str:
     if not _herdr_up():
-        return "herdr isn't running, so there are no watchable tasks. Headless ones still announce themselves when done."
+        return ("herdr isn't running, so there are no watchable tasks. Headless ones "
+                "still announce themselves when done." + _os_runs_line())
     args = args or {}
     panes = _speakable_labels()
     if not panes:
-        return "No herdr panes are open right now."
+        return "No herdr panes are open right now." + _os_runs_line()
     sidecars = _lane_sidecars()
     if (args.get("detail") or "").strip().lower() == "topics" and not (args.get("pane") or "").strip():
         return _fleet_topics(panes, sidecars)
@@ -1204,7 +1230,7 @@ def fleet(args: dict = None) -> str:
         sentences.append(f"In {ws}: " + ", ".join(bits or ["all panes are idle"]) + ".")
         if len(sentences) >= 6:
             break
-    return " ".join(sentences)
+    return " ".join(sentences) + _os_runs_line()
 
 
 def _find_lane(task_name: str, lanes):
