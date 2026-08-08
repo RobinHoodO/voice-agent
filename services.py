@@ -136,6 +136,17 @@ def notion_update_task(args: dict) -> str:
     status, due = (args.get("status") or "").strip(), (args.get("due") or "").strip()
     if not status and not due:
         return "I need a new status or due date to update."
+    if status:
+        import tools
+        # Hard enum check BEFORE any network call: an off-list status means the model is
+        # improvising ("archive" → Done was the 2026-08-08 incident). Refuse and point at
+        # the escalation path instead of writing a wrong-but-valid-looking value.
+        canon = {s.lower(): s for s in tools.NOTION_TASK_STATUSES}
+        if status.lower() not in canon:
+            return (f"'{status}' is not a status in the Tasks database, and I won't guess. "
+                    "If Robin asked for something beyond Status or Due, say so and call "
+                    "`delegate` with his request verbatim.")
+        status = canon[status.lower()]
     try:
         matches = _find_tasks(title_query)
     except Exception as e:
@@ -163,7 +174,12 @@ def notion_update_task(args: dict) -> str:
         return "I couldn't update the task in Notion."
     bits = [b for b in (f"status to {status}" if status else "",
                         f"due to {due}" if due else "") if b]
-    return f"Updated {_task_title(page)}: {' and '.join(bits)}."
+    # Include the page URL (don't read it aloud): if this update wasn't what Robin
+    # wanted, an escalated `delegate` can target this exact page instead of re-running
+    # the contains-match that once rewrote the wrong row 14 times.
+    url = page.get("url") or ""
+    return (f"Updated {_task_title(page)}: {' and '.join(bits)}."
+            + (f" (page: {url} — for delegation, not for speaking)" if url else ""))
 
 
 def notion_search(args: dict) -> str:

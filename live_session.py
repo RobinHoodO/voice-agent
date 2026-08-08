@@ -124,6 +124,16 @@ def _tool_repeat_count(recent: list, name: str, args: dict, now: float) -> int:
 # and the guard never fired because no two calls matched.
 _TOOL_TARGET_FIELD = {"notion_update_task": "title"}
 
+# Per-tool escalation instruction appended to the thrash-guard refusal. The guard fires
+# exactly when a shallow tool is substituting for the thing Robin actually asked — the
+# right exit is a delegate carrying his words, not another guess with the same tool.
+_ESCALATION_HINT = {
+    "notion_update_task": (
+        " If Robin asked for something this tool can't do — a different database, the "
+        "page body, any property other than Status or Due — say so in one sentence and "
+        "call `delegate` with a task_name and his request verbatim."),
+}
+
 
 def _tool_target_count(recent: list, name: str, args: dict, now: float) -> int:
     """How many times this tool has already written to this same target in the window,
@@ -862,7 +872,7 @@ class LiveSession(AudioMixin):
                 "you are guessing at what Robin wants, or he is still deciding. It was NOT run "
                 "again. Stop, say out loud what you have already set it to, and ask him what he "
                 "actually wants — including whether what he asked for is something this tool can "
-                "even do.")
+                "even do." + _ESCALATION_HINT.get(name, ""))
             return
         # Attach Robin's verbatim words BEFORE the elif chain: os_delegate is in the
         # fail-closed high-stakes set, so a branch further down would be unreachable
