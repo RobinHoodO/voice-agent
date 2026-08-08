@@ -819,6 +819,36 @@ class LiveSession(AudioMixin):
                 except Exception as e:
                     _log(f"task spoken callback failed: {e!r}")
 
+    async def _end_after_goodbye(self) -> None:
+        """Close the session once the farewell finishes playing. Robin speaking again
+        before the close aborts it — 'thanks, that was all… oh wait' must keep the
+        session alive. Capped so a stalled goodbye can't hold the mic open."""
+        t0 = self._loop.time()
+        deadline = t0 + 15.0
+        quiet_since = None
+        while self._running and self._loop.time() < deadline:
+            await asyncio.sleep(0.3)
+            if self._last_speech > t0:                # a new spoken turn — he's not done
+                _log("end_conversation aborted: user spoke again")
+                return
+            if self._awaiting_reply_since is not None:
+                continue                              # goodbye audio hasn't started yet
+            if self._out_q.empty():
+                quiet_since = quiet_since or self._loop.time()
+                if self._loop.time() - quiet_since > 1.0:
+                    break                             # played out — close now
+            else:
+                quiet_since = None
+        if not self._running:
+            return
+        _log("end_conversation: goodbye finished — ending live session")
+        self.stop()
+        if self._on_auto_stop:
+            try:
+                self._on_auto_stop()
+            except Exception as e:
+                _log(f"on_auto_stop callback failed: {e!r}")
+
     async def _refuse_guarded_call(self, call_id: str, message: str) -> None:
         """Send a guard refusal. The first refusal triggers a response so the model can
         speak; refusals within GUARD_RETRIGGER_COOLDOWN_S after that send the tool result
@@ -902,6 +932,12 @@ class LiveSession(AudioMixin):
             out = _put_text(args.get("text", ""), args.get("paste", True))
             _log(f"put_text (paste={args.get('paste', True)}): {out}")
             config.activity(f"📋  {out}")
+        elif name == "end_conversation":
+            _log("end_conversation: goodbye staged — closing after the reply")
+            config.activity("👋  conversation ended by voice")
+            asyncio.ensure_future(self._end_after_goodbye())
+            out = ("Understood. Say ONE short goodbye sentence now — the session closes "
+                   "by itself right after you finish speaking. Do not call more tools.")
         elif name == "set_prompt":
             text = (args.get("text") or "").strip()
             try:

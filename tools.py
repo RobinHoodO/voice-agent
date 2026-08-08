@@ -267,6 +267,12 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "end_conversation",
+        "description": "End the live session yourself when Robin clearly signals the conversation is over — 'thank you, that was all', 'that's it', 'we're done here', 'takk, det var alt'. Say one short goodbye and call this; the session closes right after your goodbye finishes playing. Only on a clear sign-off — a plain 'thanks' mid-task is not one.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
         "name": "kernel_status",
         "description": "Check what needs Robin's attention right now: pending approvals awaiting his decision, attention items surfaced by the OS, and recent agent runs. Use this for questions like what needs my attention, what's pending, or what has the OS been doing.",
         "parameters": {"type": "object", "properties": {}, "required": []},
