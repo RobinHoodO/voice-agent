@@ -1,7 +1,9 @@
 """Spoken sign-off ends the session: "thank you, that was all" → goodbye → close.
 
-The close must wait for the goodbye audio to finish, and must ABORT if Robin keeps
-talking — "thanks, that was all… oh wait" may never hang up on him.
+The close waits for the goodbye audio to finish, then hangs up UNCONDITIONALLY —
+Robin asked for a hard hang-up. There is deliberately no abort-on-speech: the local
+VAD re-fires on mic blips, which made an abort trigger ~1s after every staging on
+2026-08-08 (the close never happened). Changed his mind = double-tap for a fresh one.
 """
 import asyncio
 import queue
@@ -50,17 +52,18 @@ def test_closes_after_the_goodbye_drains():
     assert host.stopped and host.auto_stopped
 
 
-def test_speaking_again_aborts_the_close():
+def test_mic_blips_do_not_abort_the_close():
+    """The 2026-08-08 regression: VAD speech-start fired ~1s after staging and the
+    session never closed. A sign-off must hang up even if the mic hears something."""
     host = _Host()
 
     async def run():
         host._loop = asyncio.get_running_loop()
-        # A new spoken turn lands right after the tool call:
-        host._last_speech = host._loop.time() + 100
+        host._last_speech = host._loop.time() + 100   # VAD blip right after the tool call
         await host._end_after_goodbye()
 
     asyncio.run(run())
-    assert not host.stopped and not host.auto_stopped
+    assert host.stopped and host.auto_stopped
 
 
 def test_undrained_audio_defers_until_played_out():

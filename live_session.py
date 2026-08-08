@@ -820,17 +820,15 @@ class LiveSession(AudioMixin):
                     _log(f"task spoken callback failed: {e!r}")
 
     async def _end_after_goodbye(self) -> None:
-        """Close the session once the farewell finishes playing. Robin speaking again
-        before the close aborts it — 'thanks, that was all… oh wait' must keep the
-        session alive. Capped so a stalled goodbye can't hold the mic open."""
-        t0 = self._loop.time()
-        deadline = t0 + 15.0
+        """Close the session once the farewell finishes playing — a sign-off is a hard
+        hang-up (Robin's explicit ask; double-tap starts fresh if he changes his mind).
+        No abort-on-speech: the local VAD re-fires on any mic blip, which made an abort
+        trigger ~1s after every staging on 2026-08-08. Capped so a stalled goodbye
+        can't hold the mic open."""
+        deadline = self._loop.time() + 15.0
         quiet_since = None
         while self._running and self._loop.time() < deadline:
             await asyncio.sleep(0.3)
-            if self._last_speech > t0:                # a new spoken turn — he's not done
-                _log("end_conversation aborted: user spoke again")
-                return
             if self._awaiting_reply_since is not None:
                 continue                              # goodbye audio hasn't started yet
             if self._out_q.empty():
