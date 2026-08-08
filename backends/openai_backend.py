@@ -30,6 +30,33 @@ def _transcription_cfg() -> dict:
     return cfg
 
 
+def _turn_detection_cfg() -> dict:
+    """When the API decides Robin has finished talking.
+
+    Default is semantic_vad: a model judges whether the utterance is actually
+    COMPLETE, instead of assuming any gap means "done". A pure silence timer
+    can't tell thinking-mid-sentence from finished, so it fires on every pause —
+    which is what made the agent act while he was still speaking.
+
+    `eagerness: low` = wait the longest before responding. Fall back to the old
+    server_vad timer with `live.turn_detection.mode = "server"`; both branches keep
+    create_response:false so the app can inject cursor context and trigger the
+    response itself.
+    """
+    td = config.get("live.turn_detection") or {}
+    if (td.get("mode") or "semantic") == "server":
+        # ponytail: silence timer, tunable. semantic mode is the better default —
+        # this branch exists so a bad mic day can be fixed without a code change.
+        return {"type": "server_vad",
+                "threshold": td.get("threshold", 0.6),
+                "prefix_padding_ms": td.get("prefix_padding_ms", 300),
+                "silence_duration_ms": td.get("silence_ms", 1500),
+                "create_response": False}
+    return {"type": "semantic_vad",
+            "eagerness": td.get("eagerness", "low"),
+            "create_response": False}
+
+
 class OpenAIBackend(Backend):
 
     def __init__(self):
@@ -57,13 +84,7 @@ class OpenAIBackend(Backend):
                 "audio": {
                     "input": {
                         "format": {"type": "audio/pcm", "rate": SR},
-                        # create_response:false so we can inject fresh cursor context
-                        # AFTER the user stops talking, then trigger the response ourselves.
-                        # threshold raised (default 0.5) so a sensitive/bone-conduction mic
-                        # doesn't false-trigger barge-in and cancel replies mid-sentence.
-                        "turn_detection": {"type": "server_vad", "threshold": 0.6,
-                                           "prefix_padding_ms": 300, "silence_duration_ms": 700,
-                                           "create_response": False},
+                        "turn_detection": _turn_detection_cfg(),
                         # whisper's `language` forces ONE language, so only pin it when
                         # exactly one is configured — with several (en + nb) letting it
                         # auto-detect beats transcribing Norwegian as English phonetics.
