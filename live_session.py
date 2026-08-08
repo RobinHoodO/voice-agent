@@ -152,6 +152,23 @@ def _tool_target_count(recent: list, name: str, args: dict, now: float) -> int:
     return n
 
 
+def _idle_reason(now: float, last_speech: float, session_start: float,
+                 idle_s: float, max_s: float, unanswered_s: float,
+                 was_announce: bool, user_replied: bool) -> str | None:
+    """Pure decision for the idle watchdog: why to close, or None to stay open.
+    The unanswered guard uses transcribed replies, never VAD — the same lesson as
+    end_conversation's dropped abort (mic blips are not the human)."""
+    if unanswered_s > 0 and was_announce and not user_replied \
+            and (now - session_start) > unanswered_s:
+        return (f"woke unprompted, no reply in {int(now - session_start)}s "
+                f"(>{int(unanswered_s)}s)")
+    if idle_s > 0 and (now - last_speech) > idle_s:
+        return f"{int(now - last_speech)}s idle (>{int(idle_s)}s)"
+    if max_s > 0 and (now - session_start) > max_s:
+        return f"{int(now - session_start)}s live (>{int(max_s)}s cap)"
+    return None
+
+
 def _pending_confirmation_outcome(pending: dict, transcript: str, now: float | None = None) -> str:
     """Return the deterministic disposition for a staged kernel decision."""
     now = time.time() if now is None else now
@@ -173,6 +190,7 @@ class LiveSession(AudioMixin):
                  announce_tid=None):
         self.on_state = on_state or (lambda s: None)
         self._announce = announce          # if set, speak this aloud right after opening
+        self._was_announce = bool(announce)  # she woke up on her own — stricter no-reply cutoff
         self._on_auto_stop = on_auto_stop  # called when the idle/max watchdog ends the session
         self._on_task_spoken = on_task_spoken
         self._announce_tid = announce_tid
@@ -270,24 +288,28 @@ class LiveSession(AudioMixin):
 
     async def _idle_watchdog(self) -> None:
         """Auto-end the session so a forgotten-on mic doesn't keep responding to ambient
-        speech (e.g. you talking to another app). Two guards, either 0 = off:
+        speech (e.g. you talking to another app). Three guards, each 0 = off:
+          auto_stop_unanswered_s — a session SHE opened (auto-wake announce) closes after
+              this long with no transcribed human reply. Default 45s. Judged on real
+              "you:" turns, not VAD — mic blips must not count as a reply.
           auto_stop_idle_s — stop after this much silence (no speech turn). Default 90s.
           auto_stop_max_s  — hard cap on total live time. Default 300s.
         The idle guard handles walk-aways; the max cap handles 'kept talking nearby so idle
         never fired' — the exact case that triggered this. Adjust/disable in config.json."""
         live = self._cfg.get("live") or {}
+        unanswered_s = float(live.get("auto_stop_unanswered_s", 45) or 0)
         idle_s = float(live.get("auto_stop_idle_s", 90) or 0)
         max_s = float(live.get("auto_stop_max_s", 300) or 0)
-        if idle_s <= 0 and max_s <= 0:
+        if unanswered_s <= 0 and idle_s <= 0 and max_s <= 0:
             return
         reason = None
         while self._running and reason is None:
             await asyncio.sleep(5)
             now = self._loop.time()
-            if idle_s > 0 and (now - self._last_speech) > idle_s:
-                reason = f"{int(now - self._last_speech)}s idle (>{int(idle_s)}s)"
-            elif max_s > 0 and (now - self._session_start) > max_s:
-                reason = f"{int(now - self._session_start)}s live (>{int(max_s)}s cap)"
+            reason = _idle_reason(now, self._last_speech, self._session_start,
+                                  idle_s, max_s, unanswered_s,
+                                  self._was_announce,
+                                  any(t.startswith("you:") for t in self._turns))
         if reason is None:
             return
         _log(f"auto-stop: {reason} — ending live session")

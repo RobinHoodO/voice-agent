@@ -23,6 +23,32 @@ def test_tool_registered_with_no_required_args():
     assert "not one" in d, "a mid-task 'thanks' must be called out as NOT a sign-off"
 
 
+def test_unanswered_wake_closes_at_45s():
+    """She woke Robin and he never replied — close at 45s, not the 90s idle default."""
+    from live_session import _idle_reason
+    args = dict(last_speech=0.0, session_start=0.0, idle_s=90, max_s=300,
+                unanswered_s=45, was_announce=True, user_replied=False)
+    assert _idle_reason(now=40.0, **args) is None
+    reason = _idle_reason(now=50.0, **args)
+    assert reason and "no reply" in reason
+
+
+def test_a_real_reply_restores_the_normal_thresholds():
+    from live_session import _idle_reason
+    args = dict(last_speech=48.0, session_start=0.0, idle_s=90, max_s=300,
+                unanswered_s=45, was_announce=True, user_replied=True)
+    assert _idle_reason(now=50.0, **args) is None          # replied — 45s guard off
+    assert "idle" in _idle_reason(now=140.0, **args)       # normal 90s idle still works
+
+
+def test_user_initiated_sessions_are_untouched():
+    """Double-tap sessions never had an announce — the 45s guard must not apply."""
+    from live_session import _idle_reason
+    assert _idle_reason(now=60.0, last_speech=55.0, session_start=0.0,
+                        idle_s=90, max_s=300, unanswered_s=45,
+                        was_announce=False, user_replied=False) is None
+
+
 class _Host:
     """Just the attributes _end_after_goodbye touches — no AppKit, no websocket."""
 
