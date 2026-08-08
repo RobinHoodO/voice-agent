@@ -952,7 +952,7 @@ class LiveSession(AudioMixin):
             config.activity(f"⏸  {name.replace('_', ' ')} awaiting confirmation")
         elif name in ("notion_create_task", "notion_search", "notion_list_tasks",
                       "notion_update_task", "front_search", "front_draft",
-                      "gmail_search", "calendar_add", "drive_search"):
+                      "gmail_search", "calendar_add", "calendar_list", "drive_search"):
             handler = getattr(services, name)
             out = await self._loop.run_in_executor(None, handler, args)
             _log(f"{name}: {out[:120]}")

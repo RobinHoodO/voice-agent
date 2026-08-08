@@ -289,6 +289,20 @@ def calendar_add(args: dict) -> str:
     return f"On the calendar: {title}, {date} at {start}."
 
 
+def calendar_list(args: dict) -> str:
+    """Read-only agenda — the answer to 'what's on my calendar'. Defaults to today."""
+    cmd = [os.path.join(GOOGLE_SCRIPTS, "calendar_list.py")]
+    days = args.get("days")
+    if days:
+        cmd += ["--days", str(int(days))]
+    if (args.get("from") or "").strip():
+        cmd += ["--from", str(args["from"]).strip()]
+    if (args.get("to") or "").strip():
+        cmd += ["--to", str(args["to"]).strip()]
+    out = _script(cmd)
+    return _clip(out) if out else "I couldn't read the calendar."
+
+
 def drive_search(args: dict) -> str:
     query = (args.get("query") or "").strip()
     if not query:

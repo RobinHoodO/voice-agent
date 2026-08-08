@@ -75,6 +75,14 @@ def test_os_delegate_writes_the_sidecar(monkeypatch, tmp_path):
     assert (tmp_path / f"{tid}.prompt").exists(), "prompt file claims the tid for de-collision"
 
 
+def test_status_helper_does_not_shadow_the_spoken_tool():
+    """kernel_status is a voice TOOL returning a sentence; the raw /status payload
+    lives in kernel_status_raw. A later def silently shadowing the tool is exactly
+    the bug this pins (it happened during the 2026-08-08 build)."""
+    assert kernel_tools.kernel_status.__annotations__.get("return") is str
+    assert kernel_tools.kernel_status_raw.__annotations__.get("return") is dict
+
+
 def test_os_delegate_without_runid_falls_back_to_one_way(monkeypatch, tmp_path):
     import config
     monkeypatch.setattr(config, "TASKS_DIR", str(tmp_path))

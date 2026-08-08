@@ -233,15 +233,16 @@ def os_delegate(args: dict) -> str:
     return f"Handed to the OS worker as run {run_id} — I'll speak the result when it lands."
 
 
-def kernel_status(timeout: float = 6) -> dict:
+def kernel_status_raw(timeout: float = 6) -> dict:
     """Full GET /status payload — approvals, attention, runs (raises KernelUnavailable).
-    One call feeds both the os_delegate loop and the urgent-wake check."""
+    One call feeds both the os_delegate loop and the urgent-wake check. NOT the
+    kernel_status voice tool above, which returns a spoken sentence."""
     return _kernel_call("GET", "/status", timeout=timeout)
 
 
 def kernel_runs(timeout: float = 6) -> list:
     """The kernel's recent-runs window from GET /status (raises KernelUnavailable)."""
-    return kernel_status(timeout=timeout).get("runs", []) or []
+    return kernel_status_raw(timeout=timeout).get("runs", []) or []
 
 
 # Urgent = priority ≤ 1 attention items: approvals and escalations, per the kernel's

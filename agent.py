@@ -441,7 +441,7 @@ class VoiceAgent(rumps.App):
         try:
             import kernel_tools
             try:
-                status = kernel_tools.kernel_status()
+                status = kernel_tools.kernel_status_raw()
             except Exception:
                 return                      # tunnel down — retry on a later tick
             runs = status.get("runs", []) or []
