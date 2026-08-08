@@ -233,10 +233,53 @@ def os_delegate(args: dict) -> str:
     return f"Handed to the OS worker as run {run_id} — I'll speak the result when it lands."
 
 
+def kernel_status(timeout: float = 6) -> dict:
+    """Full GET /status payload — approvals, attention, runs (raises KernelUnavailable).
+    One call feeds both the os_delegate loop and the urgent-wake check."""
+    return _kernel_call("GET", "/status", timeout=timeout)
+
+
 def kernel_runs(timeout: float = 6) -> list:
     """The kernel's recent-runs window from GET /status (raises KernelUnavailable)."""
-    data = _kernel_call("GET", "/status", timeout=timeout)
-    return data.get("runs", []) or []
+    return kernel_status(timeout=timeout).get("runs", []) or []
+
+
+# Urgent = priority ≤ 1 attention items: approvals and escalations, per the kernel's
+# own triage. run-failures (priority 2) stay in Telegram/CC — Robin explicitly chose
+# "urgent only" over "urgent + fleet failures" (2026-08-08), extending the 2026-07-17
+# decision that routine noise never reaches a synchronous channel.
+URGENT_PRIORITY_MAX = 1
+
+
+def kernel_urgent(data: dict) -> list:
+    """Pure filter: [(key, spoken_text)] for attention items worth an unprompted wake."""
+    items = []
+    for att in data.get("attention", []) or []:
+        try:
+            priority = int(att.get("priority", 99))
+        except (TypeError, ValueError):
+            continue
+        if priority > URGENT_PRIORITY_MAX:
+            continue
+        key = att.get("key")
+        if not key:
+            continue
+        text = _short(att.get("title") or "an untitled attention item", 160)
+        detail = _short(att.get("detail") or "", 160)
+        items.append((f"attention:{key}", text + (f" — {detail}" if detail else "")))
+    return items
+
+
+def urgent_wake_text(items: list) -> str:
+    """The announcement for _wake_and_speak. No tag line — this is not a task result,
+    and it must end in a question so the session hands the floor to Robin."""
+    lines = "; ".join(text for _key, text in items[:3])
+    more = f" (and {len(items) - 3} more)" if len(items) > 3 else ""
+    n = len(items)
+    return (f"[URGENT from the kernel — {n} item{'s' if n != 1 else ''} need"
+            f"{'' if n != 1 else 's'} Robin: {lines}{more}. Tell him briefly, then ask "
+            "what he wants to do. Approving or rejecting still goes through the normal "
+            "spoken confirmation.]")
 
 
 # How long a sidecar may wait before "runId missing from the status window" means

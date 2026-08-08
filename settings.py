@@ -216,6 +216,7 @@ def _state() -> dict:
         "agentic_shell": bool(config.get("live.agentic_shell", False)),
         "show_task_terminals": bool(config.get("live.show_task_terminals", False)),
         "delegate": config.get("live.delegate", "pi"),
+        "proactive_wake": bool(config.get("live.proactive_wake", False)),
         "quiet_enabled": bool(config.get("live.quiet_hours.enabled", True)),
         "quiet_start": config.get("live.quiet_hours.start", "00:00"),
         "quiet_end": config.get("live.quiet_hours.end", "07:00"),

@@ -181,6 +181,8 @@ class VoiceAgent(rumps.App):
         # window and converted into the same .out/.done sentinels herdr tasks use,
         # so _check_tasks above speaks them with zero extra plumbing.
         self._kernel_poll_inflight = False
+        self._urgent_snapshot = None      # written by the poll thread, read on _tick
+        self._woken_keys = None           # None = unseeded; first poll seeds silently
         rumps.Timer(self._check_kernel, 15.0).start()
         rumps.Timer(self._pump_pill_level, 0.05).start()   # feed mic level into the wave
         self.hotkey_listener = keyboard.Listener(
@@ -386,14 +388,16 @@ class VoiceAgent(rumps.App):
             LOG(f"task check failed: {e!r}")
 
     def _check_kernel(self, _):
-        """Main-thread tick (15s): if any OS delegation sidecars exist, poll the kernel
-        for their runs on a daemon thread — mirroring _probe_kernel_tunnel so AppKit
-        never blocks on HTTP. Costs one listdir when nothing is delegated."""
+        """Main-thread tick (15s): poll the kernel on a daemon thread when there is a
+        reason to — OS delegation sidecars in flight, or proactive wake enabled —
+        mirroring _probe_kernel_tunnel so AppKit never blocks on HTTP. Costs one
+        listdir when nothing is delegated and the toggle is off."""
         try:
+            self._apply_urgent_snapshot()
             if self._kernel_poll_inflight:
                 return
             sidecars = [f for f in os.listdir(config.TASKS_DIR) if f.endswith(".osrun")]
-            if not sidecars:
+            if not sidecars and not config.get("live.proactive_wake", False):
                 return
             self._kernel_poll_inflight = True
             threading.Thread(target=self._poll_kernel_runs, args=(sidecars,),
@@ -403,16 +407,45 @@ class VoiceAgent(rumps.App):
         except Exception as e:
             LOG(f"kernel check failed: {e!r}")
 
+    def _apply_urgent_snapshot(self):
+        """Main-thread only. The poll thread leaves the latest urgent items in
+        _urgent_snapshot; this applies the deterministic gates and wakes at most once
+        per item. The first snapshot after launch only seeds — a restart never replays
+        what was already pending."""
+        snapshot, self._urgent_snapshot = getattr(self, "_urgent_snapshot", None), None
+        if snapshot is None:
+            return
+        if self._woken_keys is None:
+            self._woken_keys = {key for key, _ in snapshot}
+            return
+        if not config.get("live.proactive_wake", False):
+            return
+        new = [(k, t) for k, t in snapshot if k not in self._woken_keys]
+        if not new:
+            return
+        # Idle-only: never barge into a live conversation. Not marked as woken, so the
+        # item retries on a later tick — once quiet hours end or the session closes.
+        if self.live_on or _in_quiet_hours():
+            return
+        import kernel_tools
+        LOG(f"urgent wake: {len(new)} new kernel item(s)")
+        config.activity(f"🔔  urgent from the kernel — waking ({len(new)} item(s))")
+        if self._wake_and_speak(kernel_tools.urgent_wake_text(new)):
+            self._woken_keys.update(k for k, _ in new)
+
     def _poll_kernel_runs(self, sidecars):
         """Background thread: convert finished OS runs into .out + .done sentinels.
         Only file I/O and HTTP here — _check_tasks announces on its own main-thread
-        tick, so this thread never touches AppKit."""
+        tick, so this thread never touches AppKit. Also snapshots urgent attention
+        items for _apply_urgent_snapshot (main thread) to act on."""
         try:
             import kernel_tools
             try:
-                runs = kernel_tools.kernel_runs()
+                status = kernel_tools.kernel_status()
             except Exception:
                 return                      # tunnel down — retry on a later tick
+            runs = status.get("runs", []) or []
+            self._urgent_snapshot = kernel_tools.kernel_urgent(status)
             for name in sidecars:
                 path = os.path.join(config.TASKS_DIR, name)
                 tid = name[:-6]

@@ -214,6 +214,11 @@
         <div class="desc">When the agent hands a slow job to a background agent, open a Terminal window tailing its live output so you can follow along.</div>
       </div><span class="sw" id="t_tasks_term" onclick="toggle('live.show_task_terminals',this)"></span></div>
 
+      <div class="row"><div class="ic">🚨</div><div class="body">
+        <div class="lbl">Urgent wake <span class="desc">· she may speak up unprompted</span></div>
+        <div class="desc">When the kernel files something genuinely urgent (an approval or an escalation — never routine noise or fleet failures), she wakes and tells you, once per item, only while no conversation is running, and never inside quiet hours. Off = urgent items wait in Telegram and Command Center as before.</div>
+      </div><span class="sw" id="t_proactive" onclick="toggle('live.proactive_wake',this)"></span></div>
+
       <div class="row"><div class="ic">🌙</div><div class="body">
         <div class="lbl">Quiet hours <span class="desc">· hold auto-wake announcements</span></div>
         <div class="desc">If a background task finishes inside this window she stays silent and speaks the result the moment quiet hours end — so an overnight job doesn't wake you, and doesn't get lost either. Conversations you start yourself are never affected. Takes effect immediately.</div>
@@ -479,6 +484,7 @@
     setSwitch('t_shot', s.window_screenshot);
     setSwitch('t_shell', s.agentic_shell);
     setSwitch('t_tasks_term', s.show_task_terminals);
+    setSwitch('t_proactive', s.proactive_wake);
     setSwitch('t_quiet', s.quiet_enabled);
     setSwitch('t_quiet_wd', s.quiet_weekdays);
     document.getElementById('quiet_start').value = s.quiet_start || '00:00';
