@@ -19,6 +19,19 @@ if [ -f "$LOG" ] && [ "${FORCE:-0}" != "1" ]; then
   fi
 fi
 
+# Drift gate: a tool that drifts out of the kernel manifest silently loses its
+# high-stakes confirm gate, so a deploy must not ship one. exit 1 = real drift
+# (block); exit 3 = tunnel down (can't check — warn and continue); exit 2 = the
+# checker itself is misconfigured (block: that's how drift goes blind).
+drift_code=0
+.venv/bin/python check_tool_drift.py || drift_code=$?
+if [ "$drift_code" = "3" ]; then
+  echo "WARN: kernel tunnel down — deploying without the drift check." >&2
+elif [ "$drift_code" != "0" ]; then
+  echo "REFUSED: tool drift (or a broken checker) — fix it before deploying." >&2
+  exit 1
+fi
+
 # Never hot-patch .pyc into the bundle by hand: it runs Python 3.12 and a .pyc built
 # by any other interpreter fails at import with "bad magic number" — but the zip still
 # looks valid, so the usual checks pass. build_app.sh pins 3.12; always go through it.
