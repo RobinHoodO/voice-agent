@@ -61,6 +61,15 @@ PENDING_ACTION_TTL_SECONDS = 120
 # identical calls can be legitimate (a retry); the third in a short window is a loop.
 TOOL_REPEAT_WINDOW_S = 45.0
 TOOL_REPEAT_LIMIT = 3
+# Writes to the SAME record with different values. 3 allows an honest change of mind
+# ("Backlog — actually, Next Up") and catches the guessing spiral on the third.
+TOOL_TARGET_LIMIT = 3
+# A guard refusal triggers a response so the model can speak — but on 2026-08-08 the
+# model answered every refusal by re-issuing the same batch of writes: 40 refusals in
+# 12s, each one re-triggering the next, until Robin double-tapped the session dead.
+# The refusal path was the loop's fuel. So: the FIRST refusal gets a spoken response;
+# further refusals inside the cooldown send the result silently and let the turn die.
+GUARD_RETRIGGER_COOLDOWN_S = 20.0
 AFFIRM_RE = re.compile(r"\b(yes|yeah|yep|confirm|confirmed|approve|approved|go ahead|do it|send it|proceed|ja|kjør)\b", re.IGNORECASE)
 DENY_RE = re.compile(r"\b(no|nope|cancel|reject|rejected|stop|abort|don't|nei)\b", re.IGNORECASE)
 
@@ -103,6 +112,31 @@ def _tool_repeat_count(recent: list, name: str, args: dict, now: float) -> int:
     `recent` is a list of (timestamp, key) mutated in place — expired entries dropped."""
     key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
     recent[:] = [(t, k) for (t, k) in recent if now - t < TOOL_REPEAT_WINDOW_S]
+    n = sum(1 for (_t, k) in recent if k == key)
+    recent.append((now, key))
+    return n
+
+
+# Tools whose identity is a single field. Rewriting the SAME target with DIFFERENT
+# values is its own failure mode — and the exact-args guard above is blind to it,
+# since every call looks unique. Real case (2026-08-08): one Notion task was set to
+# Done → Backlog → Focus → Done → Next Up in 42s while Robin was still mid-sentence,
+# and the guard never fired because no two calls matched.
+_TOOL_TARGET_FIELD = {"notion_update_task": "title"}
+
+
+def _tool_target_count(recent: list, name: str, args: dict, now: float) -> int:
+    """How many times this tool has already written to this same target in the window,
+    regardless of the values written. Owns its own list (never cleared on a turn
+    boundary) so it must expire entries itself."""
+    field = _TOOL_TARGET_FIELD.get(name)
+    if not field:
+        return 0
+    target = str(args.get(field) or "").strip().lower()
+    if not target:
+        return 0
+    recent[:] = [(t, k) for (t, k) in recent if now - t < TOOL_REPEAT_WINDOW_S]
+    key = f"target:{name}:{target}"
     n = sum(1 for (_t, k) in recent if k == key)
     recent.append((now, key))
     return n
@@ -158,6 +192,13 @@ class LiveSession(AudioMixin):
         self._turns: list = []                        # ["you: …", "agent: …"] for this conversation
         self._delegated_upto: int = 0                 # cursor into _turns: what's already been handed off
         self._recent_tools: list = []                 # [(ts, "tool:args")] — loop guard window
+        # Thrash history is DELIBERATELY separate: _recent_tools is cleared on every new
+        # spoken turn, which is right for "re-run that search" but catastrophic for writes.
+        # On 2026-08-08 the agent wrote the same 3 Notion rows ~40 times in 45s and neither
+        # guard fired once — Robin was talking (protesting), every speech onset cleared the
+        # window, so the more he objected the longer it ran. Writes expire by time only.
+        self._recent_targets: list = []               # [(ts, "target:tool:id")] — survives turns
+        self._guard_refused_at: float = 0.0           # monotonic ts of last guard refusal (breaker)
         self._awaiting_reply_since: float | None = None  # loop.time() a turn went silent
         self._resume_handle: str | None = None        # provider handle, survives a reconnect
         self._reconnected = False                     # next session must say it dropped out
@@ -620,7 +661,10 @@ class LiveSession(AudioMixin):
 
     async def _on_speech_started(self) -> None:
         self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
-        # A new spoken turn is new intent: re-running the same tool is legitimate again.
+        # A new spoken turn is new intent: re-running the same READ is legitimate again.
+        # _recent_targets is NOT cleared — a repeated write to one record is a defect
+        # whether or not Robin spoke in between, and speaking is exactly what he does
+        # while trying to stop one.
         self._recent_tools.clear()
         self._awaiting_reply_since = None
         self._flush_out()                       # barge-in: stop talking
@@ -765,6 +809,21 @@ class LiveSession(AudioMixin):
                 except Exception as e:
                     _log(f"task spoken callback failed: {e!r}")
 
+    async def _refuse_guarded_call(self, call_id: str, message: str) -> None:
+        """Send a guard refusal. The first refusal triggers a response so the model can
+        speak; refusals within GUARD_RETRIGGER_COOLDOWN_S after that send the tool result
+        WITHOUT a retrigger — a model that answers refusals with more refused calls would
+        otherwise loop on the refusal path itself (2026-08-08: 40 refusals in 12s)."""
+        now = self._loop.time()
+        retrigger = now - self._guard_refused_at > GUARD_RETRIGGER_COOLDOWN_S
+        self._guard_refused_at = now
+        await self._backend.send_tool_result(call_id, message)
+        if retrigger:
+            await self._backend.trigger_response()
+            self._awaiting_reply_since = now
+        else:
+            _log("guard breaker: refusal storm — tool result sent without retrigger")
+
     async def _do_tool(self, ev: dict) -> None:
         self.on_state("acting")          # running a tool/command — distinct from thinking
         call_id = ev.get("call_id")
@@ -780,14 +839,30 @@ class LiveSession(AudioMixin):
             _log(f"loop guard: refused {name} — {repeats} identical calls in "
                  f"{int(TOOL_REPEAT_WINDOW_S)}s")
             config.activity(f"⛔  loop guard: {name.replace('_', ' ')} repeated {repeats}x — refused")
-            await self._backend.send_tool_result(
+            await self._refuse_guarded_call(
                 call_id,
                 f"LOOP GUARD: you have already called {name} with these exact arguments "
                 f"{repeats} times and it did not get you anywhere. It was NOT run again. "
                 "Do not call it again. Answer out loud with what you already have, or ask "
                 "Robin a specific question about what you're missing.")
-            await self._backend.trigger_response()
-            self._awaiting_reply_since = self._loop.time()
+            return
+        # Same target, different values — thrashing one record because the request was
+        # misheard, incomplete, or impossible with this tool. Stop and make it speak.
+        thrash = _tool_target_count(self._recent_targets, name, args, time.time())
+        if thrash >= TOOL_TARGET_LIMIT:
+            target = args.get(_TOOL_TARGET_FIELD.get(name, ""), "")
+            _log(f"thrash guard: refused {name} — {thrash} writes to {target!r} in "
+                 f"{int(TOOL_REPEAT_WINDOW_S)}s")
+            config.activity(f"⛔  thrash guard: {name.replace('_', ' ')} rewrote the same item "
+                            f"{thrash}x — refused")
+            await self._refuse_guarded_call(
+                call_id,
+                f"THRASH GUARD: you have already changed '{target}' {thrash} times in the last "
+                f"{int(TOOL_REPEAT_WINDOW_S)} seconds, each time to a different value. That means "
+                "you are guessing at what Robin wants, or he is still deciding. It was NOT run "
+                "again. Stop, say out loud what you have already set it to, and ask him what he "
+                "actually wants — including whether what he asked for is something this tool can "
+                "even do.")
             return
         # Attach Robin's verbatim words BEFORE the elif chain: os_delegate is in the
         # fail-closed high-stakes set, so a branch further down would be unreachable

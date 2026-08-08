@@ -163,6 +163,34 @@ def _mem_stats() -> dict:
                 "mem_recent_learnings": []}
 
 
+def _tools() -> list:
+    """Every tool the live agent can call, with the gating that applies right now, for
+    the Tools panel. Mirrors live_session's own filter (agentic_shell gates run_shell +
+    delegate) and its confirm gate (the kernel's declared high-stakes list, failing
+    closed on every kernel tool when the manifest is unreadable — same as _configure).
+    ponytail: 1s manifest timeout, not the session's 3s — this runs on the UI thread."""
+    try:
+        import kernel_tools
+        import tools as tools_mod
+        shell_on = bool(config.get("live.agentic_shell", False))
+        declared = kernel_tools.kernel_high_stakes(timeout=1)
+        high = set(kernel_tools.KERNEL_TOOL_NAMES if declared is None else declared)
+        high |= set(tools_mod.LOCAL_HIGH_STAKES)
+        out = []
+        for t in tools_mod.TOOLS:
+            name = t.get("name", "")
+            props = (t.get("parameters") or {}).get("properties") or {}
+            out.append({"name": name,
+                        "description": t.get("description", ""),
+                        "args": sorted(props),
+                        "off": not shell_on and name in ("run_shell", "delegate"),
+                        "confirm": name in high})
+        return sorted(out, key=lambda t: t["name"])
+    except Exception as e:
+        _log(f"tool list failed: {e!r}")
+        return []
+
+
 def _state() -> dict:
     ins, outs = _devices()
     return {
@@ -188,6 +216,11 @@ def _state() -> dict:
         "agentic_shell": bool(config.get("live.agentic_shell", False)),
         "show_task_terminals": bool(config.get("live.show_task_terminals", False)),
         "delegate": config.get("live.delegate", "pi"),
+        "quiet_enabled": bool(config.get("live.quiet_hours.enabled", True)),
+        "quiet_start": config.get("live.quiet_hours.start", "00:00"),
+        "quiet_end": config.get("live.quiet_hours.end", "07:00"),
+        "quiet_weekdays": bool(config.get("live.quiet_hours.weekdays_only", True)),
+        "tools": _tools(),
         "activity_window": bool(config.get("ui.show_terminal", False)),
         "open_at_login": bool(config.get("system.open_at_login", False)),
         "live_on": bool(getattr(_agent, "live_on", False)),
@@ -214,14 +247,33 @@ def _push_toast(msg: str):
 
 
 # --- RPC dispatch -----------------------------------------------------------
+def _hhmm(value):
+    """Normalize a bridge-supplied clock time to 'HH:MM', or None if it isn't one."""
+    try:
+        h, m = str(value).split(":")[:2]
+        h, m = int(h), int(m)
+    except Exception:
+        return None
+    return f"{h:02d}:{m:02d}" if 0 <= h <= 23 and 0 <= m <= 59 else None
+
+
+
 def _handle(fn, arg):
     if fn == "ready":
         _push_state(); return None
     if fn == "set":
         key, value = arg.get("key"), arg.get("value")
+        if key in ("live.quiet_hours.start", "live.quiet_hours.end"):
+            # <input type=time> can post "" when cleared — never write a value
+            # _in_quiet_hours can't parse, or the window silently falls back.
+            value = _hhmm(value)
+            if value is None:
+                _push_toast("Enter a time as HH:MM"); return None
         config.set_(key, value)
         if key == "system.open_at_login":
             _set_login_item(bool(value))
+        if key == "live.agentic_shell":
+            _push_state()          # the Tools panel's off/on badges depend on it
         return None
     if fn == "setKey":
         ok = config.set_secret("openai", str(arg).strip())

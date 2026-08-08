@@ -29,6 +29,15 @@ def _log(msg: str) -> None:
 # dangerous" is how a gate silently goes missing.
 LOCAL_HIGH_STAKES = frozenset({"gmail_send"})
 
+# The Notion Tasks DB's real Status options. Defined ONCE: on 2026-08-08 a tool
+# advertised these as prose examples ("e.g. Focus, Backlog, Done") that happened to
+# omit "Archived", so "archive that one" was written as Done — the opposite meaning.
+# Any tool touching Status must expose this list as an enum, never as examples.
+# tests/test_status_enums.py fails if a new one forgets.
+NOTION_TASK_STATUSES = ["Inbox", "Ideas / Upgrades", "Backlog", "Hold for Now", "Next Up",
+                        "Waiting", "Encountered Challenge", "Qs / Decision / Chat",
+                        "In Progress", "Focus", "Done", "Archived"]
+
 
 # Realtime tool schema is flat (name/parameters at top level), unlike the
 # chat-completions nested {"function": {...}} shape in agent.py.
@@ -70,7 +79,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "delegate",
-        "description": "Hand a NEW, unrelated coding/research task to a background AI agent in its own named herdr lane. Returns immediately and survives the conversation; when it finishes the voice agent automatically comes back and speaks the result. Don't wait or poll. ALWAYS pass a task_name naming the lane by its PURPOSE — it becomes the pane name Robin says out loud to find that work again later. If Robin is asking to continue, keep going, or implement a fix from work already done in a pane, use continue_task instead — delegate always opens a different pane.",
+        "description": "Hand a NEW, unrelated coding/research task to a background AI agent in its own named herdr lane. Returns immediately and survives the conversation; when it finishes the voice agent automatically comes back and speaks the result. Don't wait or poll. ALWAYS pass a task_name naming the lane by its PURPOSE — it becomes the pane name Robin says out loud to find that work again later. If Robin is asking to continue, keep going, or implement a fix from work already done in a pane, use continue_task instead — delegate always opens a different pane. THIS IS ALSO THE ESCALATION PATH: whenever Robin asks for something your own tools can't do — a Notion change beyond status/due, moving a page between databases, editing page content, anything touching a system you have no direct tool for — do not apologise and stop, and never substitute a lesser action you CAN do. Say in one sentence what you're handing over, then delegate it with his words verbatim. A lane has a full shell, the workspace, and every API key; assume it can do what you cannot.",
         "parameters": {"type": "object",
                        "properties": {"instruction": {"type": "string",
                                                        "description": "Robin's request in his own words, as close to verbatim as you can reconstruct it — do not summarize, compress, or reinterpret."},
@@ -126,7 +135,8 @@ TOOLS = [
                        "properties": {"title": {"type": "string"},
                                       "due": {"type": "string", "description": "YYYY-MM-DD; omit to default near-term"},
                                       "notes": {"type": "string"},
-                                      "status": {"type": "string", "description": "Defaults to 'Next Up'"}},
+                                      "status": {"type": "string", "enum": NOTION_TASK_STATUSES,
+                                                 "description": "Defaults to 'Next Up'. 'Archived' means dropped, 'Done' means completed."}},
                        "required": ["title"]},
     },
     {
@@ -143,20 +153,37 @@ TOOLS = [
         "description": "Read tasks from Robin's Notion Tasks database — filter by status (e.g. Focus, Backlog, Next Up, In Progress, Done) and/or a title keyword. Defaults to everything not Done. Use to answer what's on my list, what's in Focus, or what's overdue-sounding.",
         "parameters": {"type": "object",
                        "properties": {
-                           "status": {"type": "string",
-                                      "description": "Exact status name, e.g. Focus, Backlog, Next Up, Waiting, In Progress, Done. Omit for all open tasks."},
+                           "status": {"type": "string", "enum": NOTION_TASK_STATUSES,
+                                      "description": "Exact status name. Omit for all open tasks."},
                            "query": {"type": "string", "description": "Optional title keyword filter."}},
                        "required": []},
     },
     {
         "type": "function",
         "name": "notion_update_task",
-        "description": "Update an existing Notion task's status and/or due date, found by its title (e.g. move a task from Focus to Backlog, or push a due date). If the title matches more than one task ambiguously, this asks Robin to say the exact title instead of guessing.",
+        "description": (
+            "Change an existing Notion task's STATUS and/or DUE DATE, found by its title "
+            "(e.g. move a task from Focus to Backlog, or push a due date). If the title matches "
+            "more than one task ambiguously, this asks Robin to say the exact title instead of "
+            "guessing. "
+            "This is the ONLY thing it can do: it cannot move a task to a different Notion "
+            "database, edit the page body, set any other property, or delete anything. If Robin "
+            "asks for any of those, do NOT substitute a status change as a consolation prize. "
+            "Instead: say in one sentence what you can't do and that you're handing it to a lane, "
+            "then call `delegate` with his request verbatim. Escalating beats guessing — the lane "
+            "has full Notion API access and can do what you can't. "
+            "Do not call this until Robin has finished saying which task AND which status; if "
+            "either is missing, ask."),
         "parameters": {"type": "object",
                        "properties": {
                            "title": {"type": "string", "description": "The task's title, as close to exact as possible."},
                            "status": {"type": "string",
-                                      "description": "New status, e.g. Focus, Backlog, Next Up, Waiting, In Progress, Done."},
+                                      "enum": NOTION_TASK_STATUSES,
+                                      "description": (
+                                          "New status — must be one of the listed values. "
+                                          "'Archived' means dropped/abandoned; 'Done' means actually "
+                                          "COMPLETED. When Robin says archive, bin, drop, kill or "
+                                          "forget it, that is 'Archived', never 'Done'.")},
                            "due": {"type": "string", "description": "New due date, YYYY-MM-DD."}},
                        "required": ["title"]},
     },

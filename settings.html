@@ -51,7 +51,7 @@
   .row .lbl{font-weight:600;margin-bottom:2px}
   .row .desc{color:var(--muted);font-size:12.5px}
   .row .ctl{margin-top:9px}
-  select,input[type=password],input[type=text]{
+  select,input[type=password],input[type=text],input[type=time]{
     width:100%;background:var(--field);border:1px solid var(--fieldline);border-radius:9px;
     padding:9px 11px;font:inherit;color:var(--ink);-webkit-appearance:none;appearance:none}
   select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
@@ -90,6 +90,15 @@
   .mem-chip{background:rgba(120,120,128,.14);border-radius:8px;padding:5px 9px;
     font-size:12px;line-height:1.3;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .mem-empty{font-size:12.5px;color:var(--muted);margin-top:2px}
+  /* tools inventory */
+  .tools{-webkit-user-select:text;user-select:text}
+  .tools .lbl code{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace}
+  .tools .args{margin-top:4px;font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
+  .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .tag{display:inline-block;margin-left:6px;border-radius:6px;padding:1px 7px;
+    font-size:10.5px;font-weight:700;letter-spacing:.4px;vertical-align:1px;
+    background:rgba(120,120,128,.18);color:var(--muted)}
+  .tag.warn{background:rgba(217,119,6,.16);color:#b45309}
   .foot{color:var(--muted);font-size:12px;margin-top:30px;text-align:center}
   /* toast */
   #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);
@@ -103,6 +112,7 @@
     <div class="brand"><div class="orb"></div>
       <div><h1>THRIVBE</h1><small id="ver">voice</small></div></div>
     <div class="nav active" onclick="go('SETTINGS',this)"><span class="i">⚙</span>Settings</div>
+    <div class="nav" onclick="go('TOOLS',this)"><span class="i">🧰</span>Tools</div>
     <div class="nav" onclick="go('MEMORY',this)"><span class="i">🧠</span>Memory</div>
     <div class="nav" onclick="go('ACCOUNT',this)"><span class="i">🔑</span>Account</div>
     <div class="nav" onclick="go('SYSTEM',this)"><span class="i">⚙</span>System</div>
@@ -204,10 +214,38 @@
         <div class="desc">When the agent hands a slow job to a background agent, open a Terminal window tailing its live output so you can follow along.</div>
       </div><span class="sw" id="t_tasks_term" onclick="toggle('live.show_task_terminals',this)"></span></div>
 
+      <div class="row"><div class="ic">🌙</div><div class="body">
+        <div class="lbl">Quiet hours <span class="desc">· hold auto-wake announcements</span></div>
+        <div class="desc">If a background task finishes inside this window she stays silent and speaks the result the moment quiet hours end — so an overnight job doesn't wake you, and doesn't get lost either. Conversations you start yourself are never affected. Takes effect immediately.</div>
+        <div class="ctl inline">
+          <input id="quiet_start" type="time" style="flex:0 0 130px" onchange="setVal('live.quiet_hours.start', this.value)">
+          <span class="desc">until</span>
+          <input id="quiet_end" type="time" style="flex:0 0 130px" onchange="setVal('live.quiet_hours.end', this.value)">
+        </div>
+      </div><span class="sw" id="t_quiet" onclick="toggle('live.quiet_hours.enabled',this)"></span></div>
+
+      <div class="row"><div class="ic">📅</div><div class="body">
+        <div class="lbl">Quiet on weekdays only</div>
+        <div class="desc">On = Mon–Fri only, so a finished job can still wake you at 3am on a Saturday. Off = quiet hours apply every day.</div>
+      </div><span class="sw" id="t_quiet_wd" onclick="toggle('live.quiet_hours.weekdays_only',this)"></span></div>
+
       <div class="row"><div class="ic">🖥</div><div class="body">
         <div class="lbl">Activity window</div>
         <div class="desc">Open a window that shows what the agent hears, says, and runs during a live conversation.</div>
       </div><span class="sw" id="t_term" onclick="toggle('ui.show_terminal',this)"></span></div>
+    </div>
+
+    <div class="sec">TOOLS · WHAT SHE CAN ACTUALLY DO</div>
+    <div class="card">
+      <div class="row"><div class="ic">🧰</div><div class="body">
+        <div class="lbl">Tool access <span class="desc" id="tool_count"></span></div>
+        <div class="desc">Every function the live agent can call this conversation. <b>off</b> = gated behind a setting above (turn on Agentic shell to restore). <b>confirm</b> = she reads it back and waits for your yes before it runs. When the kernel's gate list can't be reached she fails closed, so every kernel tool shows confirm.</div>
+        <div class="ctl inline">
+          <input id="tool_filter" type="text" placeholder="Filter by name or what it does…" oninput="renderTools()">
+          <button class="btn icon" onclick="rpc('refresh')" title="Reload tool list">⟳</button>
+        </div>
+      </div></div>
+      <div id="tool_list" class="tools"></div>
     </div>
 
     <div class="sec">MEMORY · ALWAYS REMEMBERS</div>
@@ -384,6 +422,25 @@
   }
   function toggle(key,el){ const on=!el.classList.contains('on'); el.classList.toggle('on',on);
     rpc('set',{key:key,value:on}); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,
+    function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  let _tools = [];
+  function renderTools(){
+    const q = (document.getElementById('tool_filter').value||'').trim().toLowerCase();
+    const hit = _tools.filter(function(t){ return !q
+      || t.name.toLowerCase().indexOf(q)>=0 || (t.description||'').toLowerCase().indexOf(q)>=0; });
+    document.getElementById('tool_count').textContent =
+      '· ' + (q ? hit.length + ' of ' + _tools.length : _tools.length + ' tools');
+    document.getElementById('tool_list').innerHTML = hit.map(function(t){
+      return '<div class="row"><div class="ic">' + (t.off?'⛔':t.confirm?'⚠️':'🔧') + '</div><div class="body">'
+        + '<div class="lbl"><code>' + esc(t.name) + '</code>'
+        + (t.off?'<span class="tag">off</span>':'')
+        + (t.confirm?'<span class="tag warn">confirm</span>':'')
+        + '</div><div class="desc clamp" title="' + esc(t.description) + '">' + esc(t.description) + '</div>'
+        + ((t.args&&t.args.length)?'<div class="args">' + esc(t.args.join(', ')) + '</div>':'')
+        + '</div></div>'; }).join('')
+      || '<div class="row"><div class="body"><div class="desc">No tool matches that.</div></div></div>';
+  }
   function setSwitch(id,on){ document.getElementById(id).classList.toggle('on',!!on); }
   function fillSelect(id,items,current){ const s=document.getElementById(id); s.innerHTML='';
     items.forEach(function(it){ const o=document.createElement('option'); o.value=it.value; o.textContent=it.label;
@@ -422,6 +479,12 @@
     setSwitch('t_shot', s.window_screenshot);
     setSwitch('t_shell', s.agentic_shell);
     setSwitch('t_tasks_term', s.show_task_terminals);
+    setSwitch('t_quiet', s.quiet_enabled);
+    setSwitch('t_quiet_wd', s.quiet_weekdays);
+    document.getElementById('quiet_start').value = s.quiet_start || '00:00';
+    document.getElementById('quiet_end').value = s.quiet_end || '07:00';
+    _tools = Array.isArray(s.tools) ? s.tools : [];
+    renderTools();
     document.getElementById('delegate').value = s.delegate || 'pi';
     setSwitch('t_term', s.activity_window);
     setSwitch('t_login', s.open_at_login);
