@@ -162,7 +162,7 @@ modules at import time and imports every module in here.
 | `live_prompt.py` | Assembles the system prompt: persona + context + learnings + custom prompt. |
 | `config.py` | `config.json`, defaults, `activity()` feed. |
 | `settings.py` | Settings state: voice list, HH:MM validator, memory counts, Tools inventory. |
-| `shell.py` | Persistent zsh so `cd` sticks across commands. |
+| `shell.py` | Persistent zsh so `cd` sticks across commands. **Mac-only at runtime** — see §7. |
 | `web.py` | Web search + URL reading. |
 | `paths.py` | RESOURCEPATH-in-a-bundle vs repo-root-in-dev, in one place. |
 
@@ -263,7 +263,30 @@ unreachable · bounded playback queue (drop oldest, not unbounded latency) · `r
   brain needs from a machine is a capability in `core.caps` (or the secret store in
   `core.secrets`), registered by the surface at startup. Three tests hold the line:
   `test_headless_core.py` (imports, no osascript/pbcopy/security in `core`) and
-  `test_bundle_deps.py` (the .app keeps shipping what `mac/` imports).
+  `test_bundle_deps.py` (the .app keeps shipping what `mac/` imports, and what those
+  dependencies themselves import).
+- **Known `core` → Mac leaks — runtime, not import time.** `core/` *imports* clean on
+  Linux; two capabilities inside it still assume this Mac when actually called. They are
+  faithful moves of pre-split code, deliberately left alone rather than fixed blind.
+  **Owner: whoever builds `server/`** — decide there, do not discover them there.
+  1. `core/shell.py` — hard-codes `/bin/zsh`, `source ~/.zshrc`, and a zsh-only sentinel
+     `print -r -- "<mark>$?"`. On Linux `Shell()` raises `FileNotFoundError: /bin/zsh`
+     at construction, so `run_shell` (a live tool, not dead code) cannot start, and
+     `tests/test_shell.py`'s two cases fail there.
+     **Do not just swap the binary.** Measured 2026-08-09: with bash the sentinel is
+     frequently emitted in the same read as the command's own output, and `run()`'s
+     `select()` then reports the pipe empty while the sentinel is already sitting in the
+     `TextIOWrapper` buffer — the command "times out" after 20s and respawns the shell.
+     The same race exists with zsh — feed `echo hello\nprint -r -- "MARK$?"\n` to a
+     pipe-fed `/bin/zsh`, then `select(2s)` → not ready, and the very next `readline()`
+     returns `MARK0` in 0.000s. zsh just loses it rarely enough that nobody has noticed.
+     A server surface needs the capture loop to
+     track its own line buffer instead of trusting `select`, *and* a shell spec
+     (argv / rc line / sentinel command) behind `core.caps`. Both, or neither.
+  2. `core/tools.py:601` — `HERDR = ~/.local/bin/herdr`, Robin's Mac-only pane manager.
+     Softer: `_herdr()` catches every exception and returns `None`, so on a host without
+     it the lane tools degrade to "no lanes" instead of crashing. The server surface
+     needs its own delegation backend behind the same `_herdr()` seam, not a path fix.
 - **Deploy = `./reload_app.sh`** (quit → `build_app.sh` → relaunch). It signs with the
   stable *Thrivbe Voice Dev* identity so Accessibility/Input-Monitoring grants survive.
   Editing the source dir alone changes nothing — `core/` and `mac/` are copied into
