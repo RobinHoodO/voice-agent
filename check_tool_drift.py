@@ -2,7 +2,7 @@
 """Live check for drift between agent Realtime tools and the kernel manifest.
 
 This guards a SAFETY property, not just schema hygiene: the manifest's `highStakes`
-flags decide which tools require a spoken confirmation gate (see live_session.py).
+flags decide which tools require a spoken confirmation gate (core/live_session.py).
 A tool that drifts out of the manifest loses its gate, so a red run here is not
 cosmetic — fix it before trusting the confirm behaviour.
 
@@ -45,10 +45,10 @@ def load_token():
 
 def load_agent_tools():
     try:
-        import tools
+        from core import tools
         return tools.TOOLS
     except Exception:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools.py")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core", "tools.py")
         try:
             tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
             for node in tree.body:
@@ -101,7 +101,7 @@ def local_high_stakes():
     so the cross-check below is skipped rather than guessed at.
     """
     try:
-        import tools
+        from core import tools
         return set(getattr(tools, "LOCAL_HIGH_STAKES", set()))
     except Exception:
         return None

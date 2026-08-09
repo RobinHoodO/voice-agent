@@ -2,8 +2,8 @@
 the unattended announce path — see agent._in_quiet_hours / agent._check_tasks."""
 import time
 
-import config
-from agent import _in_quiet_hours
+from core import config
+from mac.agent import _in_quiet_hours
 
 
 def _at(weekday, hour, minute):

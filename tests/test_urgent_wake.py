@@ -5,7 +5,7 @@ Robin explicitly chose "urgent only" over "urgent + fleet failures" (2026-08-08)
 run-failures are priority 2 and must NOT wake him — they stay in Telegram/CC per
 the 2026-07-17 noise decision.
 """
-from kernel_tools import URGENT_PRIORITY_MAX, kernel_urgent, urgent_wake_text
+from core.kernel_tools import URGENT_PRIORITY_MAX, kernel_urgent, urgent_wake_text
 
 
 def _att(key, source, priority, title="thing", detail=None):
@@ -86,12 +86,12 @@ def test_first_snapshot_seeds_silently_and_second_wakes_once():
             self.woke.append(text)
             return True
 
-    import agent
+    from mac import agent
     host = Host()
     host._apply_urgent_snapshot = types.MethodType(
         agent.VoiceAgent._apply_urgent_snapshot, host)
 
-    import config
+    from core import config
     orig = config.get
 
     def fake_get(path, default=None):
@@ -132,8 +132,8 @@ def test_live_session_defers_the_wake_for_a_later_tick():
             self.woke.append(text)
             return True
 
-    import agent
-    import config
+    from mac import agent
+    from core import config
     host = Host()
     host._apply_urgent_snapshot = types.MethodType(
         agent.VoiceAgent._apply_urgent_snapshot, host)

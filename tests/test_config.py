@@ -3,8 +3,8 @@
 Proves the tmp_app fixture isolates real storage and that the two foundational
 modules (config, memory) work end-to-end against a tmp dir.
 """
-import config
-import memory
+from core import config
+from core import memory
 
 
 def test_deep_merge_preserves_siblings_and_nested_defaults():

@@ -16,16 +16,16 @@ import threading
 import time
 import uuid
 
-import config
-import kernel_tools
-from audio import AudioMixin
-from backends import base as events
-from backends.openai_backend import OpenAIBackend
-from live_prompt import _build_live_instructions
-from realtime_client import VOICE, _selftest
-from shell import Shell
-import services
-from tools import (TOOLS, LOCAL_HIGH_STAKES, _extract_json, _put_text,
+from core import caps, config
+from core import kernel_tools
+from core.audio_core import AudioCoreMixin
+from core.backends import base as events
+from core.backends.openai_backend import OpenAIBackend
+from core.live_prompt import _build_live_instructions
+from core.realtime_client import VOICE, _selftest
+from core.shell import Shell
+from core import services
+from core.tools import (TOOLS, LOCAL_HIGH_STAKES, _extract_json, _put_text,
                    delegate_task, fleet, continue_task, close_finished_tasks, close_gate)
 
 
@@ -45,11 +45,7 @@ DELEGATING_TOOLS = {
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(msg)
-    except Exception:
-        pass
+    caps.log(msg)
 
 
 PENDING_ACTION_TTL_SECONDS = 120
@@ -181,7 +177,7 @@ def _pending_confirmation_outcome(pending: dict, transcript: str, now: float | N
     return "dropped"
 
 
-class LiveSession(AudioMixin):
+class LiveSession(AudioCoreMixin):
     """One live Realtime conversation. start()/stop() are called from the main
     (rumps) thread; everything else runs on the session's own asyncio thread.
     Audio I/O comes from AudioMixin."""
@@ -264,7 +260,7 @@ class LiveSession(AudioMixin):
     def _make_backend(self, cfg: dict):
         name = (cfg.get("live") or {}).get("backend", "openai")
         if name == "gemini":
-            from backends.gemini_backend import GeminiBackend
+            from core.backends.gemini_backend import GeminiBackend
             return GeminiBackend()
         return OpenAIBackend()
 
@@ -380,7 +376,7 @@ class LiveSession(AudioMixin):
         when the model ISN'T."""
         try:
             import numpy as np
-            from realtime_client import SR
+            from core.realtime_client import SR
             t = np.arange(int(SR * 0.09)) / SR
             env = np.minimum(1.0, np.minimum(t, t[-1] - t) * 60.0)   # click-free fade
             blip = np.concatenate([np.sin(2 * np.pi * 660 * t) * env,
@@ -391,12 +387,9 @@ class LiveSession(AudioMixin):
             _log(f"earcon failed: {e!r}")
 
     def _notify(self, msg: str) -> None:
-        """Best-effort user-visible notification (so failures aren't silent)."""
-        try:
-            import rumps
-            rumps.notification("Thrivbe Voice", "", msg)
-        except Exception:
-            pass
+        """Best-effort user-visible notification (so failures aren't silent).
+        The surface decides what that means — see core.caps.set_notifier."""
+        caps.notify(msg)
 
     def _on_mic_task_done(self, task) -> None:
         """Surface a crashed mic pump instead of letting asyncio swallow it."""
@@ -489,7 +482,7 @@ class LiveSession(AudioMixin):
         which `finally`-based persistence does not."""
         self._turns.append(turn)
         try:
-            import memory
+            from core import memory
             memory.journal_append(turn)
         except Exception as e:
             _log(f"journal append failed: {e!r}")
@@ -504,7 +497,7 @@ class LiveSession(AudioMixin):
         duration = max(0.0, time.time() - self._wall_start) if self._wall_start else 0.0
         cost_nok = (duration / 60.0) * VOICE_REALTIME_NOK_PER_MIN
         try:
-            import memory
+            from core import memory
             cid = memory.record(transcript)
             _log(f"conversation stored (id={cid}, {len(turns)} turns)")
             if cid:
@@ -529,7 +522,7 @@ class LiveSession(AudioMixin):
         still persists and we fall back to a plain-text summary; learnings just no-op.
         Off entirely when live.memory.learn is false (only summarize)."""
         try:
-            import memory
+            from core import memory
             mem_cfg = (self._cfg.get("live") or {}).get("memory") or {}
             learn_on = mem_cfg.get("learn", True)
             model = (self._cfg.get("live") or {}).get("pi_model", "deepseek-v4-flash")
@@ -940,7 +933,7 @@ class LiveSession(AudioMixin):
             args[field] = self._wrap_delegate_text(args.get(field, ""), label=label,
                                                    memory_pointer=pointer)
         if name == "remember":
-            import memory
+            from core import memory
             note = args.get("note", "")
             # Unify the old note silo into the learnings store, so there's one memory
             # surface. A free-form remembered note is a durable fact by default.
@@ -949,7 +942,7 @@ class LiveSession(AudioMixin):
             _log(f"remember: {note!r}")
             config.activity(f"💾  remembered: {note}")
         elif name == "recall":
-            import memory
+            from core import memory
             q = args.get("query", "")
             out = memory.recall(q) or "nothing relevant in memory"
             _log(f"recall: {q!r}")
@@ -1056,7 +1049,7 @@ class LiveSession(AudioMixin):
             _log(f"twenty_search_contacts: {args.get('name_query', '')!r}")
             config.activity(f"🧠  CRM search: {args.get('name_query', '')}")
         elif name == "focus":
-            import focus as focus_mod
+            from core import focus as focus_mod
             import shlex
             out = await self._loop.run_in_executor(None, focus_mod.focus, args)
             self._cfg = config.load()   # so the rest of this session sees the new focus
@@ -1069,12 +1062,12 @@ class LiveSession(AudioMixin):
                     None, self._run_in_shell, f"cd {shlex.quote(os.path.expanduser(dest))}")
             _log(f"focus: {args.get('subject', '')!r} -> shell cwd {dest!r}")
         elif name == "web_search":
-            import web
+            from core import web
             out = await self._loop.run_in_executor(None, web.web_search, args)
             _log(f"web_search: {args.get('query', '')!r}")
             config.activity(f"🌐  searched the web: {args.get('query', '')}")
         elif name == "read_url":
-            import web
+            from core import web
             out = await self._loop.run_in_executor(None, web.read_url, args)
             _log(f"read_url: {args.get('url', '')!r}")
             config.activity(f"🌐  read: {args.get('url', '')}")
@@ -1150,8 +1143,7 @@ def _grab_context() -> str:
             or config.get("privacy.read_window_context", False)):
         return "(deep context off)"
     try:
-        from macos_context import grab_context
-        return grab_context()
+        return caps.screen().grab_context()
     except Exception as e:
         _log(f"grab_context failed: {e!r}")
         return "(no context)"
@@ -1162,8 +1154,7 @@ def _grab_screenshot() -> str:
     if not config.get("privacy.read_window_screenshot", False):
         return ""
     try:
-        from macos_context import grab_window_screenshot
-        return grab_window_screenshot()
+        return caps.screen().grab_window_screenshot()
     except Exception as e:
         _log(f"grab_screenshot failed: {e!r}")
         return ""
@@ -1190,7 +1181,7 @@ def main() -> None:
         sh.close()
         print("SHELL OK:", pwd.strip())
     elif "--selftest-memory" in sys.argv:
-        import memory
+        from core import memory
         marker = "selftest " + uuid.uuid4().hex[:8]
         assert memory.add_learning("fact", marker), "add_learning failed"
         assert marker in memory.top_learnings(50), "remember→learnings round-trip failed"

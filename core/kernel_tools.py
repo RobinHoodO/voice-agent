@@ -6,7 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import config
+from core import caps, config
 
 
 KERNEL_BASE_URL = "http://127.0.0.1:8790"
@@ -14,11 +14,7 @@ UNREACHABLE = "The kernel isn't reachable right now — the SSH tunnel to Thrivb
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(f"kernel_tools: {msg}")
-    except Exception:
-        pass
+    caps.log(f"kernel_tools: {msg}")
 
 
 class KernelUnavailable(Exception):
@@ -219,7 +215,7 @@ def os_delegate(args: dict) -> str:
     # convert its finish into the same .out + .done sentinel herdr delegates use, so
     # the result reaches Robin by voice instead of dying in a Telegram summary.
     try:
-        import tools
+        from core import tools
         tid, pf, _out, _done = tools._task_paths()
         with open(pf, "w", encoding="utf-8") as f:
             f.write(instruction)          # claims the tid; _task_paths de-collides on .prompt

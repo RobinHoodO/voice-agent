@@ -1,5 +1,5 @@
 """to_gemini_schema: the pure OpenAI-flat → Gemini function-declaration reshape."""
-from tools import TOOLS, to_gemini_schema
+from core.tools import TOOLS, to_gemini_schema
 
 
 def test_top_level_shape():

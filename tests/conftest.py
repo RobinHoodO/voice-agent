@@ -12,7 +12,7 @@ import pytest
 @pytest.fixture
 def tmp_app(monkeypatch, tmp_path):
     """Point config + memory storage at an isolated tmp dir. Yields the dir."""
-    import config
+    from core import config
 
     support = tmp_path / "support"
     logs = tmp_path / "logs"
@@ -26,7 +26,7 @@ def tmp_app(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_cache", None)   # don't leak a cached config between tests
 
     # memory.DB_PATH is captured at import from config.SUPPORT_DIR — re-point it.
-    memory = importlib.import_module("memory")
+    memory = importlib.import_module("core.memory")
     monkeypatch.setattr(memory, "DB_PATH", str(support / "conversations.db"))
 
     return support

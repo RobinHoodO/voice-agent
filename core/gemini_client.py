@@ -9,7 +9,7 @@ supports AUDIO responseModalities (TEXT is rejected with a 1007 close).
 import asyncio
 import json
 
-import config
+from core import caps, config
 
 MODEL = "models/gemini-3.1-flash-live-preview"
 HOST = ("wss://generativelanguage.googleapis.com/ws/"
@@ -17,11 +17,7 @@ HOST = ("wss://generativelanguage.googleapis.com/ws/"
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(msg)
-    except Exception:
-        pass
+    caps.log(msg)
 
 
 def _url() -> str:

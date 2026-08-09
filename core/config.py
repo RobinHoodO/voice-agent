@@ -10,15 +10,17 @@ Dev continuity: `secret(name)` falls back to environment variables (which agent.
 still loads from ~/Thrivbe-AI/.env in dev), so the existing setup keeps working with
 no keys re-entered. New users enter keys in onboarding → Keychain.
 
-No third-party deps: Keychain access is via the `security` CLI.
+No third-party deps: the Keychain store lives in `mac.keychain` and registers itself
+into `core.secrets`; this module only knows "ask the store, then the env fallback".
 
-Self-check:  python3 config.py --selftest
+Self-check:  python3 -m core.config --selftest   (from the repo root)
 """
 import json
 import os
-import subprocess
 import threading
 import time
+
+from core import secrets
 
 APP_NAME = "ThrivbeVoice"
 KEYCHAIN_SERVICE = APP_NAME
@@ -209,43 +211,22 @@ def set_(path: str, value) -> dict:
         return cfg
 
 
-# ----- secrets (macOS Keychain via the `security` CLI) ----------------------
+# ----- secrets --------------------------------------------------------------
+# The store is a capability: `mac.keychain` registers the macOS Keychain (the
+# `security` CLI) at startup; a headless surface registers nothing and falls
+# through to the env fallback below / systemd credentials. Order is unchanged.
 def secret(name: str) -> str | None:
-    """Keychain first, then env fallback (dev). Returns None if nowhere."""
-    try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name, "-w"],
-            capture_output=True, text=True)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
-    for env in _ENV_FALLBACK.get(name, []):
-        v = os.environ.get(env)
-        if v:
-            return v
-    return None
+    """Store (Keychain on Mac) first, then env fallback (dev). None if nowhere."""
+    return secrets.secret(name, _ENV_FALLBACK.get(name, []))
 
 
 def set_secret(name: str, value: str) -> bool:
-    """Store/overwrite a secret in the Keychain (-U updates if present)."""
-    try:
-        r = subprocess.run(
-            ["security", "add-generic-password", "-U",
-             "-s", KEYCHAIN_SERVICE, "-a", name, "-w", value],
-            capture_output=True, text=True)
-        return r.returncode == 0
-    except Exception:
-        return False
+    """Store/overwrite a secret in the registered store. False if there isn't one."""
+    return secrets.set_secret(name, value)
 
 
 def delete_secret(name: str) -> None:
-    try:
-        subprocess.run(
-            ["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name],
-            capture_output=True, text=True)
-    except Exception:
-        pass
+    secrets.delete_secret(name)
 
 
 def has_required_keys() -> bool:
@@ -261,7 +242,10 @@ if __name__ == "__main__":
         assert merged["live"]["voice"] == "echo"                  # override applied
         assert merged["live"]["agentic_shell"] is False           # sibling default not clobbered
         assert merged["live"]["memory"]["recall_count"] == 5      # nested default preserved
-        # secret round-trip (uses a throwaway account so it can't touch real keys)
+        # secret round-trip (uses a throwaway account so it can't touch real keys).
+        # The surface owns the store, so install the Mac one explicitly here.
+        from mac.keychain import install as _install_keychain
+        _install_keychain()
         tname = "selftest-tmp"
         assert set_secret(tname, "hunter2"), "Keychain write failed"
         assert secret(tname) == "hunter2", "Keychain read mismatch"

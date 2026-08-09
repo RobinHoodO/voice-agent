@@ -13,7 +13,7 @@ for name in ("Cocoa", "WebKit"):
                                "NSWindowStyleMaskMiniaturizable", "WKWebView",
                                "WKWebViewConfiguration")}))
 
-import settings  # noqa: E402
+from core import settings  # noqa: E402
 
 
 @pytest.mark.parametrize("raw,want", [
@@ -25,7 +25,7 @@ def test_hhmm_only_accepts_real_clock_times(raw, want):
 
 
 def test_tools_lists_every_tool_and_gates_shell(monkeypatch):
-    import tools as tools_mod
+    from core import tools as tools_mod
 
     monkeypatch.setattr(settings.config, "get",
                         lambda path, default=None: False if path == "live.agentic_shell" else default)

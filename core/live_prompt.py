@@ -6,16 +6,12 @@ what's on screen this turn). Pure assembly — reads config + memory, returns a 
 """
 import os
 
-import config
-import kernel_tools
+from core import caps, config
+from core import kernel_tools
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(f"live_prompt: {msg}")
-    except Exception:
-        pass
+    caps.log(f"live_prompt: {msg}")
 
 
 # Live mode is a proactive, system-wide agentic terminal. The workspace/delegation
@@ -161,7 +157,7 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
     if mem:
         blocks.append(f"What you remember from before:\n{mem}")
     try:
-        import memory
+        from core import memory
         k = int(((cfg.get("live") or {}).get("memory") or {}).get("recall_count", 5) or 5)
         recent = memory.recent(k)
         if recent:

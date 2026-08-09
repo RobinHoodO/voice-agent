@@ -1,9 +1,9 @@
 import json
 from types import SimpleNamespace
 
-import kernel_tools
-import live_session
-import memory
+from core import kernel_tools
+from core import live_session
+from core import memory
 
 
 def test_learn_mirrors_learnings_and_ignores_kernel_failure(monkeypatch):

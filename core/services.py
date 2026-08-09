@@ -12,7 +12,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
-import config
+from core import caps, config
 
 WORKSPACE = os.path.expanduser("~/Thrivbe-AI")
 FRONT_SCRIPTS = os.path.join(WORKSPACE, "skills", "front", "scripts")
@@ -24,11 +24,7 @@ ROBIN_NOTION_ID = "56185ad5-49e3-486b-ab56-e235593c9710"   # "Robin T. Sverd"
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(f"services: {msg}")
-    except Exception:
-        pass
+    caps.log(f"services: {msg}")
 
 
 # --- Notion (direct REST, urllib only) ---------------------------------------
@@ -137,7 +133,7 @@ def notion_update_task(args: dict) -> str:
     if not status and not due:
         return "I need a new status or due date to update."
     if status:
-        import tools
+        from core import tools
         # Hard enum check BEFORE any network call: an off-list status means the model is
         # improvising ("archive" → Done was the 2026-08-08 incident). Refuse and point at
         # the escalation path instead of writing a wrong-but-valid-looking value.

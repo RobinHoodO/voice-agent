@@ -4,7 +4,7 @@ text-only self-test round-trip. Extracted from realtime.py; LiveSession uses the
 import asyncio
 import json
 
-import config
+from core import caps, config
 
 MODEL = "gpt-realtime"   # GA Realtime model (the old beta shape is disabled on this account)
 URL = f"wss://api.openai.com/v1/realtime?model={MODEL}"
@@ -13,11 +13,7 @@ VOICE = "alloy"     # default OpenAI voice (overridable via config live.voice)
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(msg)
-    except Exception:
-        pass
+    caps.log(msg)
 
 
 def _headers() -> dict:

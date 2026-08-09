@@ -5,23 +5,23 @@ Replaces the cluttered menubar dropdown with a real preferences window (the Aqua
 style layout). The menu now just has Live conversation / Settings… / Quit; everything
 configurable lives here. JS ⇄ Python is a tiny promise-style RPC over a single
 WKScriptMessageHandler named "bridge".
+
+Only the window and the native bits live here. The values it renders — the voice list,
+the HH:MM validator, the memory counters, the Tools inventory — are `core.settings`.
 """
 import json
 import os
 import subprocess
 import threading
-import time
 
 from Cocoa import (NSObject, NSWindow, NSBackingStoreBuffered, NSMakeRect, NSApp,
                    NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
                    NSWindowStyleMaskResizable, NSWindowStyleMaskMiniaturizable)
 from WebKit import WKWebView, WKWebViewConfiguration
 
-import config
-
-VOICES = ["marin", "cedar", "alloy", "ash", "ballad", "coral",
-          "echo", "sage", "shimmer", "verse"]
-VERSION = "1.0"
+from core import caps, config, paths
+from core import settings as core_settings
+from core.settings import VERSION, VOICES, _greeting, _hhmm, _mem_stats, _tools  # noqa: F401
 
 # Security & Privacy panes the UI may deep-link to (the only valid openPane args).
 _SECURITY_PANES = {"Privacy_Microphone", "Privacy_Accessibility", "Privacy_ListenEvent",
@@ -34,11 +34,7 @@ _agent = None
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(f"settings: {msg}")
-    except Exception:
-        pass
+    caps.log(f"settings: {msg}")
 
 
 # --- audio helpers ----------------------------------------------------------
@@ -112,7 +108,7 @@ def _test_audio(which):
 # --- login item (Open at login) --------------------------------------------
 def _app_path():
     """Path to the installed .app bundle, if there is one to launch at login."""
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Thrivbe Voice.app")
+    p = os.path.join(paths.PROJECT_ROOT, "Thrivbe Voice.app")
     return p if os.path.exists(p) else None
 
 
@@ -137,98 +133,9 @@ def _set_login_item(on: bool):
 
 
 # --- state ------------------------------------------------------------------
-def _greeting() -> str:
-    h = int(time.strftime("%H"))
-    part = "morning" if h < 12 else "afternoon" if h < 18 else "evening"
-    try:
-        name = subprocess.run(["id", "-F"], capture_output=True, text=True).stdout.strip()
-        first = (name.split() or [""])[0]
-    except Exception:
-        first = ""
-    return f"Good {part}" + (f", {first}" if first else "")
-
-
-def _mem_stats() -> dict:
-    """Live memory counts + recent learnings for the Settings panel (display-only).
-    Isolated + non-fatal: a memory hiccup must never break the Settings window."""
-    try:
-        import memory
-        s = memory.panel_stats(4)
-        return {"mem_conversation_count": s["conversations"],
-                "mem_learning_count": s["learnings"],
-                "mem_recent_learnings": s["recent"]}
-    except Exception as e:
-        _log(f"mem stats failed: {e!r}")
-        return {"mem_conversation_count": 0, "mem_learning_count": 0,
-                "mem_recent_learnings": []}
-
-
-def _tools() -> list:
-    """Every tool the live agent can call, with the gating that applies right now, for
-    the Tools panel. Mirrors live_session's own filter (agentic_shell gates run_shell +
-    delegate) and its confirm gate (the kernel's declared high-stakes list, failing
-    closed on every kernel tool when the manifest is unreadable — same as _configure).
-    ponytail: 1s manifest timeout, not the session's 3s — this runs on the UI thread."""
-    try:
-        import kernel_tools
-        import tools as tools_mod
-        shell_on = bool(config.get("live.agentic_shell", False))
-        declared = kernel_tools.kernel_high_stakes(timeout=1)
-        high = set(kernel_tools.KERNEL_TOOL_NAMES if declared is None else declared)
-        high |= set(tools_mod.LOCAL_HIGH_STAKES)
-        out = []
-        for t in tools_mod.TOOLS:
-            name = t.get("name", "")
-            props = (t.get("parameters") or {}).get("properties") or {}
-            out.append({"name": name,
-                        "description": t.get("description", ""),
-                        "args": sorted(props),
-                        "off": not shell_on and name in ("run_shell", "delegate"),
-                        "confirm": name in high})
-        return sorted(out, key=lambda t: t["name"])
-    except Exception as e:
-        _log(f"tool list failed: {e!r}")
-        return []
-
-
 def _state() -> dict:
     ins, outs = _devices()
-    return {
-        "greeting": _greeting(),
-        "version": VERSION,
-        "mics": ins, "spk": outs, "voices": VOICES,
-        "mic": config.get("audio.input_device"),
-        "speaker": config.get("audio.output_device"),
-        "backend": config.get("live.backend", "openai"),
-        "voice": config.get("live.voice", "alloy"),
-        "workspace": config.get("live.workspace", "") or "",
-        "mem_provider": config.get("live.memory.provider", "none"),
-        "mem_recall_count": config.get("live.memory.recall_count", 5),
-        "mem_claude_db": config.get("live.memory.claude_mem_db", "") or "",
-        "mem_command": config.get("live.memory.command", "") or "",
-        "mem_learn": bool(config.get("live.memory.learn", True)),
-        "mem_mirror": bool(config.get("live.memory.mirror_claude_mem", False)),
-        **_mem_stats(),
-        "custom_prompt": config.get("live.custom_prompt", "") or "",
-        "deep_context": bool(config.get("privacy.read_cursor_context", True)),
-        "window_context": bool(config.get("privacy.read_window_context", False)),
-        "window_screenshot": bool(config.get("privacy.read_window_screenshot", False)),
-        "agentic_shell": bool(config.get("live.agentic_shell", False)),
-        "show_task_terminals": bool(config.get("live.show_task_terminals", False)),
-        "delegate": config.get("live.delegate", "pi"),
-        "proactive_wake": bool(config.get("live.proactive_wake", False)),
-        "quiet_enabled": bool(config.get("live.quiet_hours.enabled", True)),
-        "quiet_start": config.get("live.quiet_hours.start", "00:00"),
-        "quiet_end": config.get("live.quiet_hours.end", "07:00"),
-        "quiet_weekdays": bool(config.get("live.quiet_hours.weekdays_only", True)),
-        "tools": _tools(),
-        "activity_window": bool(config.get("ui.show_terminal", False)),
-        "open_at_login": bool(config.get("system.open_at_login", False)),
-        "live_on": bool(getattr(_agent, "live_on", False)),
-        "key_present": bool(config.secret("openai")),
-        "gemini_key_present": bool(config.secret("gemini")),
-        "hotkey": "Double-tap Control",
-    }
+    return core_settings.state(ins, outs, getattr(_agent, "live_on", False))
 
 
 def _eval(js: str):
@@ -248,17 +155,6 @@ def _push_toast(msg: str):
 
 
 # --- RPC dispatch -----------------------------------------------------------
-def _hhmm(value):
-    """Normalize a bridge-supplied clock time to 'HH:MM', or None if it isn't one."""
-    try:
-        h, m = str(value).split(":")[:2]
-        h, m = int(h), int(m)
-    except Exception:
-        return None
-    return f"{h:02d}:{m:02d}" if 0 <= h <= 23 and 0 <= m <= 59 else None
-
-
-
 def _handle(fn, arg):
     if fn == "ready":
         _push_state(); return None
@@ -348,11 +244,10 @@ def open_settings(agent):
         return
     try:
         # In a py2app bundle settings.py lives inside lib/python3.12.zip, so
-        # dirname(__file__) is not a real directory. py2app sets RESOURCEPATH to
-        # Contents/Resources (where settings.html is shipped via data_files); in
-        # dev that env var is unset, so fall back to the file's own directory.
-        base = os.environ.get("RESOURCEPATH") or os.path.dirname(os.path.abspath(__file__))
-        html_path = os.path.join(base, "settings.html")
+        # dirname(__file__) is not a real directory. core.paths.RESOURCE_DIR resolves
+        # to Contents/Resources in a bundle (where data_files ship settings.html) and
+        # to the repo root in dev.
+        html_path = os.path.join(paths.RESOURCE_DIR, "settings.html")
         html = open(html_path, encoding="utf-8").read()
 
         cfg = WKWebViewConfiguration.alloc().init()

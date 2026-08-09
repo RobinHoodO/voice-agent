@@ -2,18 +2,18 @@
 """Thrivbe Voice — a hands-free macOS menubar voice agent.
 
 Lives in the menu bar (🎙). **Double-tap Control** to start/stop a live, hands-free
-conversation: OpenAI Realtime speech-to-speech (in realtime.py), with barge-in, an
+conversation: OpenAI Realtime speech-to-speech (core.live_session), with barge-in, an
 optional agentic shell, cross-session memory, and awareness of what's under your
 cursor. One mode, one voice (OpenAI) — no push-to-talk, no ElevenLabs.
 """
 import json, os, queue, socket, sys, subprocess, threading, time
 
-# py2app puts the frozen python312.zip ahead of Contents/Resources on sys.path,
-# so `import realtime/pill/config` would load STALE zipped copies. Put our own dir
-# first so loose Resources/*.py win — this also lets us deploy edits with cp +
-# relaunch (no rebuild, no TCC re-grant).
+# py2app puts the frozen python312.zip ahead of Contents/Resources on sys.path, so
+# `import core.live_session / mac.pill / core.config` would load STALE zipped copies.
+# Put the repo/Resources root (the parent of this package) first so loose copies win —
+# this also lets us deploy edits with cp + relaunch (no rebuild, no TCC re-grant).
 try:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 except Exception:
     pass
 
@@ -21,7 +21,8 @@ import rumps
 import rumps.rumps as rumps_core
 from pynput import keyboard
 
-import config
+from core import config
+from mac import caps_install
 
 # --- diagnostics: log to the app's own log dir (out of /tmp for the product)
 LOG_PATH = config.LOG_PATH
@@ -32,6 +33,12 @@ def LOG(msg):
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except Exception:
         pass
+
+
+# Hand `core` this machine: the Keychain, the clipboard, the screen, PortAudio, and
+# LOG itself. Must happen before anything in core runs — core has no way to reach any
+# of it on its own, and silently degrades (no log, no context) if this is skipped.
+caps_install.install(log_sink=LOG)
 
 
 def _prune_old_tasks() -> None:
@@ -196,7 +203,7 @@ class VoiceAgent(rumps.App):
         # quit, power loss) without reaching the `finally` that stores transcripts. Fold
         # it into the DB now so those words aren't lost — see memory.journal_recover.
         try:
-            import memory
+            from core import memory
             if memory.journal_recover():
                 config.activity("💾  recovered a conversation from the previous run")
         except Exception as e:
@@ -212,7 +219,7 @@ class VoiceAgent(rumps.App):
 
     def _open_settings(self):
         try:
-            import settings
+            from mac import settings
             settings.open_settings(self)
         except Exception as e:
             LOG(f"open settings failed: {e!r}")
@@ -294,7 +301,7 @@ class VoiceAgent(rumps.App):
         if self.live_on:
             if self.pill is None:
                 try:
-                    from pill import Pill
+                    from mac.pill import Pill
                     self.pill = Pill()
                 except Exception as e:
                     LOG(f"pill init failed: {e!r}")
@@ -427,7 +434,7 @@ class VoiceAgent(rumps.App):
         # item retries on a later tick — once quiet hours end or the session closes.
         if self.live_on or _in_quiet_hours():
             return
-        import kernel_tools
+        from core import kernel_tools
         LOG(f"urgent wake: {len(new)} new kernel item(s)")
         config.activity(f"🔔  urgent from the kernel — waking ({len(new)} item(s))")
         if self._wake_and_speak(kernel_tools.urgent_wake_text(new)):
@@ -439,7 +446,7 @@ class VoiceAgent(rumps.App):
         tick, so this thread never touches AppKit. Also snapshots urgent attention
         items for _apply_urgent_snapshot (main thread) to act on."""
         try:
-            import kernel_tools
+            from core import kernel_tools
             try:
                 status = kernel_tools.kernel_status_raw()
             except Exception:
@@ -493,7 +500,7 @@ class VoiceAgent(rumps.App):
             config.reset_activity()
             self._open_activity_window()
         try:
-            import realtime
+            from core import live_session as realtime
             self.live = realtime.LiveSession(on_state=self._on_live_state, announce=text,
                                              on_auto_stop=self._auto_stopped,
                                              on_task_spoken=self._task_spoken,
@@ -627,7 +634,7 @@ class VoiceAgent(rumps.App):
             config.reset_activity()         # fresh feed for this conversation
             self._open_activity_window()
         try:
-            import realtime
+            from core import live_session as realtime
             self.live = realtime.LiveSession(on_state=self._on_live_state,
                                              on_auto_stop=self._auto_stopped,
                                              on_task_spoken=self._task_spoken)
@@ -654,9 +661,14 @@ class VoiceAgent(rumps.App):
         self.status = state
 
 
-if __name__ == "__main__":
-    # realtime.py does `from agent import grab_context, LOG`. When this file runs as
-    # __main__, alias it as `agent` so that import resolves to THIS already-initialised
-    # module instead of re-importing (which would re-run load_env).
+def main():
+    """Entry point. `agent.py` at the repo root is the py2app script and calls this."""
+    # Nothing does `from agent import LOG` any more (that is core.caps' log sink), but
+    # keep the alias: it costs nothing and makes an accidental re-import a no-op rather
+    # than a second module that re-runs load_env().
     sys.modules.setdefault("agent", sys.modules[__name__])
     VoiceAgent().run()
+
+
+if __name__ == "__main__":
+    main()

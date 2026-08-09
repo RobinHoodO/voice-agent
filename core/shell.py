@@ -12,7 +12,7 @@ import subprocess
 import time
 import uuid
 
-import config
+from core import config
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")   # strip terminal escape codes from shell output
 

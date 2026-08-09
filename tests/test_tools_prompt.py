@@ -1,7 +1,7 @@
 """Characterization tests for the tools.py + live_prompt.py extractions (Phase 4)."""
-import kernel_tools
-import live_prompt
-import tools
+from core import kernel_tools
+from core import live_prompt
+from core import tools
 
 
 def test_extract_json_plain_and_embedded():

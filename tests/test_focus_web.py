@@ -2,10 +2,10 @@
 import os
 import shutil
 
-import config
-import focus
-import web
-from tools import TOOLS
+from core import config
+from core import focus
+from core import web
+from core.tools import TOOLS
 
 NEW_TOOLS = ("focus", "web_search", "read_url")
 
@@ -26,7 +26,7 @@ def test_available_when_agentic_shell_is_off():
 
 
 def test_gemini_schema_accepts_new_tools():
-    from tools import to_gemini_schema
+    from core.tools import to_gemini_schema
     decls = to_gemini_schema(TOOLS)[0]["functionDeclarations"]
     assert {d["name"] for d in decls} >= set(NEW_TOOLS)
 
@@ -80,7 +80,7 @@ def test_focus_digest_respects_budget(tmp_path):
 
 
 def test_prompt_carries_focus_into_a_new_session(tmp_app, tmp_path):
-    import live_prompt
+    from core import live_prompt
     cfg = {"live": {"focus": {"subject": "acme", "name": "Acme", "dir": str(tmp_path)}}}
     block = live_prompt._build_live_instructions("", cfg)
     assert "Current focus: Acme" in block

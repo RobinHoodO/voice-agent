@@ -7,7 +7,7 @@ examples are a suggestion; an enum is a constraint.
 
 This test is generic on purpose: it fails for tools that don't exist yet.
 """
-import tools
+from core import tools
 
 NOTION_TASK_TOOLS = [t for t in tools.TOOLS if t["name"].startswith("notion_")]
 

@@ -4,7 +4,7 @@ Replays the real 2026-08-08 incident: "AI Agents: A Practical Guide" was written
 Done -> Backlog -> Focus -> Done -> Next Up in 42 seconds while Robin was still
 mid-sentence. The exact-args loop guard never fired because no two calls matched.
 """
-from live_session import (TOOL_REPEAT_LIMIT, TOOL_TARGET_LIMIT, _tool_repeat_count,
+from core.live_session import (TOOL_REPEAT_LIMIT, TOOL_TARGET_LIMIT, _tool_repeat_count,
                           _tool_target_count)
 
 TASK = "AI Agents: A Practical Guide"

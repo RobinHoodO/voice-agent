@@ -1,7 +1,7 @@
 """Phase 2.5 / 3.3 — memory DB hardening (WAL + busy_timeout, schema once)."""
 import threading
 
-import memory
+from core import memory
 
 
 def test_wal_enabled(tmp_app):

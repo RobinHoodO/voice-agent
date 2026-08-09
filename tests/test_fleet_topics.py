@@ -1,6 +1,6 @@
 """fleet(detail='topics') gist extraction — the heuristic that turns a coding TUI's
 raw pane buffer into 'what this pane is about'."""
-from tools import _gist_from_text
+from core.tools import _gist_from_text
 
 
 def test_prefers_the_typed_prompt_over_current_output():

@@ -2,10 +2,10 @@
 import base64
 import json
 
-from backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, OTHER,
+from core.backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, OTHER,
                            SPEECH_STARTED, TOOL_CALL, USER_TRANSCRIPT)
-from backends.gemini_backend import GeminiBackend
-from tools import to_gemini_schema
+from core.backends.gemini_backend import GeminiBackend
+from core.tools import to_gemini_schema
 
 
 def _tools():

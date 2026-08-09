@@ -9,7 +9,7 @@ confidently mislabelled quote, worse than no quote at all.
 import asyncio
 import json
 
-import live_session
+from core import live_session
 
 
 class _FakeWS:

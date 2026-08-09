@@ -2,7 +2,7 @@
 
 Drives the real persistent zsh to pin run()/exit-code behavior after the move.
 """
-from shell import Shell
+from core.shell import Shell
 
 
 def test_run_captures_output():

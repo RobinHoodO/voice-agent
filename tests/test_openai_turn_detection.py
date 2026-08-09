@@ -3,8 +3,8 @@
 Regression guard for the bug where the agent acted mid-sentence: a 700ms silence
 timer treated every thinking pause as end-of-turn.
 """
-import config
-from backends.openai_backend import OpenAIBackend, _turn_detection_cfg
+from core import config
+from core.backends.openai_backend import OpenAIBackend, _turn_detection_cfg
 
 
 def _td(setup: dict) -> dict:

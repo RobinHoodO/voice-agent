@@ -19,7 +19,7 @@ Self-check:  python3 focus.py
 import difflib
 import os
 
-import config
+from core import caps, config
 
 SEARCH_ROOTS = ("clients", "projects", "lab")
 PRIORITY_DOCS = ("CLAUDE.md", "README.md")
@@ -46,11 +46,7 @@ _STOP = {"the", "a", "an", "my", "our", "client", "clients", "project", "project
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(f"focus: {msg}")
-    except Exception:
-        pass
+    caps.log(f"focus: {msg}")
 
 
 def _norm(text: str) -> str:

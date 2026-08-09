@@ -9,7 +9,7 @@ cooldown window may retrigger a response; the rest send the tool result silently
 import asyncio
 import types
 
-from live_session import GUARD_RETRIGGER_COOLDOWN_S, LiveSession
+from core.live_session import GUARD_RETRIGGER_COOLDOWN_S, LiveSession
 
 
 class FakeBackend:

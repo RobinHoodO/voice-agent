@@ -7,8 +7,8 @@ and the realtime.py shim still re-exports it for agent.py.
 import asyncio
 import json
 
-import kernel_tools
-import live_session
+from core import kernel_tools
+from core import live_session
 import realtime
 
 

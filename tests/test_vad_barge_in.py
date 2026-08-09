@@ -8,7 +8,7 @@ input must persist, so a leak is rejected and a real interruption still lands.
 """
 import asyncio
 
-import audio
+from core import audio_core
 
 
 class _Backend:
@@ -30,7 +30,7 @@ class _Backend:
         return []
 
 
-class _Session(audio.AudioMixin):
+class _Session(audio_core.AudioCoreMixin):
     """Minimal stand-in exposing exactly the attributes _pump_mic touches."""
 
     def __init__(self, levels, agent_speaking, hold=0.25, tick=0.1, silence=1.5):
@@ -125,7 +125,7 @@ def test_thinking_pause_mid_sentence_does_not_end_the_turn():
 
 
 def test_defaults_are_wired_from_config():
-    import config
+    from core import config
     vad = config.DEFAULTS["live"]["vad"]
     assert vad["threshold_while_speaking"] > vad["threshold"], \
         "interrupting her must be harder than starting a turn in silence"

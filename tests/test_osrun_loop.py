@@ -8,8 +8,8 @@ delegates use, so the announcer path applies unchanged.
 import json
 import time
 
-import kernel_tools
-from kernel_tools import OSRUN_WINDOW_GRACE_S, osrun_outcome
+from core import kernel_tools
+from core.kernel_tools import OSRUN_WINDOW_GRACE_S, osrun_outcome
 
 SIDECAR = {"runId": 42, "instruction": "chase the Mingle invoice", "started": 1000.0}
 
@@ -58,8 +58,8 @@ def test_other_runs_do_not_match():
 
 def test_os_delegate_writes_the_sidecar(monkeypatch, tmp_path):
     """The tool must keep the runId: sidecar + prompt claim a tid in TASKS_DIR."""
-    import config
-    import tools
+    from core import config
+    from core import tools
     monkeypatch.setattr(config, "TASKS_DIR", str(tmp_path))
     monkeypatch.setattr(config, "ensure_dirs", lambda: None)
     monkeypatch.setattr(kernel_tools, "_kernel_call",
@@ -84,7 +84,7 @@ def test_status_helper_does_not_shadow_the_spoken_tool():
 
 
 def test_os_delegate_without_runid_falls_back_to_one_way(monkeypatch, tmp_path):
-    import config
+    from core import config
     monkeypatch.setattr(config, "TASKS_DIR", str(tmp_path))
     monkeypatch.setattr(kernel_tools, "_kernel_call", lambda *a, **k: {})
     out = kernel_tools.os_delegate({"instruction": "x"})

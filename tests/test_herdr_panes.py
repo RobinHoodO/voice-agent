@@ -4,11 +4,11 @@ import os
 import queue
 import time
 
-import agent
-import config
-import live_session
-import live_prompt
-import tools
+from mac import agent
+from core import config
+from core import live_session
+from core import live_prompt
+from core import tools
 
 
 class FakeHerdr:

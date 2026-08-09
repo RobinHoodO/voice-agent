@@ -5,9 +5,9 @@ If any of these fail, a P0 hole has reopened.
 import os
 import stat
 
-import config
-import memory
-import settings
+from core import config
+from core import memory
+from mac import settings
 
 
 # --- 1.1 openPane shell-arg whitelist ---------------------------------------

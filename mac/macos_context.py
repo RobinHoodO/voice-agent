@@ -10,7 +10,7 @@ import os
 import subprocess
 import tempfile
 
-import config
+from core import caps, config
 
 
 # Robin can extend this denylist as additional sensitive apps emerge.
@@ -30,11 +30,7 @@ SCREENSHOT_DENY_TITLE = frozenset((
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(f"macos_context: {msg}")
-    except Exception:
-        pass
+    caps.log(f"macos_context: {msg}")
 
 
 def osa(script):

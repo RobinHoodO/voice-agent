@@ -5,7 +5,7 @@ pull agent at import time (the cycle stays broken).
 """
 import sys
 
-import macos_context
+from mac import macos_context
 
 
 def test_public_api_present_and_callable():
@@ -16,7 +16,7 @@ def test_public_api_present_and_callable():
 def test_import_does_not_pull_agent():
     # importing macos_context alone must not import agent (lazy _log shim only)
     mod = sys.modules.copy()
-    assert "macos_context" in mod
+    assert "mac.macos_context" in mod
     # agent may be absent; if present it's from elsewhere, not a macos_context import-time dep
 
 

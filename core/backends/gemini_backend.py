@@ -5,22 +5,21 @@ import os
 import sys
 
 if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # Run directly (`python core/backends/gemini_backend.py --selftest`): put the repo
+    # root — three levels up, past core/backends/ — on the path so `core.*` resolves.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
 
-import config
-from backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, OTHER,
+from core import caps, config
+from core.backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, OTHER,
                            SPEECH_STARTED, TOOL_CALL, USER_TRANSCRIPT, Backend,
                            NormalizedEvent)
-from gemini_client import MODEL, HOST, _url
-from tools import to_gemini_schema
+from core.gemini_client import MODEL, HOST, _url
+from core.tools import to_gemini_schema
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(msg)
-    except Exception:
-        pass
+    caps.log(msg)
 
 
 _VOICE_MAP = {

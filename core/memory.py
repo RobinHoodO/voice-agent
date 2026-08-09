@@ -26,7 +26,7 @@ import sqlite3
 import subprocess
 import time
 
-import config
+from core import config
 
 # DB_PATH is module-global so demo()/tests can point it at a tempfile.
 DB_PATH = os.path.join(config.SUPPORT_DIR, "conversations.db")

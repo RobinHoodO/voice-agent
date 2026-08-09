@@ -12,9 +12,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import memory
-from audio import AudioMixin
-from live_session import (TOOL_REPEAT_LIMIT, TOOL_REPEAT_WINDOW_S,
+from core import memory
+from mac.audio import AudioMixin
+from core.live_session import (TOOL_REPEAT_LIMIT, TOOL_REPEAT_WINDOW_S,
                           _tool_repeat_count)
 
 
@@ -199,7 +199,7 @@ def _run_stall(waited_pattern, cfg=None):
     'seconds since the turn went silent' the watchdog observes, one per tick."""
     import asyncio
 
-    import live_session as ls
+    from core import live_session as ls
 
     s = ls.LiveSession.__new__(ls.LiveSession)
     s._running = True
@@ -260,7 +260,7 @@ def test_reply_arriving_disarms_the_watchdog():
     """AUDIO_DELTA clears _awaiting_reply_since; the watchdog must then do nothing."""
     import asyncio
 
-    import live_session as ls
+    from core import live_session as ls
 
     s = ls.LiveSession.__new__(ls.LiveSession)
     s._running = True
@@ -290,7 +290,7 @@ def test_reply_arriving_disarms_the_watchdog():
 
 
 def test_earcon_produces_playable_pcm():
-    import live_session as ls
+    from core import live_session as ls
 
     s = ls.LiveSession.__new__(ls.LiveSession)
     chunks = []
@@ -306,7 +306,7 @@ def test_earcon_produces_playable_pcm():
 def _run_reconnect(resume_handle=None):
     import asyncio
 
-    import live_session as ls
+    from core import live_session as ls
 
     s = ls.LiveSession.__new__(ls.LiveSession)
     s._backend = _FakeBackend()

@@ -1,5 +1,5 @@
 """New herdr lanes are named by PURPOSE, so Robin can say the name back later."""
-from tools import _purpose_slug
+from core.tools import _purpose_slug
 
 
 def test_model_supplied_task_name_wins():

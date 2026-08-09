@@ -11,15 +11,11 @@ import shlex
 import subprocess
 import time
 
-import config
+from core import caps, config, paths
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(f"tools: {msg}")
-    except Exception:
-        pass
+    caps.log(f"tools: {msg}")
 
 
 # Tools that exist ONLY on this Mac (no kernel manifest entry) and must still be
@@ -538,12 +534,9 @@ def to_gemini_schema(tools: list[dict]) -> list[dict]:
 # In a py2app bundle this module lives INSIDE Contents/Resources/lib/python312.zip, so
 # dirname(__file__) is a path into a zip archive, not a real directory — the harness
 # resolved there never exists and every delegation failed in the shipped app (it only
-# worked from source). py2app sets RESOURCEPATH to Contents/Resources, where the file is
-# shipped via data_files; in dev that var is unset, so fall back to the module's own dir.
-# Same pattern settings.py already uses to find settings.html.
-HARNESS_PATH = os.path.join(
-    os.environ.get("RESOURCEPATH") or os.path.dirname(os.path.abspath(__file__)),
-    "delegate-harness.md")
+# worked from source). core.paths.RESOURCE_DIR is that rule in one place: RESOURCEPATH
+# (Contents/Resources, where data_files land) in a bundle, the repo root in dev.
+HARNESS_PATH = os.path.join(paths.RESOURCE_DIR, "delegate-harness.md")
 
 
 def _verify_wrap(instruction: str) -> str:
@@ -1189,7 +1182,7 @@ def _os_runs_line() -> str:
     the kernel's runs window). Empty string when there are none or the tunnel is down —
     a kernel problem must never break the herdr half of the fleet answer."""
     try:
-        import kernel_tools
+        from core import kernel_tools
         config.ensure_dirs()
         sidecars = []
         for f in os.listdir(config.TASKS_DIR):
@@ -1412,26 +1405,14 @@ def _extract_json(text: str):
 
 def _put_text(text: str, paste: bool = True) -> str:
     """Copy text to the clipboard and (by default) paste it into the frontmost window.
-    Copy always works; auto-paste needs Accessibility — if it can't, the text is still
-    on the clipboard and we tell the user to press Cmd-V."""
+
+    The mechanism is the surface's (pbcopy + a synthetic Cmd-V on macOS — see
+    mac.clipboard); the empty-input guard is the tool's, so every surface answers the
+    same way when there is nothing to put."""
     text = text or ""
     if not text.strip():
         return "nothing to put"
-    try:
-        # ponytail: encode bytes ourselves — text=True uses the locale encoding, which is
-        # ASCII in the py2app bundle, so em-dashes/emoji crashed pbcopy with a UnicodeError.
-        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
-    except Exception as e:
-        return f"couldn't reach the clipboard: {e}"
-    if not paste:
-        return "copied to the clipboard"
-    r = subprocess.run(
-        ["osascript", "-e",
-         'tell application "System Events" to keystroke "v" using command down'],
-        capture_output=True, text=True)
-    if r.returncode != 0:
-        return "copied to the clipboard — press Cmd-V to paste it in (auto-paste needs Accessibility permission)"
-    return "pasted it into the front window"
+    return caps.clipboard().put_text(text, paste)
 
 
 if __name__ == "__main__":

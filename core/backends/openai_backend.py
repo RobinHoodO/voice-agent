@@ -5,20 +5,16 @@ realtime_client.py.
 import base64
 import json
 
-import config
-from backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, ERROR, OTHER,
+from core import caps, config
+from core.backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, ERROR, OTHER,
                            RESPONSE_CREATED, RESPONSE_DONE, SPEECH_STARTED,
                            SPEECH_STOPPED, TOOL_CALL, USER_TRANSCRIPT, Backend,
                            NormalizedEvent)
-from realtime_client import SR, URL, _headers
+from core.realtime_client import SR, URL, _headers
 
 
 def _log(msg: str) -> None:
-    try:
-        from agent import LOG
-        LOG(msg)
-    except Exception:
-        pass
+    caps.log(msg)
 
 
 def _transcription_cfg() -> dict:

@@ -5,7 +5,7 @@ notion_update_task can't do that, so the model wrote five different statuses to
 the page instead of saying so. The tool descriptions are the only place the model
 learns this, so pin them.
 """
-import tools
+from core import tools
 
 BY_NAME = {t["name"]: t for t in tools.TOOLS}
 
@@ -44,7 +44,7 @@ def test_escalation_target_exists():
 def test_thrash_refusal_names_the_escalation_tool():
     """The thrash guard fires exactly when a shallow tool substitutes for the real ask —
     its refusal must point at `delegate`, not just say stop."""
-    import live_session
+    from core import live_session
     hint = live_session._ESCALATION_HINT["notion_update_task"]
     assert "delegate" in hint and "verbatim" in hint
     # A hint for an untracked tool would never be appended to anything.
@@ -54,7 +54,7 @@ def test_thrash_refusal_names_the_escalation_tool():
 def test_invalid_status_refuses_without_a_network_call(monkeypatch):
     """An off-list status means the model is improvising ('archive' -> Done). The tool
     must refuse BEFORE any Notion call, and the refusal must name the escalation path."""
-    import services
+    from core import services
 
     def _boom(*a, **k):
         raise AssertionError("network call made for an invalid status")
@@ -66,7 +66,7 @@ def test_invalid_status_refuses_without_a_network_call(monkeypatch):
 
 def test_valid_status_is_canonicalized_case_insensitively(monkeypatch):
     """'done' spoken lowercase must reach Notion as 'Done', not be refused."""
-    import services
+    from core import services
     calls = []
 
     def _fake(method, path, body=None):

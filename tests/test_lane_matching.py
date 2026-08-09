@@ -1,5 +1,5 @@
 """_find_lane: resolving a spoken/minted task name to the right herdr pane."""
-from tools import _find_lane
+from core.tools import _find_lane
 
 
 def _lane(label, name=None, pane_id=None):
