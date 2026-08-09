@@ -30,12 +30,12 @@ OPTIONS = {
     "packages": [
         "pynput",
         "rumps",
-        "sounddevice",
         "websockets",
         "numpy",
         # ships libportaudio.dylib as package data — sounddevice loads it at
         # runtime; as a "package" py2app copies the dir verbatim (incl. the dylib)
-        # instead of zipping just the .py, which would drop the binary.
+        # instead of zipping just the .py, which would drop the binary. This one
+        # MUST stay in `packages`; `sounddevice` itself must not (see `includes`).
         "_sounddevice_data",
         # `mac` MUST be here and cannot be discovered by the import scan:
         # modulegraph.find_modules._PLATFORM_MODULES hard-excludes a top-level module
@@ -59,6 +59,15 @@ OPTIONS = {
         "Quartz",
         "WebKit",
         "objc",
+        # sounddevice is a single .py module, not a package. Listed under `packages`
+        # py2app copied that one file and followed nothing, so its module-level
+        # `from _sounddevice import ffi` never shipped and the bundle raised
+        # ModuleNotFoundError the moment the mic or speaker was touched — it built,
+        # signed and launched fine. As an `include`, modulegraph parses it and pulls
+        # _sounddevice (and anything a future release adds) in by itself. The dylib
+        # still ships via the separate `_sounddevice_data` package above.
+        # Guarded by tests/test_bundle_deps.py.
+        "sounddevice",
         "pynput._util.darwin",
         "pynput.keyboard._darwin",
         "urllib.request",
