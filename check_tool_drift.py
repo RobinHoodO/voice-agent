@@ -48,8 +48,11 @@ downgrade a real divergence from "block" to "warn".
 USAGE
 
   ./check_tool_drift.py                       # mac + server in this repo
-  ./check_tool_drift.py --root <tree>         # another checkout, or an .app's
-                                              #   Contents/Resources/lib/python3.12
+  ./check_tool_drift.py --root <tree>         # another checkout — it must contain two
+                                              #   surfaces, so not an .app bundle (which
+                                              #   ships only core/ and mac/; deploy.sh
+                                              #   covers the bundle by byte-comparing it
+                                              #   against the repo instead)
   ./check_tool_drift.py --surface bridge=/path/to/voice-bridge
                                               # fold an out-of-tree surface into the
                                               #   same comparison (the legacy bridge)

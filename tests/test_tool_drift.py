@@ -8,6 +8,8 @@ codes deploy.sh keys off: 0 converged · 1 drift · 2 blind checker · 3 kernel 
 They never touch the kernel: VOICE_TOOLS_MANIFEST_URL points at a file:// fixture.
 """
 
+import ast
+import importlib.util
 import json
 import os
 import pathlib
@@ -214,9 +216,42 @@ def test_real_repo_surfaces_converge(manifest_url):
     assert "surface mac:" in result.stdout and "inherits core" in result.stdout
 
 
+def _load_checker():
+    """Import check_tool_drift.py as a module (it guards its own __main__)."""
+    spec = importlib.util.spec_from_file_location("_check_tool_drift", CHECKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_no_hand_maintained_tool_name_list_came_back():
     """LOCAL_NAMES rotted silently: a new tool just fell into 'informational'. The
-    merged checker is keyed on surface symbols, never on tool names — keep it that way."""
-    source = CHECKER.read_text()
-    body = source.split('"""', 2)[2]          # skip the module docstring, which cites it
-    assert "LOCAL_NAMES" not in body
+    merged checker is keyed on surface symbols, never on tool names — keep it that way.
+
+    Greping for the old variable name would only stop the old variable name; the same
+    rot returns as SURFACE_LOCAL or KNOWN_TOOLS. So the forbidden words are derived from
+    the tools core actually ships: no module-level constant in the checker may mention
+    any of them, whatever it is called and whatever shape it takes.
+    """
+    real_tools = set(_load_checker().core_descriptor(REPO / "core").tools)
+    assert real_tools, "core ships no tools — this guard would be vacuous"
+
+    offenders = []
+    for node in ast.parse(CHECKER.read_text()).body:
+        if isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        else:
+            continue
+        if value is None:
+            continue
+        label = ", ".join(t.id for t in targets if isinstance(t, ast.Name)) or "<assign>"
+        named = {n.value for n in ast.walk(value)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)} & real_tools
+        if named:
+            offenders.append(f"check_tool_drift.py:{node.lineno} {label} = ... {sorted(named)}")
+    assert not offenders, (
+        "a module-level constant in the checker is keyed by tool name — that list has to "
+        "be edited every time a tool is added, and it rots silently:\n  "
+        + "\n  ".join(offenders))
