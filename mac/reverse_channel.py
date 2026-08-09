@@ -375,8 +375,24 @@ def _guard_shell_scope(channel: "ReverseChannel", args: dict) -> None:
 
 
 def _op_open_file(channel: "ReverseChannel", args: dict) -> str:
-    path = os.path.join(channel.root, os.path.expanduser(args["path"]))
-    result = subprocess.run(["/usr/bin/open", os.path.realpath(path)],
+    """Hand one in-scope file to LaunchServices.
+
+    NOT sandboxed, and it cannot be: `open` asks the window server to launch an app as
+    Robin, so a jail around it would contain the wrong process. Containment here is the
+    path check — which is therefore made TWICE, once in the guard and once on the
+    realpath this function is about to hand over. The gap between them is where a
+    symlink swapped after the guard would land, and staging (open_file always stages)
+    makes that gap as wide as a spoken confirmation.
+    """
+    target = os.path.realpath(
+        os.path.join(channel.root, os.path.expanduser(args["path"])))
+    if not _inside(target, channel.root):
+        # Journalled as the outcome of a call rather than raised: by here the action was
+        # confirmed, and "it was refused at the last moment" is a thing the record has
+        # to keep.
+        return (f"error: refused — {args['path']} resolves outside the workspace "
+                f"({channel.root}) at the moment of opening it")
+    result = subprocess.run(["/usr/bin/open", target],
                             capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         return f"error: {(result.stderr or '').strip() or 'open failed'}"

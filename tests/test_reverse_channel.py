@@ -417,6 +417,48 @@ def test_a_staged_command_will_not_run_if_the_sandbox_disappears(caller, workspa
     assert ("refused_scope_on_confirm", "run_shell") in journal_events()
 
 
+def test_a_path_that_becomes_a_symlink_after_the_gate_is_not_opened(caller, workspace,
+                                                                    outside, monkeypatch):
+    """open_file cannot be sandboxed — `open` launches an app as Robin, so a jail would
+    contain the wrong process. Its containment is the path check, so the path check runs
+    again on the realpath it is about to hand over, and the window that matters is the
+    one a confirmation holds open."""
+    launched = []
+    inside = os.path.join(workspace, "notes", "hello.md")
+    _status, staged = caller.op("open_file", {"path": "notes/hello.md"})
+    assert staged["status"] == "staged"
+
+    os.remove(inside)                                   # swap it while Robin is saying yes
+    os.symlink(str(outside / "secret.txt"), inside)
+
+    def fake_run(command, *args, **kwargs):
+        if command and command[0].endswith("/open"):
+            launched.append(command)
+        return _ok()
+
+    monkeypatch.setattr(rc.subprocess, "run", fake_run)
+    _status, payload = caller.confirm(staged["id"], "yes")
+    assert launched == [], "a symlink out of the workspace was opened"
+    assert "refused" in json.dumps(payload)
+
+
+def test_open_file_checks_the_path_again_at_the_moment_it_acts(caller, workspace,
+                                                                outside, monkeypatch):
+    """The guard's answer is stale by the time anything acts on it, so the function that
+    hands a path to LaunchServices asks the question itself rather than inheriting an
+    older yes."""
+    inside = os.path.join(workspace, "notes", "hello.md")
+    os.remove(inside)
+    os.symlink(str(outside / "secret.txt"), inside)
+
+    def never(*args, **kwargs):
+        raise AssertionError("open ran on a path outside the workspace")
+
+    monkeypatch.setattr(rc.subprocess, "run", never)
+    result = rc._op_open_file(caller.channel, {"path": "notes/hello.md"})
+    assert "refused" in result and "outside the workspace" in result
+
+
 def test_a_workspace_that_is_the_whole_disk_is_refused(caller, monkeypatch):
     config.set_("reverse_channel.workspace", "/")
     status, payload = caller.op("run_shell", {"command": "ls"})
