@@ -216,6 +216,108 @@ def test_real_repo_surfaces_converge(manifest_url):
     assert "surface mac:" in result.stdout and "inherits core" in result.stdout
 
 
+# ── capability profiles: the differences that are ALLOWED to exist ───────────
+# Two surfaces genuinely differ — there is no clipboard and no herdr on Thrivbe-1. The
+# checker has to tell that apart from two surfaces that drifted, and it does it the only
+# way that cannot rot: the difference is declared in core as data, and anything not in
+# the data is still drift.
+
+CORE_PROFILES = '''\
+_MAC_ONLY = ("gmail_send",)
+MAC_ONLY_TOOLS = frozenset(_MAC_ONLY)
+PROFILES = {
+    "mac": {"excluded_tools": frozenset()},
+    "server": {"excluded_tools": MAC_ONLY_TOOLS},
+}
+'''
+
+
+def build_profiled_tree(root, profiles=CORE_PROFILES, mac_profile='SURFACE_PROFILE = "mac"',
+                        server_profile='SURFACE_PROFILE = "server"', **kwargs):
+    """`build_tree` plus core's profile table and each surface's declaration."""
+    build_tree(root, **kwargs)
+    if profiles is not None:
+        (root / "core" / "capabilities.py").write_text(profiles)
+    for name, body in (("mac", mac_profile), ("server", server_profile)):
+        if body is not None:
+            (root / name / "profile.py").write_text(body + "\n")
+    return root
+
+
+def test_a_declared_exclusion_is_not_drift(tmp_path, manifest_url):
+    """The server not having gmail_send is a decision core wrote down, so it converges —
+    and the decision is PRINTED, because an intended difference has to be as visible as
+    an unintended one or "converged" stops meaning anything."""
+    root = build_profiled_tree(tmp_path / "tree")
+    result = run(root, manifest_url)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Surfaces converged: mac, server" in result.stdout
+    assert "server does not have (by profile): gmail_send" in result.stdout
+    assert "profile=server" in result.stdout
+
+
+def test_an_undeclared_absence_is_still_drift(tmp_path, manifest_url):
+    """The profile excuses exactly what it names and nothing else. Here the server also
+    drops kernel_decide — a tool it is supposed to have, and a gated one."""
+    root = build_profiled_tree(tmp_path / "tree", server='''\
+TOOLS = [
+    {"type": "function", "name": "kernel_status", "description": "kernel health",
+     "parameters": {"type": "object", "properties": {"detail": {"type": "string"}},
+                    "required": ["detail"]}},
+]
+''')
+    result = run(root, manifest_url)
+    assert result.returncode == 1, result.stdout + result.stderr
+    only_on_mac = [line for line in result.stdout.splitlines() if "only on mac" in line]
+    assert only_on_mac == ["DRIFT mac vs server: only on mac: kernel_decide"], only_on_mac
+
+
+def test_a_surface_with_no_profile_is_refused(tmp_path, manifest_url):
+    """Once core defines PROFILES, "which surface is this?" has an answer or the check
+    cannot do its job. An unclassified surface would be compared as if it offered
+    everything — the blind spot, restored."""
+    root = build_profiled_tree(tmp_path / "tree", server_profile=None)
+    result = run(root, manifest_url)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "declares no module-level SURFACE_PROFILE" in result.stderr
+
+
+def test_an_unknown_profile_name_is_refused(tmp_path, manifest_url):
+    """A typo that fell back to "excludes nothing" would report convergence for two
+    surfaces that ship different tools."""
+    root = build_profiled_tree(tmp_path / "tree",
+                               server_profile='SURFACE_PROFILE = "phone"')
+    result = run(root, manifest_url)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "not a profile core defines" in result.stderr
+
+
+def test_an_exclusion_naming_a_dead_tool_is_drift(tmp_path, manifest_url):
+    """Rename a Mac-only tool and its exclusion stops matching — so the renamed tool
+    reappears on the surface that cannot run it, silently. Catch the stale name instead."""
+    root = build_profiled_tree(tmp_path / "tree", profiles=CORE_PROFILES.replace(
+        '("gmail_send",)', '("send_sms",)'))
+    result = run(root, manifest_url)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "excludes tools core does not ship: send_sms" in result.stdout
+
+
+def test_the_real_surfaces_declare_different_profiles(manifest_url):
+    """The live tree: mac and server are on different profiles, and the ONLY tools the
+    server is missing are the ones core's profile removes."""
+    result = run(REPO, manifest_url)
+    assert "profile=mac" in result.stdout, result.stdout + result.stderr
+    assert "profile=server" in result.stdout
+    assert "server does not have (by profile):" in result.stdout
+    assert "Surfaces converged: mac, server" in result.stdout
+
+    from core import capabilities
+    line = next(l for l in result.stdout.splitlines()
+                if "server does not have (by profile):" in l)
+    absent = {name.strip() for name in line.split(":", 1)[1].split(",")}
+    assert absent == set(capabilities.MAC_ONLY_TOOLS)
+
+
 def _load_checker():
     """Import check_tool_drift.py as a module (it guards its own __main__)."""
     spec = importlib.util.spec_from_file_location("_check_tool_drift", CHECKER)

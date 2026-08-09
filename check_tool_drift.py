@@ -17,6 +17,16 @@ WHAT IT GUARDS
    re-declares one of those symbols it is compared, field by field, and any difference
    is drift.
 
+1b. **Declared capability differences.** Some differences are real and intended: there
+   is no clipboard and no herdr on Thrivbe-1, so those tools must be ABSENT from the
+   server's tool list rather than present and erroring. A surface says so by declaring
+   `SURFACE_PROFILE = "<name>"` at module level, naming a profile in `core`'s `PROFILES`
+   (core/capabilities.py). The exclusions in that profile are subtracted before the
+   comparison, and printed. So an intended difference is DATA this check reports, and
+   any difference that is not in the data is still drift. Once `core` defines `PROFILES`,
+   a surface that declares no profile is refused (exit 2) — an unclassified surface is
+   the blind spot this whole section exists to close.
+
 2. **The kernel manifest.** Each surface is still checked tool-by-tool against
    `GET /tools` on the voice API (:8790). The manifest's `highStakes` flags are what
    decide which tools need a spoken confirmation gate (`core/live_session.py`), so a
@@ -76,6 +86,10 @@ import urllib.request
 TOOLS_SYMBOL = "TOOLS"
 HIGH_STAKES_SYMBOL = "LOCAL_HIGH_STAKES"
 PROMPT_SYMBOLS = ("LIVE_SYSTEM", "SYSTEM_PROMPT")
+# core's table of capability profiles, and the name a surface picks out of it.
+PROFILES_SYMBOL = "PROFILES"
+PROFILE_SYMBOL = "SURFACE_PROFILE"
+EXCLUSIONS_FIELD = "excluded_tools"
 
 DEFAULT_SURFACES = ("mac", "server")
 DEFAULT_MANIFEST_URL = "http://127.0.0.1:8790/tools"
@@ -233,11 +247,15 @@ def normalize_tools(raw, where):
 class Descriptor:
     """What a surface exposes, and where each field came from."""
 
-    def __init__(self, tools, high_stakes, prompt, origin):
+    def __init__(self, tools, high_stakes, prompt, origin, profile=None,
+                 excluded=frozenset(), profiles=None):
         self.tools = tools
         self.high_stakes = frozenset(high_stakes)
         self.prompt = prompt
         self.origin = origin
+        self.profile = profile           # the capability profile this surface declared
+        self.excluded = frozenset(excluded)   # tools that profile removes, by design
+        self.profiles = profiles         # core only: the whole profile table
 
     def signature(self):
         payload = json.dumps(
@@ -255,16 +273,42 @@ def core_descriptor(core_dir):
     prompt, prompt_path = resolve_symbol(core_dir, PROMPT_SYMBOLS)
     if prompt is None:
         fail(f"no module-level {' / '.join(PROMPT_SYMBOLS)} in {core_dir}")
+    profiles, _profiles_path = resolve_symbol(core_dir, PROFILES_SYMBOL)
+    if profiles is not None and not isinstance(profiles, dict):
+        fail(f"{PROFILES_SYMBOL} in {core_dir} is not a table of profiles")
     return Descriptor(
         normalize_tools(tools_raw, tools_path),
         gated or frozenset(),
         prompt,
         {"tools": tools_path, "high_stakes": gated_path, "prompt": prompt_path},
+        profiles=profiles,
     )
 
 
+def profile_exclusions(name, directory, core):
+    """(profile name, excluded tools) for one surface.
+
+    A surface names a profile; the profile says which tools it does not have. Both
+    halves are refused rather than defaulted — a typo that fell back to "excludes
+    nothing" would report convergence for two surfaces that ship different tools.
+    """
+    declared, declared_path = resolve_symbol(directory, PROFILE_SYMBOL)
+    if core.profiles is None:
+        return declared, frozenset()
+    if declared is None:
+        fail(f"{os.path.basename(directory)} declares no module-level {PROFILE_SYMBOL}. "
+             f"core defines {PROFILES_SYMBOL}, so every surface has to say which one it "
+             f"runs — an unclassified surface is compared as if it offered everything, "
+             f"which is exactly the blind spot this check exists to close.")
+    if not isinstance(declared, str) or declared not in core.profiles:
+        fail(f"{declared_path} declares {PROFILE_SYMBOL} = {declared!r}, which is not a "
+             f"profile core defines ({', '.join(sorted(core.profiles))}).")
+    return declared, frozenset(core.profiles[declared].get(EXCLUSIONS_FIELD) or ())
+
+
 def surface_descriptor(name, directory, core):
-    """core's descriptor, with any field the surface redeclares for itself."""
+    """core's descriptor, with any field the surface redeclares for itself, and its
+    declared capability exclusions subtracted from the tool list."""
     tools_raw, tools_path = resolve_symbol(directory, TOOLS_SYMBOL)
     gated, gated_path = resolve_symbol(directory, HIGH_STAKES_SYMBOL)
     prompt, prompt_path = resolve_symbol(directory, PROMPT_SYMBOLS)
@@ -279,7 +323,25 @@ def surface_descriptor(name, directory, core):
         origin["prompt"] = prompt_path
     else:
         prompt = core.prompt
-    return Descriptor(tools, high_stakes, prompt, origin)
+    profile, excluded = profile_exclusions(name, directory, core)
+    tools = {tool: schema for tool, schema in tools.items() if tool not in excluded}
+    return Descriptor(tools, high_stakes, prompt, origin, profile=profile,
+                      excluded=excluded)
+
+
+def stale_exclusions(core):
+    """Profile exclusions naming a tool core no longer ships.
+
+    Dead data, and dangerous dead data: rename a Mac-only tool and its exclusion stops
+    matching, so the renamed tool silently reappears on the surface that cannot run it.
+    """
+    findings = []
+    for name, profile in sorted((core.profiles or {}).items()):
+        unknown = sorted(set(profile.get(EXCLUSIONS_FIELD) or ()) - set(core.tools))
+        if unknown:
+            findings.append(f"profile {name} excludes tools core does not ship: "
+                            + ", ".join(unknown))
+    return findings
 
 
 # --- comparison ---------------------------------------------------------------------
@@ -297,8 +359,10 @@ def _prompt_diff(left, right):
 def compare_descriptors(left_name, left, right_name, right):
     """Every way two surfaces can disagree, in the order a human wants to read them."""
     differences = []
-    only_left = sorted(set(left.tools) - set(right.tools))
-    only_right = sorted(set(right.tools) - set(left.tools))
+    # A tool missing from one side is drift UNLESS that side's profile says it is not
+    # there. Declared absence is a decision; undeclared absence is a divergence.
+    only_left = sorted(set(left.tools) - set(right.tools) - right.excluded)
+    only_right = sorted(set(right.tools) - set(left.tools) - left.excluded)
     if only_left:
         differences.append(f"only on {left_name}: {', '.join(only_left)}")
     if only_right:
@@ -444,13 +508,22 @@ def main(argv=None):
                if path != core.origin[field]}
         note = "inherits core" if len(inherited) == 3 else \
             "own: " + ", ".join(f"{f}={os.path.relpath(p, root)}" for f, p in sorted(own.items()))
+        profile = f", profile={descriptor.profile}" if descriptor.profile else ""
         print(f"surface {name}: {len(descriptor.tools)} tools, "
               f"{len(descriptor.high_stakes)} local high-stakes, sig={descriptor.signature()} "
-              f"({note})")
+              f"({note}{profile})")
+        if descriptor.excluded:
+            # Printed, not silent: the intended difference has to be as visible as an
+            # unintended one, or "converged" stops meaning anything.
+            print(f"  {name} does not have (by profile): "
+                  + ", ".join(sorted(descriptor.excluded)))
 
     # 1. Cross-surface FIRST: it needs no kernel, so a down tunnel can never turn a real
     #    divergence into a warning.
     drift = False
+    for finding in stale_exclusions(core):
+        print(f"DRIFT {finding}")
+        drift = True
     names = sorted(descriptors)
     for index, left in enumerate(names):
         for right in names[index + 1:]:
