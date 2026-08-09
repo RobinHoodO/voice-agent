@@ -12,6 +12,20 @@ import importlib
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_action_journal(monkeypatch, tmp_path_factory):
+    """No test ever appends to Robin's real `actions.jsonl`.
+
+    Autouse and unconditional: the journal is written from `core.live_session._do_tool`,
+    so ANY test that dispatches a tool would otherwise leave a line in the accountability
+    record of a machine nobody was operating. An audit trail with test noise in it is
+    not an audit trail.
+    """
+    target = tmp_path_factory.mktemp("audit") / "actions.jsonl"
+    monkeypatch.setenv("VOICE_AGENT_ACTIONS_LOG", str(target))
+    return target
+
+
 @pytest.fixture
 def tmp_app(monkeypatch, tmp_path):
     """Point config + memory storage at an isolated tmp dir. Yields the dir."""

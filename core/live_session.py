@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 
-from core import capabilities, caps, config, destructive
+from core import audit, capabilities, caps, config, destructive, privacy
 from core import kernel_tools
 from core.audio_core import AudioCoreMixin
 from core.backends import base as events
@@ -263,9 +263,28 @@ class LiveSession(AudioCoreMixin):
         # ponytail: a timer, not an endpointing model — tunable per mic via live.vad.
         self._vad_silence = float(vad.get("silence_sec", 1.5))
         self._cfg: dict = {}                          # snapshot of config for this session
+        # Has this conversation touched a tool that returns other people's data? Sticky
+        # for the whole session, never reset: once it is in the context window it is in
+        # every later turn's prompt too (core/privacy.py).
+        self._pii_touched: bool = False
         self._offered_tasks: queue.Queue = queue.Queue()
         self._offered_tids: set = set()
         self._offered_lock = threading.Lock()
+
+    def _journal(self, event: str, tool: str, args=None, result=None) -> None:
+        """One line in `actions.jsonl` for a tool call or a gate event, on EVERY
+        surface — the accountability record lives in core precisely so a new surface
+        cannot ship without it."""
+        audit.record(event, tool, args, result, surface=self.profile_name or "unknown",
+                     session=getattr(getattr(self, "_bridge", None), "session_key", "")
+                     or "", pii=privacy.touches_pii(tool))
+
+    @property
+    def pii_touched(self) -> bool:
+        """True once this conversation has read third-party personal data. Any relay
+        that picks a model for a follow-up call must pass this to
+        `privacy.require_no_train` (core/privacy.py)."""
+        return self._pii_touched
 
     @property
     def profile_name(self) -> str | None:
@@ -750,6 +769,7 @@ class LiveSession(AudioCoreMixin):
         self._pending_action = None
         if outcome != "confirmed":
             _log(f"{tool} confirmation dropped: {outcome}")
+            self._journal(outcome, tool, pending["args"], "not executed")
             return
         executor = self._surface_executors.get(tool) or HIGH_STAKES_EXECUTORS.get(tool)
         if executor is None:
@@ -757,9 +777,11 @@ class LiveSession(AudioCoreMixin):
             # doesn't implement). Say so rather than silently swallowing the yes.
             _log(f"{tool} confirmed but has no executor on this surface")
             config.activity(f"⚠️  {tool} confirmed but not executable here")
+            self._journal("confirmed_no_executor", tool, pending["args"], "not executed")
             return
         args = pending["args"]
         out = await self._loop.run_in_executor(None, executor, args)
+        self._journal("confirmed", tool, args, out)
         _log(f"{tool} confirmation executed: {args!r} -> {out}")
         config.activity(f"✅  {tool.replace('_', ' ')} confirmed: {out}")
         if self._ws:
@@ -928,6 +950,7 @@ class LiveSession(AudioCoreMixin):
             _log(f"loop guard: refused {name} — {repeats} identical calls in "
                  f"{int(TOOL_REPEAT_WINDOW_S)}s")
             config.activity(f"⛔  loop guard: {name.replace('_', ' ')} repeated {repeats}x — refused")
+            self._journal("refused_loop_guard", name, args, f"{repeats} identical calls")
             await self._refuse_guarded_call(
                 call_id,
                 f"LOOP GUARD: you have already called {name} with these exact arguments "
@@ -944,6 +967,7 @@ class LiveSession(AudioCoreMixin):
                  f"{int(TOOL_REPEAT_WINDOW_S)}s")
             config.activity(f"⛔  thrash guard: {name.replace('_', ' ')} rewrote the same item "
                             f"{thrash}x — refused")
+            self._journal("refused_thrash_guard", name, args, f"{thrash} writes to {target!r}")
             await self._refuse_guarded_call(
                 call_id,
                 f"THRASH GUARD: you have already changed '{target}' {thrash} times in the last "
@@ -1144,6 +1168,14 @@ class LiveSession(AudioCoreMixin):
             # to run_shell when the provider omits it). It goes through the SAME gate —
             # a hole here would be a shell that skips the gate by not naming itself.
             out = await self._shell_tool(args)
+        # One journal line per dispatched call, at the single point every branch passes
+        # through — a per-branch call would be a line someone forgets to add with the
+        # next tool. "staged" vs "call" is read off the gate, not guessed at.
+        staged = getattr(self, "_pending_action", None)
+        self._journal("staged" if staged and staged.get("tool") == name else "call",
+                      name, args, out)
+        if privacy.touches_pii(name):
+            self._pii_touched = True
         await self._backend.send_tool_result(call_id, out)
         await self._backend.trigger_response()
         self._awaiting_reply_since = self._loop.time()   # arm the stall watchdog
