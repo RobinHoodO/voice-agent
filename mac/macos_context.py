@@ -29,6 +29,24 @@ SCREENSHOT_DENY_TITLE = frozenset((
 ))
 
 
+def screenshot_denied(app: str, title: str, cursor_title: str = "") -> bool:
+    """True when the denylist above forbids capturing this app/window.
+
+    The POLICY is unchanged and still lives entirely in the two frozensets above —
+    this is the same expression `grab_window_screenshot` already evaluated inline,
+    given a name so the reverse channel can ask the question before it captures and
+    answer "refused: sensitive app" instead of the bare "" that means both "denied"
+    and "no Screen Recording permission". One predicate, two callers; a term added to
+    a denylist still lands in both by construction.
+    """
+    app_lower, title_lower = (app or "").lower(), (title or "").lower()
+    cursor_title_lower = str(cursor_title or "").lower()
+    return (any(term in app_lower for term in SCREENSHOT_DENY_APPS)
+            or any(term in title_lower for term in SCREENSHOT_DENY_TITLE)
+            or any(term in cursor_title_lower for term in SCREENSHOT_DENY_APPS)
+            or any(term in cursor_title_lower for term in SCREENSHOT_DENY_TITLE))
+
+
 def _log(msg: str) -> None:
     caps.log(f"macos_context: {msg}")
 
@@ -270,12 +288,7 @@ def grab_window_screenshot(max_dim=900, quality=45):
     except Exception:
         cursor_title = ""
 
-    app_lower, title_lower = app.lower(), title.lower()
-    cursor_title_lower = str(cursor_title).lower()
-    if (any(term in app_lower for term in SCREENSHOT_DENY_APPS) or
-            any(term in title_lower for term in SCREENSHOT_DENY_TITLE) or
-            any(term in cursor_title_lower for term in SCREENSHOT_DENY_APPS) or
-            any(term in cursor_title_lower for term in SCREENSHOT_DENY_TITLE)):
+    if screenshot_denied(app, title, cursor_title):
         _log("screenshot skipped: sensitive app/window")
         return ""
 

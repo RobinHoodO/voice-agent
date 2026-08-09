@@ -102,6 +102,22 @@ PROFILES = {
         "has_clipboard": False,
         "has_keychain": False,
     },
+    # The reverse channel (mac/reverse_channel.py): phone-Pam reaching INTO this Mac
+    # over the tailnet. Same machine as "mac", deliberately NOT the same profile —
+    # `mac` gets the free shell because Robin is sitting at the keyboard and can see
+    # what happens. Over the reverse channel he is somewhere else holding a phone, so
+    # a destructive command stages and waits for his spoken yes, exactly as on the
+    # server. The surface is otherwise a Mac: there IS a screen and a Keychain here.
+    "mac_reverse": {
+        "excluded_tools": frozenset(),
+        "shell_gate": SHELL_STAGE_DESTRUCTIVE,
+        "shell_host": "Robin's Mac",
+        "shell_binaries": ("/bin/zsh",),
+        "shell_rc": "~/.zshrc",
+        "has_screen_context": True,
+        "has_clipboard": True,
+        "has_keychain": True,
+    },
     # Nobody registered. Strictest of everything: full tool list (a superset only ever
     # costs a fail-soft error) but the staging gate on the shell (a missing gate costs
     # the filesystem).

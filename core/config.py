@@ -59,6 +59,11 @@ _ENV_FALLBACK = {
     "openai": ["OPENAI_API_KEY"],
     "VOICE_API_TOKEN": ["VOICE_API_TOKEN"],
     "notion": ["NOTION_KEY"],          # direct Notion REST (services.py)
+    # The reverse channel's shared token (mac/reverse_channel.py). Listed here for two
+    # reasons: the env fallback keeps dev working without a Keychain write, and being
+    # in this table is what puts it in `_SECRET_ENV_VARS` — so a command the reverse
+    # channel itself runs cannot read the token that authorised it.
+    "reverse_channel_token": ["VOICE_AGENT_REVERSE_TOKEN"],
     "front": ["FRONT_API_TOKEN"],      # Front scripts read it themselves; listed here so
                                        # it's scrubbed from the agentic shell's env too
 }
@@ -129,7 +134,29 @@ DEFAULTS = {
     },
     "ui": {"show_terminal": False},        # open a Terminal tailing the log during live mode
     "system": {"open_at_login": False},
+    # The reverse channel: phone-Pam acting ON this Mac (mac/reverse_channel.py).
+    # OFF, and it stays off until Robin turns it on — this is the widest attack
+    # surface in the build, and a default-on remote executor on a laptop is not a
+    # feature, it is a finding. Nothing listens while `enabled` is false.
+    "reverse_channel": {
+        "enabled": False,
+        "port": 8791,
+        # Which tailnet address to bind. None = whichever one Tailscale reports.
+        # Pinning may only NARROW the choice: a non-tailnet value is refused, it is
+        # never honoured (mac/reverse_channel.resolve_bind_host).
+        "bind": None,
+        # Where run_shell and open_file are allowed to act. None = ~/Thrivbe-AI.
+        # A path outside this root is refused before the gate is even consulted.
+        "workspace": None,
+        "shell_timeout": 20,
+    },
 }
+
+# The default root for the reverse channel when `reverse_channel.workspace` is unset.
+# Not `live.workspace`: that one is a CONTEXT hint the agent starts its shell in and
+# is routinely None (meaning $HOME). A remote executor whose scope silently means
+# "the whole home folder" is not scoped at all.
+REVERSE_CHANNEL_DEFAULT_WORKSPACE = "~/Thrivbe-AI"
 
 
 def ensure_dirs() -> None:
