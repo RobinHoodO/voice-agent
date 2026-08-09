@@ -14,13 +14,12 @@ import asyncio
 import json
 import os
 import queue
-import re
 import subprocess
 import threading
 import time
 import uuid
 
-from core import audit, capabilities, caps, config, destructive, privacy
+from core import audit, capabilities, caps, config, confirm_gate, destructive, privacy
 from core import kernel_tools
 from core.audio_core import AudioCoreMixin
 from core.backends import base as events
@@ -52,7 +51,20 @@ def _log(msg: str) -> None:
     caps.log(msg)
 
 
-PENDING_ACTION_TTL_SECONDS = 120
+# The staged-confirm gate moved to `core/confirm_gate.py` when a second surface (the
+# reverse channel, mac/reverse_channel.py) had to clear the SAME bar. These names are
+# re-exported rather than re-implemented — one gate, imported twice.
+PENDING_ACTION_TTL_SECONDS = confirm_gate.PENDING_ACTION_TTL_SECONDS
+DENY_RE = confirm_gate.DENY_RE
+AFFIRM_PHRASES_NORMAL = confirm_gate.AFFIRM_PHRASES_NORMAL
+AFFIRM_PHRASES_STRICT = confirm_gate.AFFIRM_PHRASES_STRICT
+AFFIRM_PHRASES = confirm_gate.AFFIRM_PHRASES
+AFFIRM_MAX_WORDS = confirm_gate.AFFIRM_MAX_WORDS
+_affirm_words = confirm_gate.affirm_words
+_is_short_affirm = confirm_gate.is_short_affirm
+_is_short_deny = confirm_gate.is_short_deny
+_confirmation_preview = confirm_gate.confirmation_preview
+_pending_confirmation_outcome = confirm_gate.pending_confirmation_outcome
 
 # Loop guard. On 2026-08-04 the model fired `focus` + `semsearch_query` with byte-identical
 # arguments 16 times in 21 seconds — 21 silent seconds to Robin, and enough session churn
@@ -70,131 +82,6 @@ TOOL_TARGET_LIMIT = 3
 # The refusal path was the loop's fuel. So: the FIRST refusal gets a spoken response;
 # further refusals inside the cooldown send the result silently and let the turn die.
 GUARD_RETRIGGER_COOLDOWN_S = 20.0
-DENY_RE = re.compile(r"\b(no|nope|cancel|reject|rejected|stop|abort|don't|nei)\b", re.IGNORECASE)
-
-# --- what counts as a spoken YES -----------------------------------------------------
-# This used to be "<=4 words AND an affirm word appears somewhere", which is a
-# CONTAINMENT test, and containment is far too generous for a sentence that deletes a
-# filesystem. "did you approve that?", "yes but wait", "approved yesterday" and
-# "confirm what exactly" all contain an affirm word and none of them is consent.
-#
-# So the test is now an ALLOWLIST of complete affirmations, plus three explicit
-# disqualifiers (question / hedge / interrogative opener) kept separate so each one is
-# nameable in a test and readable in review. Anything not on the list is not a yes —
-# a missed "yes" costs Robin one repeated word; a false "yes" costs a server.
-#
-# Which list applies is `capabilities.confirm_strictness(tool)` — data, next to PROFILES.
-
-# Courtesy words that neither add nor remove consent. Stripped from either end before
-# the phrase is matched, so "yes please" and "ok, do it now" reduce to "yes"/"do it".
-_AFFIRM_COURTESY = frozenset({"now", "then", "ok", "okay", "sir", "pam", "and", "så"})
-
-# "please" is courtesy at the END of an affirmation ("yes please") and a REQUEST at the
-# start of one. "please confirm" is Robin asking Pam to confirm, not Robin confirming —
-# it used to clear the normal bar because "please" was stripped as courtesy and
-# "confirm" is a complete affirmation. A leading request marker is now a disqualifier,
-# in the same place as the interrogative openers and for the same reason.
-_AFFIRM_COURTESY_TRAILING = _AFFIRM_COURTESY | {"please", "takk"}
-_REQUEST_OPENERS = frozenset({"please", "kindly", "vennligst"})
-
-# A question is a request for information, never an instruction. Both the punctuation
-# and the opener are checked: transcripts frequently drop the "?".
-# ("do" is deliberately absent: "do it" is the affirmation itself. "do you think…" is
-#  rejected by the phrase allowlist below, which is the fail-closed half of this pair.)
-_INTERROGATIVE = frozenset({
-    "did", "does", "is", "are", "was", "were", "why", "what", "when", "where",
-    "how", "should", "shall", "can", "could", "would", "will", "who", "which",
-    "har", "hva", "hvorfor", "når", "skal", "kan",
-})
-
-# A hedge or continuation means he has not finished deciding. "yes but", "yes — wait",
-# "ja, men vent" are all mid-thought, and mid-thought is not consent.
-_HEDGE = frozenset({
-    "but", "wait", "hold", "hang", "actually", "though", "if", "unless", "maybe",
-    "perhaps", "first", "before", "after", "later", "men", "vent", "kanskje",
-})
-
-# The complete affirmations. Normal bar: recoverable actions (an email, a kernel
-# decision). Every entry is a whole utterance, not a substring.
-AFFIRM_PHRASES_NORMAL = frozenset({
-    "yes", "yeah", "yep", "yup", "yes yes", "yes yeah",
-    "yes do it", "yes go ahead", "yes send it", "yes confirm", "yes confirmed",
-    "yes proceed", "yes approved",
-    "confirm", "confirmed", "confirm it", "confirm that", "i confirm",
-    "approve", "approved", "approve it", "approve that", "i approve",
-    "go", "go ahead", "go for it", "do it", "do that", "send it", "send that",
-    "proceed", "proceed with it",
-    "ja", "ja da", "ja gjør det", "gjør det", "gjor det",
-    "kjør", "kjor", "kjør det", "kjor det", "ja kjør", "ja kjor", "ja kjør det",
-})
-
-# Strict bar: irreversible actions, currently `run_shell`. Narrower vocabulary — the
-# weak affirmations ("confirm", "approved", "proceed") are the ones that show up inside
-# questions and recollections, so they do not carry a delete. At most three words.
-AFFIRM_PHRASES_STRICT = frozenset({
-    "yes", "yeah", "yep", "yup", "yes do it", "yes go ahead",
-    "go", "go ahead", "do it",
-    "ja", "kjør", "kjor", "kjør det", "kjor det", "ja kjør", "ja kjor",
-})
-
-AFFIRM_PHRASES = {
-    capabilities.AFFIRM_NORMAL: AFFIRM_PHRASES_NORMAL,
-    capabilities.AFFIRM_STRICT: AFFIRM_PHRASES_STRICT,
-}
-
-# Word budget per bar, on the RAW utterance (before courtesy words are dropped).
-AFFIRM_MAX_WORDS = {
-    capabilities.AFFIRM_NORMAL: 4,
-    capabilities.AFFIRM_STRICT: 3,
-}
-
-_WORD_RE = re.compile(r"[^\w'’-]+", re.UNICODE)
-
-
-def _affirm_words(text: str) -> list:
-    """Lowercased words, punctuation stripped. `_WORD_RE` splits on anything that is not
-    a word character, so "yes, kjør — det" becomes ['yes', 'kjør', 'det']."""
-    return [w for w in _WORD_RE.split((text or "").lower().strip()) if w]
-
-
-def _is_short_affirm(text: str, strictness: str = capabilities.DEFAULT_CONFIRM_STRICTNESS) -> bool:
-    """True only for a complete, unhedged, non-interrogative affirmation.
-
-    Fail closed in every direction: an utterance that is a question, carries a hedge,
-    opens with an interrogative, runs long, or simply is not on the list for this
-    strictness is NOT consent.
-    """
-    raw = (text or "")
-    words = _affirm_words(raw)
-    if not words:
-        return False
-    if "?" in raw:                                   # (a) it is a question
-        return False
-    if words[0] in _INTERROGATIVE:                   # (a) …even without the "?"
-        return False
-    if words[0] in _REQUEST_OPENERS:                 # (a') "please confirm" is a request
-        return False
-    if any(w in _HEDGE for w in words):              # (c) hedge / continuation
-        return False
-    trimmed = list(words)
-    while trimmed and trimmed[0] in _AFFIRM_COURTESY:
-        trimmed.pop(0)
-    while trimmed and trimmed[-1] in _AFFIRM_COURTESY_TRAILING:
-        trimmed.pop()
-    if not trimmed:
-        return False
-    # The budget is applied AFTER the courtesy words are dropped, so "ok, do it now"
-    # costs the same as "do it". It is a cheap early exit; the allowlist below is the
-    # actual gate (no phrase on either list is longer than three words anyway).
-    if len(trimmed) > AFFIRM_MAX_WORDS.get(strictness, 3):
-        return False
-    phrases = AFFIRM_PHRASES.get(strictness, AFFIRM_PHRASES_STRICT)
-    # (b) the affirmation IS the utterance — it does not merely appear inside one.
-    return " ".join(trimmed) in phrases
-
-
-def _is_short_deny(text: str) -> bool:
-    return len(text.strip().split()) <= 4 and bool(DENY_RE.search(text))
 
 
 # What a confirmed high-stakes tool actually runs. A gated tool with no entry here is
@@ -205,28 +92,6 @@ HIGH_STAKES_EXECUTORS = {
     "kernel_decide": lambda args: kernel_tools.kernel_decide(args),
     "close_finished_tasks": lambda args: close_finished_tasks(args, confirmed=True),
 }
-
-
-def _confirmation_preview(tool: str, args: dict, host: str = "this machine") -> str:
-    """The sentence the model reads back before Robin says yes. Specific beats generic —
-    'send an email to X' is checkable by ear; 'run gmail_send' is not."""
-    if tool == "run_shell":
-        # Dashes, not "it {reason}": the reasons are a mix of verb phrases ("deletes
-        # files") and clauses ("systemctl restart is not a read"), and this sentence is
-        # SPOKEN — one connector has to carry both without turning into word salad.
-        command = (args.get("command") or "").strip()
-        return (f"about to run this on {host} — {destructive.classify(command).reason} "
-                f"— the command is: {command}")
-    if tool == "gmail_send":
-        return (f"about to send an email to {args.get('to')} "
-                f"with subject '{args.get('subject')}'")
-    if tool == "kernel_decide":
-        return (f"about to record decision {args.get('decision')} for approval "
-                f"{args.get('approvalId', args.get('approval_id'))}")
-    if tool == "close_finished_tasks":
-        return f"about to close the foreign pane '{args.get('task_name')}'"
-    known = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3]) or "no arguments"
-    return f"about to run {tool.replace('_', ' ')} with {known}"
 
 
 def _tool_repeat_count(recent: list, name: str, args: dict, now: float) -> int:
@@ -291,22 +156,6 @@ def _idle_reason(now: float, last_speech: float, session_start: float,
     return None
 
 
-def _pending_confirmation_outcome(pending: dict, transcript: str, now: float | None = None) -> str:
-    """Return the deterministic disposition for a staged action.
-
-    The affirmation bar depends on WHAT is staged — `capabilities.confirm_strictness`
-    — so an irreversible `run_shell` needs a plainer yes than a recoverable email.
-    DENY still beats AFFIRM, and the TTL still beats both."""
-    now = time.time() if now is None else now
-    if now - pending["ts"] >= PENDING_ACTION_TTL_SECONDS:
-        return "expired"
-    if _is_short_deny(transcript):
-        return "denied"
-    if _is_short_affirm(transcript, capabilities.confirm_strictness(pending.get("tool"))):
-        return "confirmed"
-    return "dropped"
-
-
 class LiveSession(AudioCoreMixin):
     """One live Realtime conversation. start()/stop() are called from the main
     (rumps) thread; everything else runs on the session's own asyncio thread.
@@ -344,7 +193,11 @@ class LiveSession(AudioCoreMixin):
         self._speaking = False
         self._shell: Shell | None = None             # persistent zsh for this session
         self._fn_names: dict = {}                     # call_id -> tool name (from output_item.added)
-        self._pending_action: dict | None = None      # the one staged high-stakes action
+        # The one staged high-stakes action. The slot and its rules live in
+        # `core.confirm_gate` because the reverse channel (mac/reverse_channel.py) has
+        # to clear the same bar; `_pending_action` below is a view onto this object, so
+        # everything that already reads it keeps working.
+        self._gate = confirm_gate.PendingSlot()
         # Executors that need THIS session (the persistent shell), consulted before the
         # module-level HIGH_STAKES_EXECUTORS so monkeypatching that dict still works.
         self._surface_executors = {
@@ -411,8 +264,9 @@ class LiveSession(AudioCoreMixin):
         An EXPIRED pending action is not live — it is dropped (and journalled) so a
         forgotten stage cannot block the gate for the rest of the TTL.
         """
-        busy = getattr(self, "_pending_action", None)
-        if busy and time.time() - busy["ts"] < PENDING_ACTION_TTL_SECONDS:
+        result = self._gate.stage(tool, args)
+        if result.status == confirm_gate.REFUSED:
+            busy = result.pending
             self._stage_refused = True
             preview = _confirmation_preview(busy["tool"], busy["args"],
                                             capabilities.shell_host(self.profile_name))
@@ -424,10 +278,10 @@ class LiveSession(AudioCoreMixin):
                     f"out loud before anything else can be staged. Ask the user about "
                     f"THAT action, in those words, and do not call this tool again until "
                     f"he has answered it.")
-        if busy:
-            _log(f"{busy['tool']} confirmation dropped: expired (before staging {tool})")
-            self._journal("expired", busy["tool"], busy["args"], "not executed")
-        self._pending_action = {"tool": tool, "args": args, "ts": time.time()}
+        if result.displaced:
+            expired = result.displaced
+            _log(f"{expired['tool']} confirmation dropped: expired (before staging {tool})")
+            self._journal("expired", expired["tool"], expired["args"], "not executed")
         _log(f"{tool} staged for confirmation: {args!r}")
         config.activity(f"⏸  {tool.replace('_', ' ')} awaiting confirmation")
         return ask
@@ -448,6 +302,20 @@ class LiveSession(AudioCoreMixin):
         audit.record(event, tool, args, result, surface=self.profile_name or "unknown",
                      session=getattr(getattr(self, "_bridge", None), "session_key", "")
                      or "", pii=privacy.touches_pii(tool))
+
+    @property
+    def _pending_action(self) -> dict | None:
+        """The staged action, read straight off the shared gate.
+
+        A view, not a copy: the slot itself is `core.confirm_gate.PendingSlot`, so the
+        Mac session and the reverse channel cannot drift into two different notions of
+        "one action at a time".
+        """
+        return self._gate.current
+
+    @_pending_action.setter
+    def _pending_action(self, value: dict | None) -> None:
+        self._gate.current = value
 
     @property
     def pii_touched(self) -> bool:
@@ -931,12 +799,10 @@ class LiveSession(AudioCoreMixin):
         """Execute (or drop) the one staged high-stakes action, per the deterministic
         spoken gate. Which tools land here is data — see self._high_stakes — but the
         gate machinery itself (TTL, affirm/deny regex) is unchanged and deliberate."""
-        pending = getattr(self, "_pending_action", None)
-        if not pending:
+        outcome, pending = self._gate.resolve(transcript)
+        if pending is None:
             return
         tool = pending["tool"]
-        outcome = _pending_confirmation_outcome(pending, transcript)
-        self._pending_action = None
         if outcome != "confirmed":
             _log(f"{tool} confirmation dropped: {outcome}")
             self._journal(outcome, tool, pending["args"], "not executed")
