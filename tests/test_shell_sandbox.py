@@ -109,6 +109,26 @@ def test_the_system_is_readable_enough_to_be_a_shell(jail):
 
 
 @needs_sandbox
+def test_the_edge_of_the_jail_is_metadata_and_it_is_deliberate(jail):
+    """The one thing that does leak, named so it is a decision and not a surprise.
+
+    `file-read-metadata` is allowed globally because /usr/bin/git and /usr/bin/python3
+    are xcrun stubs that die without readlink on /var/select. So a jailed command can
+    learn that a file outside the workspace EXISTS and how big it is. It cannot read a
+    byte of it, and it cannot list the directory it is in — listing reads a directory's
+    data, and that is denied like any other content.
+    """
+    root, outside = jail
+    _code, listed = run_jailed(root, "ls $HOME", home=outside)
+    assert "secret.txt" not in listed, "a directory outside the root was listed"
+    assert "not permitted" in listed.lower()
+    _code, size = run_jailed(root, "stat -f %z $HOME/secret.txt", home=outside)
+    assert size.strip().isdigit(), "the documented metadata leak stopped being true"
+    _code, body = run_jailed(root, "cat $HOME/secret.txt", home=outside)
+    assert CANARY not in body
+
+
+@needs_sandbox
 def test_the_network_is_closed_unless_it_is_switched_on(jail):
     """Not a containment claim about files — a claim about where the workspace's
     contents can be sent. Off by default, and the profile is what says so."""
