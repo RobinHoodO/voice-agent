@@ -6,17 +6,26 @@
 #   ./deploy.sh server           ship the headless surface to Thrivbe-1 only
 #   ./deploy.sh --dry-run        print exactly what would happen, change nothing
 #   ./deploy.sh --ref <sha|tag|stable>   deploy a specific ref to the server
+#   ./deploy.sh --ref=<sha>              same thing, = form
 #
 # FORCE=1 skips the live-session guard (see live_session_guard.sh).
 #
 # WHAT IT DOES
 #
-#   gate    check_tool_drift.py via drift_gate.sh — refuses when the Mac and the server
-#           surfaces expose different tools/prompts/high-stakes sets, or when either has
-#           drifted from the kernel manifest. Runs BEFORE either leg, so a divergent
-#           pair cannot reach even one machine.
-#   mac     live_session_guard.sh → reload_app.sh (quit → build_app.sh → relaunch) →
-#           then proves the edit actually landed by diffing every core/ and mac/ .py
+#   gates   everything that can refuse runs BEFORE either leg touches anything:
+#             1. check_tool_drift.py via drift_gate.sh — refuses when the Mac and the
+#                server surfaces expose different tools/prompts/high-stakes sets, or
+#                when either has drifted from the kernel manifest.
+#             2. live_session_guard.sh — not mid-conversation (mac leg only).
+#             3. the server preconditions (dirty tree, 'origin' remote, and — unless
+#                DEPLOY_PROBE=0 — that Thrivbe-1 is actually ready), but only when a
+#                server leg was asked for, so `deploy.sh mac` costs no ssh round-trip.
+#           A gate that fires halfway through is not a gate: it would leave the Mac
+#           rebuilt and the server on the old commit, which is the divergence this
+#           script exists to prevent. Robin's normal mid-edit state is a dirty tree, so
+#           that refusal in particular has to come before build_app.sh, not after.
+#   mac     reload_app.sh (quit → build_app.sh → relaunch) → then proves the edit
+#           actually landed by diffing every core/ and mac/ .py
 #           against the copy inside Thrivbe Voice.app. Editing the source dir alone
 #           changes nothing; a build that silently skipped a file is a deploy that lied.
 #   server  the house way, not scp: commit → push to GitHub → /opt/thrivbe-ops/deploy.sh
@@ -26,7 +35,8 @@
 #
 # EXIT CODES
 #   0  everything asked for succeeded
-#   1  refused (drift, live session, dirty tree, missing precondition) or a leg failed
+#   1  refused (drift, live session, dirty tree, bad --ref, missing precondition) or a
+#      leg failed
 #
 # The drift checker's own contract is preserved verbatim: 1 and 2 block, 3 (kernel
 # tunnel down) warns and continues. See drift_gate.sh.
@@ -49,36 +59,57 @@ TARGET="all"
 DRY=0
 REF=""
 
-for arg in "$@"; do
-  case "$arg" in
-    all|mac|server) TARGET="$arg" ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    all|mac|server) TARGET="$1" ;;
     --dry-run|-n)   DRY=1 ;;
-    --ref=*)        REF="${arg#--ref=}" ;;
-    -h|--help)      sed -n '2,30p' "$0"; exit 0 ;;
-    *) echo "deploy.sh: unknown argument '$arg' (try --help)" >&2; exit 1 ;;
+    --ref)          shift
+                    [ $# -gt 0 ] || { echo "deploy.sh: --ref needs a value" >&2; exit 1; }
+                    REF="$1" ;;
+    --ref=*)        REF="${1#--ref=}" ;;
+    -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
+    *) echo "deploy.sh: unknown argument '$1' (try --help)" >&2; exit 1 ;;
   esac
+  shift
 done
 
-say()  { printf '\n=== %s\n' "$*"; }
-would() { if [ "$DRY" = "1" ]; then printf 'DRY RUN would: %s\n' "$*"; else printf '+ %s\n' "$*"; fi; }
-run()  { would "$*"; [ "$DRY" = "1" ] || eval "$@"; }
+# A ref reaches a remote shell, and it is also the thing that makes "the server runs the
+# commit I just built" true. Anything that is not plausibly a git ref is refused rather
+# than quoted-and-hoped: a ref that survives quoting but is not the ref you typed still
+# breaks the pinning guarantee.
+if [ -n "$REF" ] && ! [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  echo "REFUSED: --ref '$REF' is not a git ref (allowed: letters, digits, . _ / -)." >&2
+  exit 1
+fi
 
-# ---------------------------------------------------------------------------------
-# Gate — both legs, one policy. Read-only, so it runs for real even in a dry run:
-# a dry run that skipped the gate would tell you nothing about whether you may deploy.
-# ---------------------------------------------------------------------------------
-say "drift gate (both surfaces + kernel manifest)"
-"$ROOT/drift_gate.sh" || exit 1
+say()  { printf '\n=== %s\n' "$*"; }
+
+# Readable, faithful rendering of an argv — used for both the dry-run transcript and the
+# '+ ' echo. Nothing here is ever fed back to a shell; run() passes argv through verbatim.
+shellquote() {
+  local out='' arg
+  for arg in "$@"; do
+    if [[ "$arg" =~ ^[A-Za-z0-9._/=:@-]+$ ]]; then
+      out+="$arg "
+    else
+      out+="'${arg//\'/\'\\\'\'}' "
+    fi
+  done
+  printf '%s' "${out% }"
+}
+would() { if [ "$DRY" = "1" ]; then printf 'DRY RUN would: %s\n' "$*"; else printf '+ %s\n' "$*"; fi; }
+# No eval. argv in, argv out — an operator-supplied value can never become shell syntax.
+run()  { would "$(shellquote "$@")"; [ "$DRY" = "1" ] || "$@"; }
 
 # ---------------------------------------------------------------------------------
 # Mac surface
 # ---------------------------------------------------------------------------------
+# The live-session guard is a GATE (see below), not a step in here: reload_app.sh asks it
+# again at the moment it actually quits the app, but `deploy.sh` has to refuse before it
+# has done anything on either surface.
 deploy_mac() {
   say "mac surface — Thrivbe Voice.app"
-  # Asked here as well as inside reload_app.sh so that `deploy.sh` (which may go on to
-  # push to GitHub) refuses before it does anything, not halfway through.
-  "$ROOT/live_session_guard.sh" || exit 1
-  run "'$ROOT/reload_app.sh'"
+  run "$ROOT/reload_app.sh"
 
   if [ "$DRY" = "1" ]; then
     echo "DRY RUN would: verify every core/ and mac/ .py in the repo matches the bundle"
@@ -107,8 +138,14 @@ deploy_mac() {
 
 # ---------------------------------------------------------------------------------
 # Server surface — push to GitHub, then the house deploy script on Thrivbe-1.
+#
+# Both preconditions run as GATES, before any leg — see the gate section below. The
+# dirty-tree refusal in particular is worthless as a step inside deploy_server(): by the
+# time `deploy.sh` (target `all`) reached it, the Mac had already been quit, rebuilt and
+# relaunched on code the server was about to refuse to take.
 # ---------------------------------------------------------------------------------
-server_preconditions() {
+server_precheck() {
+  # Pure and local: no ssh, no network, costs nothing.
   if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
     echo "REFUSED: uncommitted changes. The Mac deploys from the working tree and the" >&2
     echo "         server deploys from git — shipping now would put different code on" >&2
@@ -120,6 +157,10 @@ server_preconditions() {
     echo "REFUSED: no 'origin' remote — the house deploy pulls from GitHub." >&2
     exit 1
   fi
+}
+
+server_probe() {
+  # Costs one ssh round-trip, so it only runs when a server leg was actually asked for.
   [ "${DEPLOY_PROBE:-1}" = "1" ] || return 0
   command -v fleet >/dev/null 2>&1 || {
     echo "REFUSED: the 'fleet' CLI is not on PATH; server ops go through it." >&2; exit 1; }
@@ -141,7 +182,6 @@ server_preconditions() {
 
 deploy_server() {
   say "server surface — Thrivbe-1 ($SERVER_PROJECT)"
-  server_preconditions
   local branch sha ref
   branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
   sha="$(git -C "$ROOT" rev-parse HEAD)"
@@ -149,10 +189,31 @@ deploy_server() {
   # Push the branch so the SHA is fetchable, then deploy that exact SHA rather than
   # whatever main happens to be. The house script's default channel is main; pinning the
   # SHA is what makes "the server runs the commit I just built on the Mac" true.
-  run "git -C '$ROOT' push origin '$branch'"
-  run "fleet run $SERVER '$OPS_DEPLOY $SERVER_PROJECT $ref'"
+  run git -C "$ROOT" push origin "$branch"
+  run fleet run "$SERVER" "$OPS_DEPLOY $SERVER_PROJECT $ref"
   echo "server surface: $SERVER_PROJECT @ ${ref:0:12} (branch $branch)"
 }
+
+# ---------------------------------------------------------------------------------
+# Gates — every refusal, before every leg. Read-only, so they run for real even in a
+# dry run: a dry run that skipped the gates would tell you nothing about whether you
+# may deploy.
+# ---------------------------------------------------------------------------------
+say "drift gate (both surfaces + kernel manifest)"
+"$ROOT/drift_gate.sh" || exit 1
+
+case "$TARGET" in
+  all|mac) "$ROOT/live_session_guard.sh" || exit 1 ;;
+esac
+
+case "$TARGET" in
+  all|server)
+    say "server preconditions"
+    server_precheck
+    server_probe
+    echo "server preconditions ok: clean tree, 'origin' present"
+    ;;
+esac
 
 case "$TARGET" in
   mac)    deploy_mac ;;
