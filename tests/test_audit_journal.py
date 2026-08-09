@@ -84,6 +84,64 @@ def test_redaction_reaches_nested_arguments():
     assert nested["body"].startswith("<redacted")
 
 
+def test_the_result_does_not_re_leak_what_the_args_redacted():
+    """The masking in `args` is cosmetic if the same value is spelled out in `result`.
+
+    A staged action's result IS the confirmation sentence, and that sentence
+    interpolates the arguments — so the recipient was masked in one field of the line
+    and printed in the next. Same line, same value, one of them readable.
+    """
+    audit.record("staged", "gmail_send",
+                 {"to": "anna@example.com", "subject": "Q3 layoffs",
+                  "body": "the whole memo"},
+                 "CONFIRMATION REQUIRED: about to send an email to anna@example.com "
+                 "with subject 'Q3 layoffs'. Ask the user to confirm out loud.")
+    line = entries()[-1]
+    blob = json.dumps(line)
+    assert "anna@example.com" not in blob
+    assert "the whole memo" not in blob
+    # …and the line is still readable as a record: the tail identifies the recipient.
+    assert "************.com" in line["result"]
+    assert "CONFIRMATION REQUIRED" in line["result"]
+
+
+def test_the_scrub_runs_before_truncation():
+    """Truncation is not redaction. A recipient sitting past the 300th character of a
+    long preview would survive a scrub applied to the truncated text."""
+    audit.record("staged", "gmail_send",
+                 {"to": "anna@example.com"},
+                 "x" * (audit.RESULT_CHARS - 5) + " anna@example.com")
+    assert "anna@example.com" not in json.dumps(entries()[-1])
+
+
+def test_the_scrub_reaches_nested_and_long_values_only():
+    """It masks what `redact` masked — nested args included — and does not chew up a
+    result over a one-character argument."""
+    assert "secret words" not in audit.scrub(
+        "the note said secret words", {"draft": {"body": "secret words"}})
+    assert audit.scrub("a b c", {"to": "b"}) == "a b c"
+
+
+def test_a_refusal_does_not_journal_the_other_actions_arguments(monkeypatch):
+    """The gate-busy refusal SPEAKS a preview of the action holding the gate. That
+    sentence carries the other tool's recipient into a record whose own `args` are a
+    shell command — where this module's redaction cannot see it."""
+    session = make_session("server", monkeypatch)
+    monkeypatch.setattr(live_session.services, "gmail_send", lambda args: "sent")
+
+    async def scenario(s):
+        await s._do_tool({"call_id": "c1", "name": "gmail_send",
+                          "arguments": json.dumps({"to": "anna@example.com",
+                                                   "subject": "Q3", "body": "b"})})
+        s._ws.sent.clear()
+        await call_shell(s, "rm -rf /opt/a")     # refused: the gate is occupied
+
+    run(lambda: (session, scenario))
+    refusal = [e for e in entries() if e["event"] == "refused_gate_busy"][-1]
+    assert "anna@example.com" not in json.dumps(refusal)
+    assert "gmail_send" in refusal["result"]     # it still says WHAT held the gate
+
+
 def test_a_long_result_is_truncated_not_stored_whole():
     audit.record("call", "run_shell", {"command": "ls"}, "x" * 5000)
     assert len(entries()[-1]["result"]) <= audit.RESULT_CHARS

@@ -22,6 +22,16 @@ recorded as a length, never content. `REDACT_TAIL` are identifiers you need to
 recognise but not to read (an address, a phone number) — last four characters only.
 Redaction is recursive, because args nest.
 
+THE RESULT IS REDACTED THROUGH THE SAME PATH. It has to be: the result of a STAGED
+action is the confirmation sentence that was read out loud, and that sentence
+interpolates the very arguments the `args` redaction just masked ("about to send an
+email to anna@example.com…"). A blind review found exactly this on 2026-08-09 — the
+recipient was masked in `args` and printed in full in `result`, which made the masking
+cosmetic. So every value that was redacted out of `args` is masked out of the result
+text as well, by the same replacement it got in `args`, before truncation. It is not a
+pattern matcher and does not try to be: it removes the strings this record itself
+decided were not for reading.
+
 WHAT IS *NOT* REDACTED, stated plainly because it is a deliberate choice and not an
 oversight: redaction is a key-name ALLOWLIST, so anything whose key is not in the two
 sets above is written verbatim. Two consequences worth knowing before you read this
@@ -102,6 +112,47 @@ def redact(args):
     return args
 
 
+# Below this length a "sensitive" value is not worth substituting out of a result: a
+# one- or two-character recipient would blank out half the sentence and tell nobody
+# anything. Four characters is the same tail `REDACT_TAIL` keeps.
+MIN_SCRUB_LEN = 4
+
+
+def _sensitive_pairs(args, out=None):
+    """[(raw value, its redacted form)] for every arg this module would redact.
+
+    Walks the same structure `redact` walks, so a field that gains redaction there is
+    scrubbed out of the result here without a second list to keep in sync.
+    """
+    out = [] if out is None else out
+    if isinstance(args, dict):
+        for key, value in args.items():
+            if isinstance(value, str) and len(value) >= MIN_SCRUB_LEN:
+                if key in REDACT_WHOLE:
+                    out.append((value, f"<redacted {len(value)} chars>"))
+                elif key in REDACT_TAIL:
+                    out.append((value, ("*" * max(0, len(value) - TAIL_KEPT))
+                                + value[-TAIL_KEPT:]))
+            _sensitive_pairs(value, out)
+    elif isinstance(args, (list, tuple)):
+        for item in args:
+            _sensitive_pairs(item, out)
+    return out
+
+
+def scrub(result, args) -> str:
+    """The result with every value redacted out of `args` masked the same way.
+
+    Longest first, so a value that contains another (a body quoting the subject) does
+    not get half-replaced and leave the tail readable.
+    """
+    text = str(result or "")
+    for raw, masked in sorted(_sensitive_pairs(args), key=lambda p: -len(p[0])):
+        if raw in text:
+            text = text.replace(raw, masked)
+    return text
+
+
 def _truncate(value) -> str:
     text = " ".join(str(value or "").split())
     return text if len(text) <= RESULT_CHARS else text[:RESULT_CHARS - 1] + "…"
@@ -137,7 +188,9 @@ def record(event: str, tool: str, args=None, result=None, *, surface=None,
             "event": event,
             "tool": tool,
             "args": redact(args if isinstance(args, dict) else {}),
-            "result": _truncate(result),
+            # Scrub BEFORE truncating: the recipient can sit past the 300th character
+            # of a long preview and truncation is not redaction.
+            "result": _truncate(scrub(result, args if isinstance(args, dict) else {})),
         }
         if pii:
             entry["pii"] = True
