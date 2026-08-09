@@ -22,6 +22,21 @@ recorded as a length, never content. `REDACT_TAIL` are identifiers you need to
 recognise but not to read (an address, a phone number) — last four characters only.
 Redaction is recursive, because args nest.
 
+WHAT IS *NOT* REDACTED, stated plainly because it is a deliberate choice and not an
+oversight: redaction is a key-name ALLOWLIST, so anything whose key is not in the two
+sets above is written verbatim. Two consequences worth knowing before you read this
+file out loud or ship it anywhere:
+
+  * `run_shell` commands are recorded IN FULL, by design. The command is the whole
+    point of the record — "something was deleted on Thrivbe-1" is not an answer to
+    "what did it delete?". A command that inlines a secret (`PGPASSWORD=… psql …`) puts
+    that secret in this file. Treat actions.jsonl as sensitive as the shell history it
+    describes: 0600, owner-only directory, never pasted into a ticket.
+  * a future tool that declares a credential-shaped argument is covered only if its
+    field name is in `REDACT_WHOLE`. The credential names below are pre-registered as a
+    tripwire — no tool schema declares them today (`core/tools.py` has none), so they
+    cost nothing now and catch the one that does later.
+
 PERMISSIONS: the file is created 0600 and re-chmod'd on every rotation. It sits in the
 same owner-only directory as the conversation store.
 
@@ -37,10 +52,14 @@ import time
 
 from core import config
 
-# Free-text fields: recorded as a length, never as content.
+# Free-text fields: recorded as a length, never as content. The second line is the
+# credential tripwire described above — pre-registered, not currently reachable.
 REDACT_WHOLE = frozenset({
     "body", "text", "message", "note", "notes", "instruction", "feedback",
     "custom_prompt", "prompt", "query", "name_query", "description", "comment",
+    "password", "passphrase", "token", "api_key", "apikey", "secret", "credential",
+    "credentials", "authorization", "auth", "access_token", "refresh_token",
+    "private_key", "session_key",
 })
 
 # Identifiers: keep the tail so a line is recognisable, drop the rest.
