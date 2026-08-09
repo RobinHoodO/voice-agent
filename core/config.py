@@ -146,9 +146,22 @@ DEFAULTS = {
         # never honoured (mac/reverse_channel.resolve_bind_host).
         "bind": None,
         # Where run_shell and open_file are allowed to act. None = ~/Thrivbe-AI.
-        # A path outside this root is refused before the gate is even consulted.
+        # A path outside this root is refused before the gate is even consulted, and
+        # run_shell is additionally jailed to it by a seatbelt profile
+        # (mac/shell_sandbox.py) — the text scan cannot see through `$HOME` or a
+        # symlink, and the kernel can.
         "workspace": None,
         "shell_timeout": 20,
+        # May the jailed shell reach the network? OFF: a sandbox that still allows
+        # POST is a jail with a mail slot. Turn it on only if `git pull` from the
+        # phone is worth it — the workspace is readable to the caller either way,
+        # so this only widens where its contents can be sent.
+        "sandbox_network": False,
+        # Which apps the reverse channel may screenshot, by exact frontmost-app name.
+        # None = the built-in work-surface list in mac/reverse_channel.py. This is an
+        # ALLOW-list on purpose: macos_context's denylist cannot fail closed for an app
+        # nobody has met yet, and down a wire it has to.
+        "screenshot_apps": None,
     },
 }
 
@@ -170,8 +183,17 @@ def ensure_dirs() -> None:
 
 def _deep_merge(base: dict, over: dict) -> dict:
     """Return base with over layered on top (recursively) — so new DEFAULTS keys
-    appear automatically for users with an older config.json."""
-    out = dict(base)
+    appear automatically for users with an older config.json.
+
+    Every nested dict is COPIED, including the ones `over` says nothing about. A plain
+    `dict(base)` aliases them, and since `load()` merges onto DEFAULTS that made the
+    live config share objects with the shipped defaults: `set_("reverse_channel.enabled",
+    True)` reached through the alias and rewrote `DEFAULTS` itself, so the one thing that
+    is supposed to be constant — what this app ships as OFF — changed at runtime and
+    nothing could be asked about it afterwards.
+    """
+    out = {k: (_deep_merge(v, {}) if isinstance(v, dict) else v)
+           for k, v in (base or {}).items()}
     for k, v in (over or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = _deep_merge(out[k], v)

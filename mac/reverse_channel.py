@@ -26,16 +26,29 @@ WHAT HOLDS IT SHUT, in the order an attacker meets it:
     unknown operation, an unknown argument, or a missing one is refused and journalled;
     nothing is ever forwarded to a generic handler. The list is `OPERATIONS` and it is
     data you can read in one screen.
- 5. **Workspace scope.** `run_shell` and `open_file` may only name paths under the
-    reverse-channel workspace, and every command starts its own shell at that root —
-    there is no persistent shell here precisely so a `cd` in one call cannot move the
-    next one out of scope.
+ 5. **Workspace scope, enforced by the KERNEL.** `open_file` realpaths its target and
+    refuses anything that does not land under the reverse-channel workspace.
+    `run_shell` gets the same text scan AND a `sandbox-exec` jail
+    (`mac/shell_sandbox.py`) that denies file access by default and re-allows it only
+    under the realpath'd root. The jail is not decoration: an audit of the text-scan-
+    only version read `~/.ssh/id_rsa` through `$HOME`, read an outside file through
+    `${HOME}/..`, and followed a symlink planted inside the workspace — every one of
+    them a string the scan approved and the shell then expanded. A scan of text cannot
+    contain a shell; only the thing that answers open(2) can. Missing `sandbox-exec`
+    means run_shell is REFUSED, never run bare. Every command also starts its own shell
+    at the root — there is no persistent shell here precisely so a `cd` in one call
+    cannot move the next one out of scope.
  6. **The staged-confirm gate — the SAME one.** A mutating call does not run. It is
     staged in a `core.confirm_gate.PendingSlot`, which is the identical object
     `core.live_session.LiveSession` uses; there is exactly one implementation of "what
     counts as a yes" in this tree and `tests/test_reverse_channel.py` asserts it.
  7. **The screenshot denylist is `mac.macos_context`'s**, read not rewritten, including
-    its fail-closed behaviour when the frontmost app cannot be identified.
+    its fail-closed behaviour when the frontmost app cannot be identified — and then a
+    second, narrower fence this surface adds: an ALLOW-list of apps a phone may see
+    (`SCREENSHOT_ALLOWED_APPS`). A denylist says no to what someone thought of and yes
+    to everything unheard of; on this Mac, with Robin watching, that is a fair default,
+    but a bank nobody listed is not a thing to ship down a wire on the strength of
+    never having been named.
  8. **Everything journals** to `actions.jsonl` — the call, the refusal, the staging,
     the confirmation and the words that were offered as consent. Results that are
     CONTENT rather than outcome (the screen, a screenshot) are recorded as a length:
@@ -77,6 +90,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from core import audit, capabilities, config, confirm_gate, destructive
+from mac import shell_sandbox
 
 # Which capability profile this surface runs. NOT named `SURFACE_PROFILE`: that symbol
 # is the drift checker's protocol for "this directory is a conversational surface with
@@ -288,23 +302,46 @@ class Operation:
 
 
 def _op_run_shell(channel: "ReverseChannel", args: dict) -> str:
-    """One command, one fresh shell, rooted at the workspace.
+    """One command, one fresh shell, rooted at the workspace and JAILED to it.
 
     Deliberately NOT `core.shell.Shell`: that one is persistent so a live conversation
     can `cd` into a project and stay there, which is exactly the property a scoped
     remote executor must not have. Here every call starts at the workspace root, so
     scope is re-established by construction on each command rather than trusted to
     survive the previous one.
+
+    The containment is `mac.shell_sandbox`'s, not this function's, and that split is
+    the correction an audit forced: `scope_violation` reads the command TEXT, and text
+    cannot contain a shell — `$HOME`, `${HOME}`, `$(…)` and a symlink all resolve after
+    the scan has finished and passed. The seatbelt profile denies by default and
+    re-allows file access only under the realpath'd root, so the escape lands on a
+    kernel refusal instead of on Robin's ssh key. The text scan stays because it turns
+    those attempts into a legible "out of scope" answer instead of a bare EPERM.
     """
     command = args["command"]
     binary = next((b for b in capabilities.get(REVERSE_PROFILE)["shell_binaries"]
                    if os.path.exists(b)), "/bin/zsh")
     timeout = float(config.get("reverse_channel.shell_timeout", 20) or 20)
+    scratch = shell_sandbox.scratch_dir()
+    env = config.subprocess_env()
+    if scratch:
+        # Give the jail a writable TMPDIR of its own. Without one, xcrun's stubs (git,
+        # python3) print two "couldn't create cache file" errors over every result.
+        env["TMPDIR"] = scratch
+    try:
+        argv = shell_sandbox.wrap(
+            [binary, "-lc", command], channel.root, scratch=scratch,
+            network=bool(config.get("reverse_channel.sandbox_network", False)))
+    except shell_sandbox.Unavailable as error:
+        # Belt and braces: `_guard_shell_scope` already refused this before staging.
+        # Reaching here means the machine changed under a staged action, and an
+        # uncontained fallback is the one answer that must not exist.
+        return f"error: refusing to run uncontained ({error})"
     try:
         result = subprocess.run(
-            [binary, "-lc", command],
+            argv,
             capture_output=True, text=True, timeout=timeout,
-            cwd=channel.root, env=config.subprocess_env(),
+            cwd=channel.root, env=env,
             start_new_session=True)
     except subprocess.TimeoutExpired:
         return f"(timed out after {int(timeout)}s and was killed)"
@@ -317,7 +354,22 @@ def _op_run_shell(channel: "ReverseChannel", args: dict) -> str:
 
 
 def _guard_shell_scope(channel: "ReverseChannel", args: dict) -> None:
-    violation = scope_violation(args.get("command", ""), channel.root)
+    """No sandbox, no shell. Then the text scan, for a legible refusal.
+
+    The sandbox check comes FIRST and refuses rather than degrading, because "the jail
+    is missing so we ran it anyway" is the only outcome this surface must never have.
+    It runs again at confirm time (the guards are re-run there), so a staged command
+    cannot execute uncontained on a machine that lost `sandbox-exec` in between.
+    """
+    if not shell_sandbox.available():
+        raise Refused("the shell sandbox (sandbox-exec) is not on this machine — "
+                      "refusing to run a remote command uncontained", 403,
+                      "refused_no_sandbox")
+    root = channel.root
+    if not root or root == "/":
+        raise Refused("the reverse-channel workspace resolves to the whole filesystem "
+                      "— refusing to run anything in it", 403, "refused_no_sandbox")
+    violation = scope_violation(args.get("command", ""), root)
     if violation:
         raise Refused(f"out of scope: {violation}", 400, "refused_scope")
 
@@ -358,13 +410,45 @@ def _op_screenshot(channel: "ReverseChannel", args: dict) -> str:
     return shot
 
 
-def _guard_screenshot(channel: "ReverseChannel", args: dict) -> None:
-    """The denylist is `mac.macos_context`'s, asked here so the refusal has a reason.
+# Apps this surface may photograph, matched on the frontmost app's EXACT name, cased
+# down. A second fence in front of `macos_context`'s denylist, and the reason it exists
+# is a hole an audit found in the denylist MODEL rather than in its contents: a denylist
+# answers "no" for the apps someone thought of, and "yes" for every app nobody has met
+# yet. Locally, where Robin is at the keyboard and can see the capture happen, that is a
+# reasonable default. Down a wire to a phone it is not — a bank the list has never heard
+# of, a health portal in a browser whose title says nothing, a new messenger, all
+# captured and shipped off the machine.
+#
+# So: work surfaces only, and an app that is not on this list is refused whether or not
+# anyone has ever called it sensitive. `reverse_channel.screenshot_apps` replaces the
+# list for Robin, which is how a new editor gets added — deliberately, in config, not by
+# being unheard of.
+SCREENSHOT_ALLOWED_APPS = frozenset({
+    "terminal", "iterm2", "ghostty", "warp", "alacritty", "kitty",
+    "code", "visual studio code", "cursor", "zed", "sublime text", "xcode",
+    "finder", "preview", "textedit", "notes",
+})
 
-    Its fail-closed rule is honoured too: an app that cannot be identified is refused,
-    exactly as `grab_window_screenshot` refuses it. This does not re-implement the
-    policy — it calls it, and `grab_window_screenshot` applies it a second time when
-    the capture actually happens.
+
+def screenshot_allowlist() -> frozenset:
+    configured = config.get("reverse_channel.screenshot_apps")
+    if isinstance(configured, (list, tuple)) and configured:
+        return frozenset(str(a).strip().lower() for a in configured if str(a).strip())
+    return SCREENSHOT_ALLOWED_APPS
+
+
+def _guard_screenshot(channel: "ReverseChannel", args: dict) -> None:
+    """Two fences, in this order: `macos_context`'s denylist, then this surface's
+    allow-list.
+
+    The denylist is asked FIRST and unchanged — the policy stays in `macos_context`,
+    read not rewritten, including its fail-closed answer when the frontmost app cannot
+    be identified. Asking it first also means a denylisted app is refused as
+    denylisted, which is the more useful thing to read in the journal.
+
+    The allow-list is then asked as a second, narrower question that only this surface
+    poses: is this an app Robin has said a PHONE may see? An unknown app fails closed
+    here, which is the property a denylist structurally cannot provide.
     """
     from mac import macos_context
     app, title = macos_context._frontmost_app_and_title()
@@ -378,6 +462,11 @@ def _guard_screenshot(channel: "ReverseChannel", args: dict) -> None:
     if macos_context.screenshot_denied(app, title, cursor_title):
         raise Refused("that window is on the screenshot denylist",
                       403, "refused_screenshot_denied")
+    if (app or "").strip().lower() not in screenshot_allowlist():
+        raise Refused(f"{app or 'that window'} is not on the reverse channel's "
+                      f"screenshot allow-list — an app this surface has never been told "
+                      f"about is not captured down a wire",
+                      403, "refused_screenshot_not_allowed")
 
 
 OPERATIONS = {
@@ -436,8 +525,13 @@ class ReverseChannel:
     def root(self) -> str:
         """Read live, not snapshotted: if Robin narrows the workspace, the next call is
         narrowed — including a call staged before the change and confirmed after it,
-        because the guards run again at execution time."""
-        return self._root or workspace_root()
+        because the guards run again at execution time.
+
+        Always a realpath. The sandbox profile and the path checks both compare against
+        this string, and a root that still contains a symlink would let one of them
+        disagree with the kernel about where the workspace actually is.
+        """
+        return os.path.realpath(self._root) if self._root else workspace_root()
 
     # -- journal ------------------------------------------------------------------
     def _journal(self, event: str, tool: str, args=None, result=None,

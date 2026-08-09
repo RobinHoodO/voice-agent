@@ -77,6 +77,17 @@ def test_the_channel_is_off_in_the_shipped_defaults():
     assert config.DEFAULTS["reverse_channel"]["enabled"] is False
 
 
+def test_turning_the_channel_on_does_not_rewrite_what_it_ships_as(tmp_app):
+    """`config.set_` used to reach through an alias into `DEFAULTS` and change it, so
+    the moment anything enabled the channel the shipped default said "on" too — the one
+    constant this file's first test asks about, quietly overwritten at runtime."""
+    config.set_("reverse_channel.enabled", True)
+    config.set_("reverse_channel.screenshot_apps", ["Adobe Photoshop"])
+    assert config.DEFAULTS["reverse_channel"]["enabled"] is False
+    assert config.DEFAULTS["reverse_channel"]["screenshot_apps"] is None
+    assert config.get("reverse_channel.enabled") is True
+
+
 def test_serve_refuses_while_disabled(tmp_app, monkeypatch):
     monkeypatch.setenv("VOICE_AGENT_REVERSE_TOKEN", TOKEN)
     config.set_("reverse_channel.enabled", False)
@@ -290,6 +301,127 @@ def test_open_file_outside_the_workspace_is_refused(caller):
 
 def test_open_file_that_does_not_exist_is_refused(caller):
     assert caller.op("open_file", {"path": "notes/ghost.md"})[0] == 400
+
+
+# --- 4b. scope the shell CANNOT talk its way out of ---------------------------------
+# The literal-path scan above refuses paths it can SEE. An audit of the scan-only
+# version then read ~/.ssh/id_rsa anyway, because `$HOME` is not a path until after the
+# scan has finished: the shell expands it, and the scan is long gone. Everything in this
+# section runs the command for real and asserts the CANARY never comes back — the fence
+# under test is the seatbelt jail (mac/shell_sandbox.py), not the string scan.
+
+CANARY = "TOPSECRET-CANARY-9f3a2b"
+
+
+@pytest.fixture
+def outside(tmp_path, monkeypatch):
+    """A directory outside the workspace with secrets in it, and $HOME pointing there.
+
+    $HOME is the interesting variable precisely because the scan cannot resolve it and
+    the shell always can.
+    """
+    home = tmp_path / "outside"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_text(CANARY, encoding="utf-8")
+    (home / "secret.txt").write_text(CANARY, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.parametrize("command", [
+    "cat $HOME/.ssh/id_rsa",
+    "cat ${HOME}/secret.txt",
+    "cat ${HOME}/../outside/secret.txt",
+    "cat $(echo $HOME)/secret.txt",
+    "grep -r TOPSECRET $HOME",
+    "bash -c 'cat $HOME/secret.txt'",
+])
+def test_shell_expansion_cannot_read_a_file_outside_the_workspace(caller, outside,
+                                                                  command):
+    """The blocker, closed: expansion happens after the scan, so the jail has to be
+    somewhere the shell cannot argue with.
+
+    A command that stages (`bash -c …` hands execution to something the scan cannot
+    follow, so `core.destructive` treats it as one) is CONFIRMED here on purpose — the
+    question is not whether the gate holds, it is whether the read succeeds once it
+    does.
+    """
+    _status, payload = caller.op("run_shell", {"command": command})
+    if payload.get("status") == "staged":
+        _status, payload = caller.confirm(payload["id"], "yes")
+    body = json.dumps(payload)
+    assert CANARY not in body, f"{command!r} read a file outside the workspace"
+    assert payload["status"] == "refused" or "not permitted" in body.lower(), body
+
+
+def test_a_symlink_out_of_the_workspace_is_refused_by_run_shell_too(caller, workspace,
+                                                                    outside):
+    """run_shell and open_file used to disagree here: open_file realpaths and refused,
+    run_shell checked the literal path and let the kernel follow the link."""
+    os.symlink(str(outside), os.path.join(workspace, "notes", "escape"))
+    _status, shell = caller.op("run_shell", {"command": "cat notes/escape/secret.txt"})
+    assert CANARY not in json.dumps(shell), "run_shell followed a symlink out of scope"
+    status, opened = caller.op("open_file", {"path": "notes/escape/secret.txt"})
+    assert status == 400
+    assert "out of scope" in opened["reason"]
+
+
+def test_a_confirmed_write_outside_the_workspace_still_does_not_land(caller, outside):
+    """A write escape staged behind the gate and then executed on a real "yes". The
+    gate is not the containment — it decides whether an in-scope action happens."""
+    _status, staged = caller.op("run_shell",
+                                {"command": "echo PWNED > $HOME/pwned.txt"})
+    if staged.get("status") == "staged":
+        caller.confirm(staged["id"], "yes")
+    assert not (outside / "pwned.txt").exists(), "a file was written outside the workspace"
+
+
+def test_every_command_runs_inside_the_sandbox(caller, workspace, monkeypatch):
+    """The structural half: whatever else changes, the argv starts with sandbox-exec
+    and the profile names this workspace and denies by default."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return _ok()
+
+    monkeypatch.setattr(rc.subprocess, "run", fake_run)
+    caller.op("run_shell", {"command": "ls"})
+    assert seen["argv"][0] == rc.shell_sandbox.SANDBOX_EXEC
+    assert seen["argv"][1] == "-p"
+    profile = seen["argv"][2]
+    assert "(deny default)" in profile
+    assert "(allow default)" not in profile
+    assert f'(subpath "{workspace}")' in profile
+    assert seen["argv"][3:5] == ["/bin/zsh", "-lc"]
+
+
+def test_no_sandbox_means_no_shell(caller, monkeypatch):
+    """Fail closed. "The jail is missing so we ran it anyway" is the one outcome this
+    surface must never have."""
+    monkeypatch.setattr(rc.shell_sandbox, "available", lambda: False)
+    status, payload = caller.op("run_shell", {"command": "cat notes/hello.md"})
+    assert status == 403
+    assert "uncontained" in payload["reason"]
+    assert ("refused_no_sandbox", "run_shell") in journal_events()
+
+
+def test_a_staged_command_will_not_run_if_the_sandbox_disappears(caller, workspace,
+                                                                  monkeypatch):
+    """The guards run again at confirm time, so this is checked twice on purpose."""
+    action_id = _stage_delete(caller)
+    monkeypatch.setattr(rc.shell_sandbox, "available", lambda: False)
+    status, _payload = caller.confirm(action_id, "yes")
+    assert status == 403
+    assert os.path.exists(os.path.join(workspace, "notes"))
+    assert ("refused_scope_on_confirm", "run_shell") in journal_events()
+
+
+def test_a_workspace_that_is_the_whole_disk_is_refused(caller, monkeypatch):
+    config.set_("reverse_channel.workspace", "/")
+    status, payload = caller.op("run_shell", {"command": "ls"})
+    assert status == 403
+    assert "whole filesystem" in payload["reason"]
 
 
 # --- 5. the gate — the SAME gate ------------------------------------------------------
@@ -564,6 +696,75 @@ def test_a_permitted_window_captures(caller, monkeypatch, tmp_path):
 
     monkeypatch.setattr(macos_context.subprocess, "run", capture)
     assert caller.op("screenshot")[1]["result"] == "dGVzdA=="
+
+
+@pytest.mark.parametrize("app,title", [
+    ("Adobe Photoshop", "Untitled"),      # harmless, and still not this surface's call
+    ("Klarna", "Checkout"),               # a payments app the denylist never heard of
+    ("Sunrise Clinic", "Test results"),   # a health portal nobody named
+    ("SomeNewMessenger", "Ada"),
+])
+def test_an_app_the_list_has_never_met_is_refused_rather_than_captured(caller,
+                                                                       monkeypatch,
+                                                                       app, title):
+    """The property a denylist structurally cannot have.
+
+    `macos_context`'s denylist answers "no" for the apps someone thought of and "yes"
+    for everything unheard of — fine on this Mac with Robin watching it happen, wrong
+    down a wire to a phone. The reverse channel therefore asks a second, narrower
+    question, and an unknown answer is a refusal.
+    """
+    from mac import macos_context
+
+    monkeypatch.setattr(macos_context, "_frontmost_app_and_title", lambda: (app, title))
+    monkeypatch.setattr(macos_context, "_ax_window_under_cursor", lambda: (None, ""))
+    monkeypatch.setattr(macos_context.subprocess, "run", _never_capture)
+    status, payload = caller.op("screenshot")
+    assert status == 403
+    assert "allow-list" in payload["reason"]
+    assert ("refused_screenshot_not_allowed", "screenshot") in journal_events()
+
+
+def test_the_allow_list_is_asked_after_the_denylist_so_the_reason_stays_true(caller,
+                                                                             monkeypatch):
+    """A denylisted app is refused AS denylisted — the journal line has to say which
+    fence stopped it, or the record cannot answer why later."""
+    from mac import macos_context
+
+    monkeypatch.setattr(macos_context, "_frontmost_app_and_title",
+                        lambda: ("1Password", "Vault"))
+    monkeypatch.setattr(macos_context, "_ax_window_under_cursor", lambda: (None, ""))
+    monkeypatch.setattr(macos_context.subprocess, "run", _never_capture)
+    _status, payload = caller.op("screenshot")
+    assert "denylist" in payload["reason"]
+    assert ("refused_screenshot_denied", "screenshot") in journal_events()
+
+
+def _stub_capture(monkeypatch, tmp_path, app, title=""):
+    from mac import macos_context
+
+    monkeypatch.setattr(macos_context, "_frontmost_app_and_title", lambda: (app, title))
+    monkeypatch.setattr(macos_context, "_ax_window_under_cursor", lambda: (None, ""))
+    monkeypatch.setattr(macos_context, "_focused_window_region", lambda: "0,0,10,10")
+    monkeypatch.setattr(macos_context.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def capture(command, **kwargs):
+        if command[0] == "screencapture":
+            with open(command[-1], "wb") as handle:
+                handle.write(b"test")
+
+    monkeypatch.setattr(macos_context.subprocess, "run", capture)
+
+
+def test_robin_can_replace_the_screenshot_allow_list_in_config(caller, monkeypatch,
+                                                                tmp_path):
+    """Adding an app is a decision made in writing — and REPLACES the built-in list
+    rather than adding to it, so a narrower answer stays narrow."""
+    config.set_("reverse_channel.screenshot_apps", ["Adobe Photoshop"])
+    _stub_capture(monkeypatch, tmp_path, "Adobe Photoshop", "Untitled")
+    assert caller.op("screenshot")[1]["result"] == "dGVzdA=="
+    _stub_capture(monkeypatch, tmp_path, "Finder", "Desktop")
+    assert caller.op("screenshot")[0] == 403, "the built-in list survived the override"
 
 
 def test_grab_context_is_a_read_and_runs_free(caller, monkeypatch):
