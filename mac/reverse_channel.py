@@ -18,7 +18,10 @@ WHAT HOLDS IT SHUT, in the order an attacker meets it:
     twice.
  3. **A shared token from the Keychain** (`reverse_channel_token`), compared with
     `hmac.compare_digest`. No token configured means every request is refused — an
-    unconfigured secret must never mean an open door.
+    unconfigured secret must never mean an open door. There is deliberately NO rate
+    limit (a lockout on an endpoint anyone on the tailnet can reach is a denial of
+    service handed to them), so the token's LENGTH is the brute-force budget and
+    `serve()` refuses to start with a short one.
  4. **A CLOSED allow-list of four operations** with a strict argument schema. An
     unknown operation, an unknown argument, or a missing one is refused and journalled;
     nothing is ever forwarded to a generic handler. The list is `OPERATIONS` and it is
@@ -34,7 +37,11 @@ WHAT HOLDS IT SHUT, in the order an attacker meets it:
  7. **The screenshot denylist is `mac.macos_context`'s**, read not rewritten, including
     its fail-closed behaviour when the frontmost app cannot be identified.
  8. **Everything journals** to `actions.jsonl` — the call, the refusal, the staging,
-    the confirmation and the words that were offered as consent.
+    the confirmation and the words that were offered as consent. Results that are
+    CONTENT rather than outcome (the screen, a screenshot) are recorded as a length:
+    an audit trail is not a place to accumulate a second copy of what was seen. An
+    unhandled exception is caught, journalled and answered with a flat 500, so a
+    traceback never travels back down the wire.
 
 THE ONE THING THIS CANNOT DO, stated plainly because pretending otherwise would be
 worse than the limitation itself: Robin is not at this Mac when he uses the reverse
@@ -97,6 +104,10 @@ MAX_BODY_BYTES = 64 * 1024
 MAX_COMMAND_CHARS = 4000
 MAX_TRANSCRIPT_CHARS = 400
 MAX_OUTPUT_CHARS = 6000
+
+# There is no rate limit on the endpoint, so the token's length is the brute-force
+# budget. Checked at startup, where refusing costs nothing.
+MIN_TOKEN_CHARS = 24
 
 
 class Refused(Exception):
@@ -267,6 +278,13 @@ class Operation:
     required: tuple
     run: Callable                   # (channel, args) -> str
     guard: Callable | None = None   # (channel, args) -> None, raises Refused
+    # True when the RESULT is content rather than an outcome — the text on Robin's
+    # screen, the pixels of his window. `actions.jsonl` is an accountability record of
+    # what was DONE, not a copy of what was seen: a live run put 300 characters of
+    # base64 JPEG and 300 characters of whatever window was open into it, which is a
+    # second transcript growing inside the one file that is supposed to be reviewable.
+    # These operations journal a length instead. The caller still gets the content.
+    opaque_result: bool = False
 
 
 def _op_run_shell(channel: "ReverseChannel", args: dict) -> str:
@@ -367,9 +385,19 @@ OPERATIONS = {
                            _guard_shell_scope),
     "open_file": Operation("open_file", ALWAYS, ("path",), _op_open_file,
                            _guard_open_scope),
-    "grab_context": Operation("grab_context", NEVER, (), _op_grab_context),
-    "screenshot": Operation("screenshot", NEVER, (), _op_screenshot, _guard_screenshot),
+    "grab_context": Operation("grab_context", NEVER, (), _op_grab_context,
+                              opaque_result=True),
+    "screenshot": Operation("screenshot", NEVER, (), _op_screenshot, _guard_screenshot,
+                            opaque_result=True),
 }
+
+
+def _for_journal(op: Operation, result: str) -> str:
+    """What the accountability record keeps: the outcome, or a length when the result
+    is content the record has no business copying."""
+    if op.opaque_result:
+        return f"<{len(result or '')} chars, not recorded>"
+    return result
 
 
 def validate_args(op: Operation, raw: dict) -> dict:
@@ -439,7 +467,7 @@ class ReverseChannel:
             raise
         if not self._is_mutating(op, args):
             result = op.run(self, args)
-            self._journal("call", op.name, args, result, request_id)
+            self._journal("call", op.name, args, _for_journal(op, result), request_id)
             return {"status": "ok", "result": result}
         return self._stage(op, args, request_id)
 
@@ -541,7 +569,7 @@ class ReverseChannel:
                           f"refused: {refusal.reason}", request_id)
             raise
         result = op.run(self, pending["args"])
-        self._journal("confirmed", op.name, record, result, request_id)
+        self._journal("confirmed", op.name, record, _for_journal(op, result), request_id)
         return {"status": "confirmed", "result": result}
 
 
@@ -618,6 +646,26 @@ def handle(channel: "ReverseChannel", method: str, path: str, headers, body: byt
         return 200, route(channel, _parse_body(body), request_id)
     except Refused as refusal:
         return refusal.status, {"status": "refused", "reason": refusal.reason}
+    except Exception as error:                  # noqa: BLE001 — contained on purpose
+        # An unhandled exception would otherwise reach BaseHTTPRequestHandler, which
+        # answers with a traceback and writes nothing to the journal: a stack trace
+        # handed to a remote caller, and an action with no record. Both are worse than
+        # a flat 500.
+        channel._journal("error", str(op_or(body)), {}, f"{type(error).__name__}",
+                         request_id)
+        from core import caps
+        caps.log(f"reverse channel: unhandled {error!r}")
+        return 500, {"status": "error", "reason": "the operation failed"}
+
+
+def op_or(body) -> str:
+    """The operation name a failed request was asking for, for the journal line."""
+    if isinstance(body, (bytes, str)):
+        try:
+            body = json.loads(body or b"{}")
+        except ValueError:
+            return "-"
+    return str((body or {}).get("op", "-"))[:60] if isinstance(body, dict) else "-"
 
 
 def _header(headers, name: str) -> str | None:
@@ -695,6 +743,17 @@ def build_server(channel: "ReverseChannel", host: str, port: int):
 
 # --- process control ------------------------------------------------------------------
 
+def _file_logger():
+    def log(message: str) -> None:
+        try:
+            config.ensure_dirs()
+            with open(config.LOG_PATH, "a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%H:%M:%S')}  {message}\n")
+        except Exception:                       # noqa: BLE001 — a log must never kill it
+            pass
+    return log
+
+
 def pidfile_path() -> str:
     return os.path.join(config.SUPPORT_DIR, PIDFILE)
 
@@ -771,11 +830,22 @@ def serve(host: str | None = None, port: int | None = None) -> None:
     """Bind the tailnet and serve. Refuses on anything it cannot vouch for."""
     if not enabled():
         raise Disabled("reverse_channel.enabled is false — turn it on in config first")
-    if not token():
+    secret = token()
+    if not secret:
         raise Disabled("no reverse_channel_token in the Keychain — refusing to listen "
                        "without one")
+    if len(secret) < MIN_TOKEN_CHARS:
+        # There is no rate limit on this endpoint (see the module docstring), so the
+        # token's length IS the brute-force budget. A short one is the likeliest real
+        # failure, and it is the one thing that can be checked before opening the port.
+        raise Disabled(f"reverse_channel_token is shorter than {MIN_TOKEN_CHARS} "
+                       f"characters — that is the only thing standing between the "
+                       f"tailnet and this Mac's shell")
     from core import caps
     caps.set_profile(REVERSE_PROFILE)
+    # Standalone process: nothing has registered a log sink, so the channel's own
+    # diagnostics would go nowhere. Point them at the app's log file.
+    caps.set_log_sink(_file_logger())
     bind = resolve_bind_host(host or config.get("reverse_channel.bind"))
     listen_port = int(port or config.get("reverse_channel.port", 8791) or 8791)
     server = build_server(ReverseChannel(), bind, listen_port)

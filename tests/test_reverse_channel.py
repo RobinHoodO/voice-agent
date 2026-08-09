@@ -24,7 +24,7 @@ import pytest
 from core import audit, capabilities, config, confirm_gate, live_session
 from mac import reverse_channel as rc
 
-TOKEN = "reverse-test-token-9a1f"
+TOKEN = "reverse-test-token-9a1f-long-enough"
 AUTH = {"x-reverse-token": TOKEN}
 PEER = "100.64.9.9"           # a plausible tailnet peer
 
@@ -90,6 +90,31 @@ def test_serve_refuses_without_a_token(tmp_app, monkeypatch):
     config.set_("reverse_channel.enabled", True)
     with pytest.raises(rc.Disabled):
         rc.serve()
+
+
+def test_serve_refuses_a_token_short_enough_to_guess(tmp_app, monkeypatch):
+    """No rate limit means the token's length IS the brute-force budget."""
+    monkeypatch.setenv("VOICE_AGENT_REVERSE_TOKEN", "hunter2")
+    config.set_("reverse_channel.enabled", True)
+    with pytest.raises(rc.Disabled) as refusal:
+        rc.serve()
+    assert "shorter than" in str(refusal.value)
+
+
+def test_an_unexpected_failure_answers_flatly_and_still_journals(caller, monkeypatch):
+    """A traceback must not reach a remote caller, and an action must not happen with
+    no record of it."""
+    from mac import macos_context
+
+    def explode():
+        raise RuntimeError("AX blew up with /Users/robinsverd/secret in the message")
+
+    monkeypatch.setattr(macos_context, "grab_context", explode)
+    status, payload = caller.op("grab_context")
+    assert status == 500
+    assert payload == {"status": "error", "reason": "the operation failed"}
+    assert "secret" not in json.dumps(payload)
+    assert ("error", "grab_context") in journal_events()
 
 
 def test_a_disabled_channel_refuses_every_request(caller):
@@ -563,6 +588,38 @@ def test_every_call_leaves_a_line(caller, monkeypatch):
     assert "call" in events
     assert "refused_unknown_op" in events
     assert "refused_unauthorized" in events
+
+
+def test_what_was_on_the_screen_is_not_copied_into_the_record(caller, monkeypatch,
+                                                              tmp_path):
+    """`actions.jsonl` records what was DONE. A live run had it accumulating 300
+    characters of base64 JPEG per screenshot and 300 characters of whatever window was
+    open per context read — a second transcript growing inside the audit trail."""
+    from mac import macos_context
+
+    monkeypatch.setattr(macos_context, "grab_context",
+                        lambda: "App: Mail\n\nSubject: the offer, 450k")
+    caller.op("grab_context")
+
+    monkeypatch.setattr(macos_context, "_frontmost_app_and_title", lambda: ("Finder", "Desktop"))
+    monkeypatch.setattr(macos_context, "_ax_window_under_cursor", lambda: (None, ""))
+    monkeypatch.setattr(macos_context, "_focused_window_region", lambda: "0,0,10,10")
+    monkeypatch.setattr(macos_context.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def capture(command, **kwargs):
+        if command[0] == "screencapture":
+            with open(command[-1], "wb") as handle:
+                handle.write(b"pretend-jpeg-bytes")
+
+    monkeypatch.setattr(macos_context.subprocess, "run", capture)
+    _status, payload = caller.op("screenshot")
+
+    recorded = [e["result"] for e in audit.read_all() if e["event"] == "call"]
+    assert all("not recorded" in r for r in recorded), recorded
+    assert not any("450k" in r for r in recorded)
+    assert not any(payload["result"][:20] in r for r in recorded)
+    # …and the caller still gets the real thing.
+    assert payload["result"]
 
 
 def test_the_journal_records_the_reverse_surface_by_name(caller, monkeypatch):
