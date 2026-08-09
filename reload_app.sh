@@ -6,31 +6,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Don't deploy on top of a conversation in progress. On 2026-08-08 a deploy quit the
-# app while Robin was mid-triage; to him it read as a crash. A live session is one
-# where the last "LIVE: starting" is newer than the last stop. Override: FORCE=1
-LOG="$HOME/Library/Logs/ThrivbeVoice/agent.log"
-if [ -f "$LOG" ] && [ "${FORCE:-0}" != "1" ]; then
-  last_evt=$(grep -n "LIVE: starting\|LIVE: stopping\|realtime session closed" "$LOG" | tail -1 || true)
-  if [[ "$last_evt" == *"LIVE: starting"* ]]; then
-    echo "REFUSED: a live voice session looks active (${last_evt##*:})." >&2
-    echo "Finish the conversation, or re-run with FORCE=1 to deploy anyway." >&2
-    exit 1
-  fi
-fi
-
-# Drift gate: a tool that drifts out of the kernel manifest silently loses its
-# high-stakes confirm gate, so a deploy must not ship one. exit 1 = real drift
-# (block); exit 3 = tunnel down (can't check — warn and continue); exit 2 = the
-# checker itself is misconfigured (block: that's how drift goes blind).
-drift_code=0
-.venv/bin/python check_tool_drift.py || drift_code=$?
-if [ "$drift_code" = "3" ]; then
-  echo "WARN: kernel tunnel down — deploying without the drift check." >&2
-elif [ "$drift_code" != "0" ]; then
-  echo "REFUSED: tool drift (or a broken checker) — fix it before deploying." >&2
-  exit 1
-fi
+# Don't deploy on top of a conversation in progress, and don't ship a tool set that has
+# drifted. Both guards live in their own scripts now (live_session_guard.sh,
+# drift_gate.sh) so ./deploy.sh — which ships this surface AND the server one — applies
+# exactly the same policy instead of a second copy of it that can rot.
+# FORCE=1 still skips the live-session guard.
+./live_session_guard.sh || exit 1
+./drift_gate.sh || exit 1
 
 # Never hot-patch .pyc into the bundle by hand: it runs Python 3.12 and a .pyc built
 # by any other interpreter fails at import with "bad magic number" — but the zip still
