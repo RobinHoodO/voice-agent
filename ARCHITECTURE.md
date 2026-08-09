@@ -287,8 +287,24 @@ unreachable · bounded playback queue (drop oldest, not unbounded latency) · `r
      Softer: `_herdr()` catches every exception and returns `None`, so on a host without
      it the lane tools degrade to "no lanes" instead of crashing. The server surface
      needs its own delegation backend behind the same `_herdr()` seam, not a path fix.
-- **Deploy = `./reload_app.sh`** (quit → `build_app.sh` → relaunch). It signs with the
-  stable *Thrivbe Voice Dev* identity so Accessibility/Input-Monitoring grants survive.
+- **Deploy = `./deploy.sh`** — one command, both surfaces, so "one edit lands on both"
+  is literally true. `./deploy.sh mac` is the old `reload_app.sh` path (quit →
+  `build_app.sh` → relaunch), which signs with the stable *Thrivbe Voice Dev* identity so
+  Accessibility/Input-Monitoring grants survive. `./deploy.sh server` goes the house way
+  — refuse on a dirty tree, push to GitHub, then `/opt/thrivbe-ops/deploy.sh` on
+  Thrivbe-1 pinned to the pushed SHA. Never scp. `--dry-run` prints every command and
+  changes nothing.
   Editing the source dir alone changes nothing — `core/` and `mac/` are copied into
-  `Contents/Resources/lib/python3.12/`. Verify a deploy by those directories' mtime.
+  `Contents/Resources/lib/python3.12/`, so the Mac leg ends by diffing every `.py` there
+  against the repo and refusing if the build did not land (mtime was never proof).
+- **Two gates, one policy each, shared by both entry points.**
+  `live_session_guard.sh` refuses to deploy over a conversation in progress (`FORCE=1`
+  overrides). `drift_gate.sh` runs `check_tool_drift.py`, which compares **every surface
+  to every other surface** — tools, tool descriptions, system prompt, high-stakes set —
+  and then each against the kernel `/tools` manifest. A surface that declares no `TOOLS`
+  / `LOCAL_HIGH_STAKES` / `LIVE_SYSTEM` of its own inherits `core`'s, so convergence is
+  the default and divergence is an explicit act the gate catches. Exit 1/2 block; exit 3
+  (kernel tunnel down) warns — and cross-surface runs first, so a down tunnel can never
+  downgrade a real divergence to a warning. Fold the legacy bridge in with
+  `--surface bridge=../voice-bridge`.
 - **Use `.venv/bin/python` (3.12).** System `python3` is 3.9 and dies on PEP 604 unions.

@@ -1,4 +1,7 @@
 # Dev/test-only deps (not bundled into the .app)
 -r requirements.txt
+# The server surface is exercised for real in tests/test_server_*.py — a live uvicorn,
+# a real LiveSession, a fake provider socket. Without these the suite cannot collect.
+-r server/requirements.txt
 pytest
 pytest-cov
