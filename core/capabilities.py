@@ -200,5 +200,10 @@ def surface_note(name: str | None, tools=None) -> str:
             "(delete, stop or restart a service, overwrite a file, install a package, "
             "kill a process, force-push) does NOT run when you call it: it is staged, "
             "and Robin's next spoken yes is what runs it. So say plainly what the "
-            "command will do and ask him to confirm.")
+            "command will do and ask him to confirm — and ask for a plain 'yes' or "
+            "'do it', because that is literally what the gate accepts: a hedged answer "
+            "('yes but…'), a question, or anything else drops the command instead of "
+            "running it, and you would have to stage it again. "
+            "Only ONE action can wait for him at a time. While one is pending, staging "
+            "another is refused — his yes has to mean the thing you just read him.")
     return "\n".join(lines)
