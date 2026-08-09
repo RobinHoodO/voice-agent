@@ -217,3 +217,50 @@ def test_ping_is_unauthenticated_and_leaks_nothing(voice_server):
     r = httpx.get(server.http + "/ping", timeout=10)
     assert r.status_code == 200
     assert r.text.strip() == "ok"
+
+
+# ── 7. the rate is the real backend's, not a constant ───────────────────────
+@pytest.mark.parametrize("module,cls,mic_rate,manual", [
+    ("core.backends.openai_backend", "OpenAIBackend", 24000, False),
+    ("core.backends.gemini_backend", "GeminiBackend", 16000, True),
+])
+def test_transport_sends_the_real_backends_rate(module, cls, mic_rate, manual):
+    """Whatever `core`'s active backend asks for is what the browser is told. Wired to
+    the real backend classes so a future third backend, or a changed rate, cannot
+    silently disagree with what the capture worklet is configured to produce."""
+    import importlib
+    import queue as _queue
+    import threading
+
+    from server.audio_ws import BrowserAudioTransport
+
+    backend = getattr(importlib.import_module(module), cls)()
+
+    class _Bridge:
+        session_key = "0" * 8
+        mic_rate = 0
+
+        def __init__(self):
+            self.sent = []
+
+        def send_json(self, obj):
+            self.sent.append(obj)
+
+    class _Session:
+        _backend = backend
+        _audio_stop = threading.Event()
+        _out_q = _queue.Queue()
+        _running = False        # the player exits on the first check
+        _player_thread = None
+
+    s = _Session()
+    s._bridge = _Bridge()
+    BrowserAudioTransport().start(s)
+    s._player_thread.join(timeout=5)
+
+    frame = s._bridge.sent[0]
+    assert frame["type"] == "audio"
+    assert frame["mic_rate"] == backend.mic_rate == mic_rate
+    assert frame["frame_samples"] == mic_rate // 10      # 100 ms, as mac.audio uses
+    assert frame["manual_vad"] is manual
+    assert frame["output_rate"] == 24000                 # core.realtime_client.SR
