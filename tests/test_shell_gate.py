@@ -108,8 +108,13 @@ def test_a_destructive_command_is_staged_and_does_not_run(monkeypatch):
         assert s._pending_action["args"]["command"] == "systemctl restart voice-agent"
         assert "CONFIRMATION REQUIRED" in out
         # The preview has to be checkable BY EAR: the machine, the effect, the command.
+        # It is a spoken sentence, so it also has to survive being read out loud —
+        # reasons come in two grammatical shapes and both end up in this one line.
         assert "Thrivbe-1" in out
-        assert "systemctl restart" in out
+        assert "systemctl restart is not a read" in out
+        assert out.rstrip().endswith("the command is: systemctl restart voice-agent. "
+                                     "It has NOT run. Say what it will do and ask the "
+                                     "user to confirm out loud.")
 
     run(lambda: (session, scenario))
 

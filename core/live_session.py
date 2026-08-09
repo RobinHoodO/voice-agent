@@ -96,9 +96,12 @@ def _confirmation_preview(tool: str, args: dict, host: str = "this machine") -> 
     """The sentence the model reads back before Robin says yes. Specific beats generic —
     'send an email to X' is checkable by ear; 'run gmail_send' is not."""
     if tool == "run_shell":
+        # Dashes, not "it {reason}": the reasons are a mix of verb phrases ("deletes
+        # files") and clauses ("systemctl restart is not a read"), and this sentence is
+        # SPOKEN — one connector has to carry both without turning into word salad.
         command = (args.get("command") or "").strip()
-        return (f"about to run this on {host} — it "
-                f"{destructive.classify(command).reason}: {command}")
+        return (f"about to run this on {host} — {destructive.classify(command).reason} "
+                f"— the command is: {command}")
     if tool == "gmail_send":
         return (f"about to send an email to {args.get('to')} "
                 f"with subject '{args.get('subject')}'")
