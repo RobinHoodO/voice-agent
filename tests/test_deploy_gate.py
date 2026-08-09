@@ -27,13 +27,42 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 STUB = "#!/bin/bash\nexit 0\n"
 
 
+def hermetic_env(**overrides):
+    """os.environ minus every ambient GIT_* variable.
+
+    The pre-commit hook runs this suite from inside a `git commit`, which exports
+    GIT_DIR and GIT_INDEX_FILE. Inherited, they point the sandbox repos below — and
+    deploy.sh's own `git status` — at *this* repository's index, so the dirty-tree
+    case reads the wrong tree and the sandbox `git commit` fails outright. A test
+    that shells out to git has to carry no ambient git context at all.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(overrides)
+    return env
+
+
+def reloaded_marker(tree):
+    """Written by the stubbed reload_app.sh — i.e. "the menubar app was rebuilt"."""
+    return tree.parent / f"{tree.name}.reloaded"
+
+
 def make_tree(root, *, extra_file=None):
-    """A deploy.sh sandbox: the real script, stubbed guards, two tiny packages."""
+    """A deploy.sh sandbox: the real script, stubbed guards, two tiny packages.
+
+    reload_app.sh is the one stub that leaves a trace. It is the script that quits,
+    rebuilds and relaunches Robin's live menubar app, so "did it run?" is the whole
+    question when we are asserting that a refusal happened *before* the Mac was touched.
+    """
     root.mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / "deploy.sh", root / "deploy.sh")
-    for stub in ("drift_gate.sh", "live_session_guard.sh", "reload_app.sh"):
+    for stub in ("drift_gate.sh", "live_session_guard.sh"):
         (root / stub).write_text(STUB)
         (root / stub).chmod(0o755)
+    # The marker lives outside the tree so that "the app was rebuilt" can never be
+    # confused with "the working tree is dirty".
+    (root / "reload_app.sh").write_text(
+        f'#!/bin/bash\ntouch "{reloaded_marker(root)}"\nexit 0\n')
+    (root / "reload_app.sh").chmod(0o755)
     (root / "deploy.sh").chmod(0o755)
     for package in ("core", "mac"):
         (root / package).mkdir()
@@ -57,7 +86,7 @@ def make_bundle(root, source, *, tamper=None, drop=None):
 
 
 def deploy(tree, *args, app=None, env=None):
-    environment = dict(os.environ, DEPLOY_PROBE="0")
+    environment = hermetic_env(DEPLOY_PROBE="0")
     if app is not None:
         environment["THRIVBE_VOICE_APP"] = str(app)
     environment.update(env or {})
@@ -67,8 +96,8 @@ def deploy(tree, *args, app=None, env=None):
 
 def git(tree, *args):
     subprocess.run(["git", "-C", str(tree), *args], check=True, capture_output=True,
-                   env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
-                            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+                   env=hermetic_env(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                                    GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
 
 
 def test_mac_leg_passes_when_the_bundle_matches_the_source(tmp_path):
@@ -100,15 +129,28 @@ def test_mac_leg_blocks_when_a_file_never_made_it_into_the_bundle(tmp_path):
     assert "NOT SHIPPED: mac/thing.py" in result.stderr
 
 
-def test_server_leg_blocks_on_a_dirty_tree(tmp_path):
-    tree = make_tree(tmp_path / "repo", extra_file="scratch.txt")
+@pytest.mark.parametrize("leg", ["server", "all"])
+def test_a_dirty_tree_blocks_before_either_surface_is_touched(tmp_path, leg):
+    """A dirty tree is Robin's normal mid-edit state, and `./deploy.sh` with no argument
+    means `all`. If this refusal ran inside the server leg, the default invocation would
+    quit and rebuild the live menubar app on code the server was about to refuse — the
+    exact divergence the script exists to prevent, produced by the script itself.
+
+    Deliberately NOT a dry run: a dry run never invokes reload_app.sh, so the marker
+    below would prove nothing about the ordering.
+    """
+    tree = make_tree(tmp_path / f"repo-{leg}", extra_file="scratch.txt")
+    app = make_bundle(tmp_path / f"App-{leg}", tree)
     git(tree, "init", "-q", "-b", "main")
     git(tree, "add", "deploy.sh", "core", "mac")
     git(tree, "commit", "-qm", "base")
-    result = deploy(tree, "server", "--dry-run")
+    result = deploy(tree, leg, app=app)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "uncommitted changes" in result.stderr
     assert "scratch.txt" in result.stderr
+    assert not reloaded_marker(tree).exists(), "the app was rebuilt despite the refusal"
+    assert "mac surface verified" not in result.stdout
+    assert "server surface" not in result.stdout
 
 
 def test_server_leg_dry_run_pins_the_pushed_sha(tmp_path):
@@ -122,9 +164,41 @@ def test_server_leg_dry_run_pins_the_pushed_sha(tmp_path):
     result = deploy(tree, "server", "--dry-run")
     assert result.returncode == 0, result.stdout + result.stderr
     sha = subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"],
-                         capture_output=True, text=True).stdout.strip()
+                         capture_output=True, text=True,
+                         env=hermetic_env()).stdout.strip()
     assert f"/opt/thrivbe-ops/deploy.sh voice-agent {sha}" in result.stdout
-    assert "DRY RUN would: git" in result.stdout and "push origin 'main'" in result.stdout
+    assert "DRY RUN would: git" in result.stdout and "push origin main" in result.stdout
+
+
+@pytest.mark.parametrize("form", [["--ref", "v1.2.3"], ["--ref=v1.2.3"]])
+def test_both_ref_spellings_are_accepted(tmp_path, form):
+    """The header documents the space form; the parser used to accept only `--ref=`."""
+    tree = make_tree(tmp_path / f"repo-{len(form)}")
+    git(tree, "init", "-q", "-b", "main")
+    git(tree, "add", "-A")
+    git(tree, "commit", "-qm", "base")
+    git(tree, "remote", "add", "origin", "https://example.invalid/voice-agent.git")
+    result = deploy(tree, "server", "--dry-run", *form)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "/opt/thrivbe-ops/deploy.sh voice-agent v1.2.3" in result.stdout
+
+
+def test_a_ref_carrying_shell_syntax_is_refused_not_quoted(tmp_path):
+    """--ref is interpolated into a command that reaches a remote shell, and it is the
+    thing that makes "the server runs the commit I just built" true. A value that runs
+    local commands, or that survives as a truncated ref while the script exits 0, breaks
+    both. Refuse it outright rather than trusting quoting."""
+    tree = make_tree(tmp_path / "repo")
+    git(tree, "init", "-q", "-b", "main")
+    git(tree, "add", "-A")
+    git(tree, "commit", "-qm", "base")
+    git(tree, "remote", "add", "origin", "https://example.invalid/voice-agent.git")
+    pwned = tmp_path / "PWNED"
+    result = deploy(tree, "server", f"--ref=v1'; touch {pwned}; echo '")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "is not a git ref" in result.stderr
+    assert not pwned.exists(), "a --ref value executed a local command"
+    assert "server surface" not in result.stdout
 
 
 def test_the_server_leg_never_copies_files_by_name():
@@ -148,6 +222,7 @@ def test_drift_gate_refusal_stops_every_leg(tmp_path, leg):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "mac surface" not in result.stdout
     assert "server surface" not in result.stdout
+    assert not reloaded_marker(tree).exists(), "the app was rebuilt despite the refusal"
 
 
 def test_live_session_refusal_stops_the_deploy_before_it_pushes(tmp_path):
@@ -162,3 +237,4 @@ def test_live_session_refusal_stops_the_deploy_before_it_pushes(tmp_path):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "live voice session" in result.stderr
     assert "server surface" not in result.stdout
+    assert not reloaded_marker(tree).exists(), "the app was rebuilt despite the refusal"
