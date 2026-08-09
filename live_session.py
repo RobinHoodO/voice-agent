@@ -241,6 +241,12 @@ class LiveSession(AudioMixin):
         self._vad_bar = float(vad.get("threshold", 0.10))
         self._vad_bar_speaking = float(vad.get("threshold_while_speaking", 0.28))
         self._vad_hold = float(vad.get("barge_in_hold_sec", 0.25))
+        # How long a gap has to last before the turn is considered OVER. A pure silence
+        # timer can't tell "thinking mid-sentence" from "finished", so a short one fires
+        # while Robin is still talking and she answers half a request — which is exactly
+        # what 0.7s did. 1.5s matches the OpenAI branch's server_vad window.
+        # ponytail: a timer, not an endpointing model — tunable per mic via live.vad.
+        self._vad_silence = float(vad.get("silence_sec", 1.5))
         self._cfg: dict = {}                          # snapshot of config for this session
         self._offered_tasks: queue.Queue = queue.Queue()
         self._offered_tids: set = set()

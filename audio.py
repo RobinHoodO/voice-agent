@@ -63,7 +63,7 @@ class AudioMixin:
                 continue
             self._update_level(data)   # metering off the PortAudio callback thread
             if self._backend.manual_vad:
-                # ponytail: match OpenAI's familiar 700ms turn boundary locally.
+                # ponytail: end-of-turn is a local silence timer (live.vad.silence_sec).
                 # While the agent is TALKING the bar is higher and the loud input must
                 # be sustained: an open-ear/bone-conduction headset leaks her own voice
                 # back into the mic, and a single fixed threshold read that as a barge-in
@@ -72,6 +72,7 @@ class AudioMixin:
                 speaking = bool(self._speaking)
                 bar = self._vad_bar_speaking if speaking else self._vad_bar
                 hold = self._vad_hold if speaking else 0.0
+                silence = self._vad_silence
                 if self.level > bar:
                     if self._local_loud_since is None:
                         self._local_loud_since = self._loop.time()
@@ -96,7 +97,7 @@ class AudioMixin:
                     if self._local_speaking:
                         if self._local_silence_since is None:
                             self._local_silence_since = self._loop.time()
-                        elif self._loop.time() - self._local_silence_since >= 0.7:
+                        elif self._loop.time() - self._local_silence_since >= silence:
                             self._local_speaking = False
                             self._local_silence_since = None
                             await self._backend.send_activity_end()

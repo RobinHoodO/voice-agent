@@ -96,6 +96,7 @@ DEFAULTS = {
             "threshold": 0.10,                # level that starts a turn when she's silent
             "threshold_while_speaking": 0.28, # higher bar to INTERRUPT her — rejects headset echo
             "barge_in_hold_sec": 0.25,        # loud input must persist this long to interrupt
+            "silence_sec": 1.5,               # gap that ends a turn — short values answer mid-sentence
         },
         # Stall escalation — silence is ambiguous (thinking / looping / dead all sound the
         # same). Seconds of NO audio on a turn before each cue; 0 disables that step.

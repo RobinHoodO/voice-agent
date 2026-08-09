@@ -33,7 +33,7 @@ class _Backend:
 class _Session(audio.AudioMixin):
     """Minimal stand-in exposing exactly the attributes _pump_mic touches."""
 
-    def __init__(self, levels, agent_speaking, hold=0.25, tick=0.1):
+    def __init__(self, levels, agent_speaking, hold=0.25, tick=0.1, silence=1.5):
         self._levels = list(levels)
         self._speaking = agent_speaking
         self._backend = _Backend()
@@ -47,6 +47,7 @@ class _Session(audio.AudioMixin):
         self._vad_bar = 0.10
         self._vad_bar_speaking = 0.28
         self._vad_hold = hold
+        self._vad_silence = silence
         self._tick = tick
         self._now = 0.0
         self._loop = self
@@ -112,6 +113,15 @@ def test_silence_ends_the_turn():
     s = _Session([0.5, 0.5] + [0.0] * 12, agent_speaking=False, tick=0.2).run()
     assert s.started == 1 and s.stopped == 1
     assert s._backend.ends == 1
+
+
+def test_thinking_pause_mid_sentence_does_not_end_the_turn():
+    """Robin pauses ~1s to think, then keeps talking. The old 0.7s window ended his turn
+    there and she answered half a request while he was still speaking."""
+    s = _Session([0.5] + [0.0] * 5 + [0.5] * 4, agent_speaking=False, tick=0.2).run()
+    assert s.stopped == 0, "a 1.0s thinking pause must not be treated as end-of-turn"
+    assert s._backend.ends == 0
+    assert s.started == 1, "and it is still one continuous turn, not two"
 
 
 def test_defaults_are_wired_from_config():
