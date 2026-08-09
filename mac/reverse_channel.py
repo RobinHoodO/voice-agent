@@ -26,9 +26,15 @@ WHAT HOLDS IT SHUT, in the order an attacker meets it:
     unknown operation, an unknown argument, or a missing one is refused and journalled;
     nothing is ever forwarded to a generic handler. The list is `OPERATIONS` and it is
     data you can read in one screen.
- 5. **Workspace scope, enforced by the KERNEL.** `open_file` realpaths its target and
-    refuses anything that does not land under the reverse-channel workspace.
-    `run_shell` gets the same text scan AND a `sandbox-exec` jail
+ 5. **Workspace scope, enforced by the KERNEL — plus, for `open_file`, a TYPE fence.**
+    `open_file` realpaths its target and refuses anything that does not land under the
+    reverse-channel workspace, and then refuses anything that is not a view-safe
+    document or image opened in a viewer this file names (see `open_refusal` /
+    `open_argv`). Scope alone was not containment there and an audit proved it: the
+    sandbox exists so `run_shell` can write INSIDE the workspace, so a caller wrote a
+    `.command` in scope and asked `open_file` to open it, and LaunchServices ran it as
+    Robin outside every jail. Where a file lives says nothing about what opening it
+    does. `run_shell` gets the same text scan AND a `sandbox-exec` jail
     (`mac/shell_sandbox.py`) that denies file access by default and re-allows it only
     under the realpath'd root. The jail is not decoration: an audit of the text-scan-
     only version read `~/.ssh/id_rsa` through `$HOME`, read an outside file through
@@ -82,6 +88,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -374,15 +381,107 @@ def _guard_shell_scope(channel: "ReverseChannel", args: dict) -> None:
         raise Refused(f"out of scope: {violation}", 400, "refused_scope")
 
 
-def _op_open_file(channel: "ReverseChannel", args: dict) -> str:
-    """Hand one in-scope file to LaunchServices.
+# --- what `open_file` is allowed to be --------------------------------------------------
+# An audit walked through the front door here, and it did it without breaking either
+# fence — it composed them. `run_shell` is jailed to the workspace, and WRITING INSIDE
+# the workspace is precisely what that jail is for, so a caller writes `evil.command`
+# in scope (allowed, by design) and then asks `open_file` to open it. `open` cannot be
+# sandboxed — it asks the window server to launch something as Robin, so a jail around
+# `open` would contain the wrong process — and LaunchServices does not open a
+# `.command`, it RUNS it, as Robin, outside every jail. The canary landed outside the
+# workspace. Containing WHERE a file lives says nothing about WHAT opening it does, and
+# the spoken preview ("about to open evil.command") read like a document, not like code.
+#
+# So this operation no longer dispatches on file type at all. Two locks, both closed by
+# default:
+#
+#   * a TYPE allow-list — a file is opened only if its extension is one of the viewing
+#     formats below, plus a regular-file check, plus a refusal of anything carrying the
+#     execute bit, plus a refusal of anything living inside a bundle directory. Absent
+#     on purpose: `.command`/`.sh`/`.scpt`/`.applescript`/`.terminal`/`.workflow`/`.app`
+#     (run outright), `.webloc`/`.url` (navigate somewhere on Robin's behalf), `.html`
+#     (a local page runs JavaScript and can read its file:// neighbours), `.rtf`/`.docx`
+#     (rich parsers, macros), and every extensionless file. Source code is absent too —
+#     `run_shell` can `cat` it, and an editor opening a project is a bigger machine than
+#     this operation needs to be.
+#   * a FIXED viewer — the argv below names the application, so LaunchServices never
+#     gets to pick a handler for the file. Even a mislabelled file therefore lands in a
+#     text editor or in Preview rather than in whatever claims its type.
+#
+# The target handed to `open` is always an absolute realpath, so it cannot be read as a
+# flag, and both locks are checked TWICE: in the guard (which runs again at confirm
+# time) and again inside `_op_open_file` on the realpath it is about to hand over.
+#
+# What is left, said plainly: `-t` opens Robin's default TEXT editor, whichever he has
+# set, and `-a Preview` opens Preview. Neither one runs the document it is given — that
+# is the whole point of naming them — but this operation's safety does rest on those two
+# applications being document viewers, which is a much smaller assumption than trusting
+# LaunchServices to pick a handler for a file an attacker named.
+VIEWABLE_TEXT_EXTENSIONS = frozenset({
+    ".txt", ".md", ".markdown", ".rst", ".log",
+    ".json", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".ini", ".conf",
+})
+VIEWABLE_IMAGE_EXTENSIONS = frozenset({
+    ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".tiff", ".tif", ".bmp", ".heic",
+})
+VIEWABLE_EXTENSIONS = VIEWABLE_TEXT_EXTENSIONS | VIEWABLE_IMAGE_EXTENSIONS
 
-    NOT sandboxed, and it cannot be: `open` asks the window server to launch an app as
-    Robin, so a jail around it would contain the wrong process. Containment here is the
-    path check — which is therefore made TWICE, once in the guard and once on the
-    realpath this function is about to hand over. The gap between them is where a
-    symlink swapped after the guard would land, and staging (open_file always stages)
-    makes that gap as wide as a spoken confirmation.
+# Directory suffixes macOS treats as one openable object. A file INSIDE one of these is
+# refused even when its own extension is harmless: the interesting question there is not
+# what the leaf is, it is why a phone is reaching into a bundle at all.
+BUNDLE_SUFFIXES = (".app", ".workflow", ".scptd", ".rtfd", ".bundle", ".pkg",
+                   ".framework", ".download", ".prefpane", ".service", ".qlgenerator")
+
+
+def open_refusal(target: str, root: str) -> str | None:
+    """Why this file will not be handed to the window server, or None.
+
+    `target` is an already-realpath'd absolute path known to be inside `root`; this
+    function answers the second question — not "where is it" but "what is it".
+    """
+    name = os.path.basename(target)
+    extension = os.path.splitext(name)[1].lower()
+    if extension not in VIEWABLE_EXTENSIONS:
+        return (f"{name} is not a type this channel opens. It shows documents and "
+                f"images for VIEWING ({', '.join(sorted(VIEWABLE_EXTENSIONS))}) and "
+                f"refuses anything a handler could run")
+    relative = os.path.relpath(target, root)
+    for component in relative.split(os.sep):
+        if component.lower().endswith(BUNDLE_SUFFIXES):
+            return f"{name} lives inside the bundle {component}"
+    try:
+        info = os.stat(target)
+    except OSError as error:
+        return f"{name} could not be read ({error.strerror or error})"
+    if not stat.S_ISREG(info.st_mode):
+        return f"{name} is not a regular file"
+    if info.st_mode & 0o111:
+        return f"{name} has the execute bit set — a runnable file is never opened here"
+    return None
+
+
+def open_argv(target: str) -> list:
+    """The FIXED viewer for this file — never the handler LaunchServices would choose.
+
+    `-a Preview` / `-t` (the default TEXT editor) both mean "show me this", and neither
+    consults the file about what should happen to it. Naming the application is the
+    difference between opening a document and running one.
+    """
+    extension = os.path.splitext(target)[1].lower()
+    if extension in VIEWABLE_IMAGE_EXTENSIONS:
+        return ["/usr/bin/open", "-a", "Preview", target]
+    return ["/usr/bin/open", "-t", target]
+
+
+def _op_open_file(channel: "ReverseChannel", args: dict) -> str:
+    """Show one in-scope, view-safe file in a viewer this function picks.
+
+    NOT sandboxed, and it cannot be, which is why containment here is a pair of checks
+    rather than a jail — and why both of them are made TWICE, once in the guard and once
+    here on the realpath about to be handed over. The gap between the two is where a
+    symlink swapped after the guard would land, or a `chmod +x` applied while Robin was
+    saying yes, and staging (open_file always stages) makes that gap as wide as a spoken
+    confirmation.
     """
     target = os.path.realpath(
         os.path.join(channel.root, os.path.expanduser(args["path"])))
@@ -392,7 +491,11 @@ def _op_open_file(channel: "ReverseChannel", args: dict) -> str:
         # to keep.
         return (f"error: refused — {args['path']} resolves outside the workspace "
                 f"({channel.root}) at the moment of opening it")
-    result = subprocess.run(["/usr/bin/open", target],
+    refusal = open_refusal(target, channel.root)
+    if refusal:
+        return (f"error: refused — {refusal}, checked again at the moment of "
+                f"opening it")
+    result = subprocess.run(open_argv(target),
                             capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         return f"error: {(result.stderr or '').strip() or 'open failed'}"
@@ -407,6 +510,9 @@ def _guard_open_scope(channel: "ReverseChannel", args: dict) -> None:
     target = os.path.realpath(os.path.join(channel.root, os.path.expanduser(path)))
     if not os.path.exists(target):
         raise Refused(f"{path} does not exist", 400, "refused_missing")
+    refusal = open_refusal(target, channel.root)
+    if refusal:
+        raise Refused(f"will not open that: {refusal}", 400, "refused_open_type")
 
 
 def _op_grab_context(channel: "ReverseChannel", args: dict) -> str:

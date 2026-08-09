@@ -459,6 +459,210 @@ def test_open_file_checks_the_path_again_at_the_moment_it_acts(caller, workspace
     assert "refused" in result and "outside the workspace" in result
 
 
+# --- 4c. open_file: WHERE a file lives is not WHAT opening it does ---------------------
+# The escape an audit walked through, and it broke neither fence — it composed them.
+# `run_shell` is jailed to the workspace, and writing INSIDE the workspace is what that
+# jail is FOR, so the caller writes `evil.command` in scope (allowed, by design) and
+# then asks `open_file` to open it. `open` is not sandboxed and LaunchServices does not
+# open a `.command` — it RUNS it, as Robin, outside every jail, and the canary landed
+# outside the workspace. The confirmation preview said "about to open evil.command",
+# which reads like a document.
+#
+# The fix is a type fence plus a named viewer, so these tests ask both questions: is a
+# runnable thing refused, and when something IS opened, does anything but this code get
+# to decide what happens to it.
+
+EXFIL_CANARY = "PWNED-VIA-LAUNCHSERVICES-4c1d"
+
+
+def _record_opens(monkeypatch, launched):
+    """Record what is handed to `open` and nothing else.
+
+    Other things shell out during a request — the Keychain lookup for the token is one —
+    so a recorder that captures every subprocess captures noise and fails for the wrong
+    reason.
+    """
+    def fake_run(command, *args, **kwargs):
+        if command and str(command[0]).endswith("/open"):
+            launched.append(list(command))
+        return _ok()
+
+    monkeypatch.setattr(rc.subprocess, "run", fake_run)
+
+
+def _plant(workspace, name, body="hi", mode=0o644):
+    path = os.path.join(workspace, "notes", name)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    os.chmod(path, mode)
+    return path
+
+
+def test_a_command_file_written_in_scope_by_run_shell_is_not_opened(caller, workspace,
+                                                                    outside, monkeypatch):
+    """The blocker, end to end: the two allow-listed operations composed.
+
+    Step one is REAL — the sandboxed shell writes an executable `.command` inside the
+    workspace, which it is allowed to do and which the test asserts, because a fix that
+    worked by making step one fail would be fixing the wrong half. Step two is the one
+    under test.
+    """
+    import base64
+
+    payload = (f"#!/bin/sh\n"
+               f"echo {EXFIL_CANARY} > {outside}/exfil.txt\n")
+    encoded = base64.b64encode(payload.encode()).decode()
+    _status, staged = caller.op("run_shell", {
+        "command": f"echo {encoded} | base64 -d > evil.command && chmod +x evil.command"})
+    if staged.get("status") == "staged":
+        caller.confirm(staged["id"], "yes")
+    planted = os.path.join(workspace, "evil.command")
+    assert os.path.exists(planted), "premise failed: the jail is supposed to allow this"
+    assert os.access(planted, os.X_OK)
+
+    launched = []
+    _record_opens(monkeypatch, launched)
+    status, payload = caller.op("open_file", {"path": "evil.command"})
+    assert status == 400, payload
+    assert "will not open that" in payload["reason"]
+    assert launched == [], "a runnable file was handed to LaunchServices"
+    assert not (outside / "exfil.txt").exists(), "the payload executed"
+    assert ("refused_open_type", "open_file") in journal_events()
+
+
+def test_a_confirmed_yes_does_not_open_a_planted_command_file(caller, workspace,
+                                                              outside, monkeypatch):
+    """The same escape with the confirmation granted, because the gate was never the
+    containment here: a staged action that is refused before it stages cannot be
+    confirmed into existence, and a "yes" must not conjure a slot."""
+    _plant(workspace, "evil.command", "#!/bin/sh\necho x\n", mode=0o755)
+    status, payload = caller.op("open_file", {"path": "notes/evil.command"})
+    assert status == 400
+    assert caller.channel.gate.current is None, "a refused action was staged anyway"
+
+    launched = []
+    _record_opens(monkeypatch, launched)
+    assert caller.confirm(payload.get("id", "whatever"), "yes")[0] == 409
+    assert launched == []
+    assert not (outside / "exfil.txt").exists()
+
+
+@pytest.mark.parametrize("name", [
+    "evil.command", "evil.sh", "evil.zsh", "evil.bash", "evil.scpt",
+    "evil.applescript", "evil.terminal", "evil.workflow", "evil.webloc", "evil.url",
+    "evil.html", "evil.htm", "evil.svg", "evil.rtf", "evil.docx", "evil.pkg",
+    "evil.dylib", "evil.jar", "Makefile", "evil",
+])
+def test_a_type_a_handler_could_run_is_refused_even_in_scope(caller, workspace, name):
+    """Deny by default. Every one of these is a file macOS knows how to ACT on, and the
+    extensionless ones are here because "no extension" must not mean "unclassified, so
+    fine"."""
+    _plant(workspace, name)
+    status, payload = caller.op("open_file", {"path": f"notes/{name}"})
+    assert status == 400, f"{name} was not refused"
+    assert "not a type this channel opens" in payload["reason"]
+
+
+@pytest.mark.parametrize("name", ["hello.md", "notes.txt", "data.json", "shot.png"])
+def test_a_view_safe_file_still_opens(caller, workspace, monkeypatch, name):
+    """The fence is narrow, not shut: refusing everything would pass every test above
+    and remove the operation."""
+    _plant(workspace, name)
+    monkeypatch.setattr(rc.subprocess, "run", lambda *a, **k: _ok())
+    _status, staged = caller.op("open_file", {"path": f"notes/{name}"})
+    assert staged["status"] == "staged", staged
+    _status, payload = caller.confirm(staged["id"], "yes")
+    assert payload["status"] == "confirmed"
+    assert payload["result"].startswith("opened")
+
+
+def test_an_executable_bit_is_refused_even_on_an_allowed_extension(caller, workspace):
+    """The extension is a label the file chose for itself. The execute bit is what the
+    kernel thinks of it, and a `.txt` with +x is a script wearing a hat."""
+    _plant(workspace, "innocent.txt", "#!/bin/sh\necho x\n", mode=0o755)
+    status, payload = caller.op("open_file", {"path": "notes/innocent.txt"})
+    assert status == 400
+    assert "execute bit" in payload["reason"]
+
+
+def test_a_directory_is_not_opened(caller, workspace):
+    os.mkdir(os.path.join(workspace, "notes", "folder.md"))
+    status, payload = caller.op("open_file", {"path": "notes/folder.md"})
+    assert status == 400
+    assert "not a regular file" in payload["reason"]
+
+
+def test_a_file_inside_a_bundle_is_refused(caller, workspace):
+    """`Evil.app/Contents/Resources/notes.txt` is a harmless leaf in a place a phone has
+    no business reaching into."""
+    bundle = os.path.join(workspace, "notes", "Evil.app", "Contents")
+    os.makedirs(bundle)
+    with open(os.path.join(bundle, "readme.txt"), "w", encoding="utf-8") as handle:
+        handle.write("x")
+    status, payload = caller.op("open_file",
+                                {"path": "notes/Evil.app/Contents/readme.txt"})
+    assert status == 400
+    assert "bundle" in payload["reason"]
+
+
+def test_the_file_is_handed_to_a_named_viewer_not_to_a_handler(caller, workspace,
+                                                                monkeypatch):
+    """The second lock. Even a correctly-labelled file never gets to nominate the
+    application that opens it: the argv names one."""
+    seen = []
+    _record_opens(monkeypatch, seen)
+    _status, staged = caller.op("open_file", {"path": "notes/hello.md"})
+    caller.confirm(staged["id"], "yes")
+    assert seen[-1] == ["/usr/bin/open", "-t",
+                        os.path.join(workspace, "notes", "hello.md")]
+
+    _plant(workspace, "shot.png")
+    _status, staged = caller.op("open_file", {"path": "notes/shot.png"})
+    caller.confirm(staged["id"], "yes")
+    assert seen[-1] == ["/usr/bin/open", "-a", "Preview",
+                        os.path.join(workspace, "notes", "shot.png")]
+    assert all(part.startswith("/") for part in (seen[-1][-1], seen[0][-1])), \
+        "the target must be absolute so it cannot be read as a flag"
+
+
+def test_a_file_that_becomes_runnable_after_the_gate_is_not_opened(caller, workspace,
+                                                                    monkeypatch):
+    """The type check is re-asked at confirm time for the same reason the path check is:
+    the answer given when the action was staged is stale by the time anything acts."""
+    launched = []
+    _status, staged = caller.op("open_file", {"path": "notes/hello.md"})
+    assert staged["status"] == "staged"
+    os.chmod(os.path.join(workspace, "notes", "hello.md"), 0o755)
+    _record_opens(monkeypatch, launched)
+    status, payload = caller.confirm(staged["id"], "yes")
+    assert status == 400, payload
+    assert launched == []
+    assert ("refused_scope_on_confirm", "open_file") in journal_events()
+
+
+def test_op_open_file_refuses_a_runnable_type_with_the_guard_bypassed(caller, workspace,
+                                                                       monkeypatch):
+    """Defence in depth, asserted rather than assumed: the function that hands a path to
+    the window server asks the question itself, so a future caller that forgets the
+    guard does not become the hole."""
+    _plant(workspace, "evil.command", "#!/bin/sh\n", mode=0o755)
+
+    def never(*args, **kwargs):
+        raise AssertionError("open ran on a runnable file")
+
+    monkeypatch.setattr(rc.subprocess, "run", never)
+    result = rc._op_open_file(caller.channel, {"path": "notes/evil.command"})
+    assert "refused" in result and "not a type this channel opens" in result
+
+
+def test_the_preview_says_the_file_is_shown_not_run(caller):
+    """The sentence Robin hears is the last fence, and the old one described the wrong
+    action."""
+    _status, staged = caller.op("open_file", {"path": "notes/hello.md"})
+    assert "displayed, not run" in staged["preview"]
+    assert "notes/hello.md" in staged["preview"]
+
+
 def test_a_workspace_that_is_the_whole_disk_is_refused(caller, monkeypatch):
     config.set_("reverse_channel.workspace", "/")
     status, payload = caller.op("run_shell", {"command": "ls"})

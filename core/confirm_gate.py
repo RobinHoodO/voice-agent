@@ -179,7 +179,14 @@ def confirmation_preview(tool: str, args: dict, host: str = "this machine") -> s
     if tool == "close_finished_tasks":
         return f"about to close the foreign pane '{args.get('task_name')}'"
     if tool == "open_file":
-        return f"about to open {args.get('path')} on {host}"
+        # "about to open X" was the sentence an audit exploited: it reads as opening a
+        # document, and the thing being opened was a `.command` that LaunchServices then
+        # RAN. The surface now refuses anything runnable and names the viewer itself
+        # (`mac.reverse_channel.open_refusal` / `open_argv`), so this sentence can say
+        # what actually happens — and it says it out loud, because "shown, not run" is
+        # the whole difference Robin is being asked to agree to.
+        return (f"about to show {args.get('path')} on {host} in a viewer "
+                f"— it is displayed, not run")
     known = ", ".join(f"{k}={v}" for k, v in list(args.items())[:3]) or "no arguments"
     return f"about to run {tool.replace('_', ' ')} with {known}"
 
