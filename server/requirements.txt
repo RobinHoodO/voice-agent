@@ -1,0 +1,8 @@
+# The server surface only. Deliberately does NOT include the Mac stack
+# (rumps / pynput / py2app / pyobjc / sounddevice) — core imports clean without it,
+# and tests/test_headless_core.py is what keeps that true.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=13
+numpy
+httpx

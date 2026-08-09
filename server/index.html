@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#07080b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Pam">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>Pam — Thrivbe Voice</title>
+<style>
+  :root{
+    --bg:#07080b; --panel:#101319; --line:#1e2430; --ink:#e8ecf4; --dim:#8a94a6;
+    --live:#4ade80; --talk:#7aa2ff; --warn:#f0b429; --bad:#f87171;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,BlinkMacSystemFont,
+    "Segoe UI",Helvetica,Arial,sans-serif;
+    display:flex; flex-direction:column;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.2px}
+  #dot{width:9px;height:9px;border-radius:50%;background:#39404e;transition:background .2s}
+  #dot.listening{background:var(--live)} #dot.speaking{background:var(--talk)}
+  #dot.thinking,#dot.acting{background:var(--warn)} #dot.reconnecting,#dot.error{background:var(--bad)}
+  #state{margin-left:auto;color:var(--dim);font-size:12px;font-variant:tabular-nums}
+  main{flex:1;overflow-y:auto;padding:16px 18px;-webkit-overflow-scrolling:touch}
+  .turn{margin:0 0 12px;max-width:88%;padding:9px 12px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word}
+  .turn.you{margin-left:auto;background:#1b2333;border:1px solid #24304a}
+  .turn.agent{background:var(--panel);border:1px solid var(--line)}
+  .sys{color:var(--dim);font-size:12px;margin:0 0 10px;text-align:center}
+  .sys.bad{color:var(--bad)}
+  footer{border-top:1px solid var(--line);padding:14px 18px 20px;display:flex;flex-direction:column;gap:12px}
+  #meter{height:3px;border-radius:2px;background:#161b24;overflow:hidden}
+  #meter i{display:block;height:100%;width:0%;background:var(--live);transition:width .06s linear}
+  button{
+    font:600 16px/1 inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);
+    border-radius:999px;padding:16px;width:100%;
+  }
+  button.live{background:#12331f;border-color:#1f6b3c;color:#c8ffdb}
+  button:disabled{opacity:.45}
+  #setup{display:flex;gap:8px}
+  #setup input{
+    flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    color:var(--ink);padding:12px;font:14px/1 inherit
+  }
+  #setup button{width:auto;padding:12px 16px;font-size:14px}
+  small{color:var(--dim);font-size:11px}
+</style>
+</head>
+<body>
+
+<header>
+  <span id="dot"></span>
+  <h1>Pam</h1>
+  <span id="state">idle</span>
+</header>
+
+<main id="log"></main>
+
+<footer>
+  <div id="meter"><i id="meterbar"></i></div>
+  <button id="talk">Start conversation</button>
+  <div id="setup">
+    <input id="token" type="password" placeholder="access token" autocomplete="off"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button id="save">Save</button>
+  </div>
+  <small id="foot">not connected</small>
+</footer>
+
+<script>
+"use strict";
+
+/* ── Why this file has no VAD ────────────────────────────────────────────────
+   The turn boundaries — when a turn starts, when it ends, when an interruption
+   counts — live in core/audio_core.py and run on the server, identically to the
+   Mac. The browser is a microphone and a speaker.
+
+   Concretely: EVERY captured frame is put on the socket the moment it exists,
+   including while Pam is talking and including inside the barge-in hold window.
+   The server's mic pump deliberately never drops those frames — dropping them
+   eats the first word of a real interruption — so this file must not add a gate,
+   a queue-and-batch, or a "she's speaking, don't send" shortcut.
+
+   Barge-in is server-driven too: when core decides Robin interrupted, it clears
+   its playback queue and sends {"type":"interrupted"}. The only thing this file
+   does is flush its own audio buffer on that frame.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+
+// Per-TAB identity. sessionStorage, not localStorage: a second tab is a second
+// conversation with its own confirmation state, and must never share a key.
+let SESSION = sessionStorage.getItem("voiceSession");
+if (!SESSION) {
+  SESSION = (crypto.randomUUID && crypto.randomUUID()) ||
+            ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+              (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+  sessionStorage.setItem("voiceSession", SESSION);
+}
+
+let ws = null, ctx = null, micStream = null, capture = null, player = null, sink = null;
+let micRate = 0, outputRate = 0, frameSamples = 0, configured = false;
+let playResampler = null, running = false;
+
+/* ── worklets ─────────────────────────────────────────────────────────────── */
+
+const CAPTURE_WORKLET = `
+class CaptureProcessor extends AudioWorkletProcessor {
+  constructor(){
+    super();
+    this.rate = 0; this.frame = 0; this.ratio = 1;
+    this.tail = new Float32Array(0); this.pos = 0;
+    this.acc = new Float32Array(0); this.accLen = 0;
+    this.port.onmessage = (e) => {
+      if (e.data && e.data.type === 'config') {
+        this.rate = e.data.micRate; this.frame = e.data.frameSamples;
+        this.ratio = sampleRate / this.rate;
+        this.tail = new Float32Array(0); this.pos = 0;
+        this.acc = new Float32Array(this.frame); this.accLen = 0;
+      }
+    };
+  }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch || !this.rate) return true;
+    // Resample the device rate (usually 48k) down to whatever the ACTIVE backend
+    // asked for, carrying the fractional read position across blocks so the stream
+    // has no periodic click at block boundaries.
+    const src = new Float32Array(this.tail.length + ch.length);
+    src.set(this.tail, 0); src.set(ch, this.tail.length);
+    let p = this.pos;
+    while (Math.floor(p) + 1 < src.length) {
+      const i = Math.floor(p), f = p - i;
+      this.acc[this.accLen++] = src[i] * (1 - f) + src[i + 1] * f;
+      p += this.ratio;
+      if (this.accLen === this.frame) {
+        const pcm = new Int16Array(this.frame);
+        for (let k = 0; k < this.frame; k++) {
+          let s = Math.max(-1, Math.min(1, this.acc[k]));
+          pcm[k] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        this.port.postMessage(pcm.buffer, [pcm.buffer]);
+        this.accLen = 0;
+      }
+    }
+    const consumed = Math.floor(p);
+    this.tail = src.slice(consumed);
+    this.pos = p - consumed;
+    return true;
+  }
+}
+registerProcessor('capture-processor', CaptureProcessor);
+`;
+
+const PLAYER_WORKLET = `
+class PlayerProcessor extends AudioWorkletProcessor {
+  constructor(){
+    super();
+    this.q = []; this.cur = null; this.idx = 0; this.queued = 0;
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d.type === 'pcm') { const a = new Float32Array(d.buf); this.q.push(a); this.queued += a.length; }
+      // Barge-in: drop everything not yet played, this render quantum.
+      else if (d.type === 'flush') { this.q = []; this.cur = null; this.idx = 0; this.queued = 0; }
+    };
+  }
+  process(_inputs, outputs){
+    const out = outputs[0][0];
+    for (let i = 0; i < out.length; i++) {
+      if (!this.cur || this.idx >= this.cur.length) { this.cur = this.q.shift() || null; this.idx = 0; }
+      if (this.cur) { out[i] = this.cur[this.idx++]; this.queued--; } else { out[i] = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('player-processor', PlayerProcessor);
+`;
+
+function workletURL(src){ return URL.createObjectURL(new Blob([src], {type:"application/javascript"})); }
+
+/* ── playback resampler (output_rate → device rate) ───────────────────────── */
+
+function makeResampler(fromRate, toRate){
+  const ratio = fromRate / toRate;
+  let tail = new Float32Array(0), pos = 0;
+  return {
+    push(int16){
+      const inp = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) inp[i] = int16[i] / 32768;
+      const src = new Float32Array(tail.length + inp.length);
+      src.set(tail, 0); src.set(inp, tail.length);
+      const out = [];
+      let p = pos;
+      while (Math.floor(p) + 1 < src.length) {
+        const i = Math.floor(p), f = p - i;
+        out.push(src[i] * (1 - f) + src[i + 1] * f);
+        p += ratio;
+      }
+      const consumed = Math.floor(p);
+      tail = src.slice(consumed); pos = p - consumed;
+      return Float32Array.from(out);
+    },
+    reset(){ tail = new Float32Array(0); pos = 0; }
+  };
+}
+
+/* ── UI ───────────────────────────────────────────────────────────────────── */
+
+function sys(text, bad){
+  const p = document.createElement("p");
+  p.className = "sys" + (bad ? " bad" : "");
+  p.textContent = text;
+  logEl.appendChild(p); logEl.scrollTop = logEl.scrollHeight;
+}
+function turn(role, text){
+  const p = document.createElement("p");
+  p.className = "turn " + (role === "you" ? "you" : "agent");
+  p.textContent = text;
+  logEl.appendChild(p); logEl.scrollTop = logEl.scrollHeight;
+}
+function setState(s){
+  $("state").textContent = s;
+  $("dot").className = s;
+}
+function setLevel(v){ $("meterbar").style.width = Math.min(100, v * 100).toFixed(0) + "%"; }
+
+$("token").value = localStorage.getItem("voiceToken") || "";
+$("save").onclick = () => {
+  localStorage.setItem("voiceToken", $("token").value.trim());
+  $("foot").textContent = "token saved";
+};
+
+/* ── audio graph ──────────────────────────────────────────────────────────── */
+
+async function openAudio(){
+  // Everything here must happen inside the tap: iOS will not start an AudioContext
+  // or hand over the microphone outside a user gesture.
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.resume();
+  await ctx.audioWorklet.addModule(workletURL(CAPTURE_WORKLET));
+  await ctx.audioWorklet.addModule(workletURL(PLAYER_WORKLET));
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,   // her voice out of the phone speaker leaks straight back
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1
+    }
+  });
+
+  capture = new AudioWorkletNode(ctx, "capture-processor");
+  capture.port.onmessage = (e) => {
+    const buf = e.data;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !configured) return;
+    ws.send(buf);                      // straight out — no gate, no batching
+    const pcm = new Int16Array(buf);
+    let sum = 0;
+    for (let i = 0; i < pcm.length; i += 8) sum += pcm[i] * pcm[i];
+    setLevel(Math.sqrt(sum / (pcm.length / 8)) / 4000);
+  };
+  ctx.createMediaStreamSource(micStream).connect(capture);
+  // A worklet is only pulled if it reaches the destination; route it through silence.
+  sink = ctx.createGain(); sink.gain.value = 0;
+  capture.connect(sink).connect(ctx.destination);
+
+  player = new AudioWorkletNode(ctx, "player-processor");
+  player.connect(ctx.destination);
+}
+
+function closeAudio(){
+  try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { if (capture) capture.disconnect(); } catch (e) {}
+  try { if (player) player.disconnect(); } catch (e) {}
+  try { if (ctx) ctx.close(); } catch (e) {}
+  ctx = micStream = capture = player = sink = null;
+  configured = false; playResampler = null;
+  setLevel(0);
+}
+
+/* ── the socket ───────────────────────────────────────────────────────────── */
+
+function connect(){
+  const token = ($("token").value || localStorage.getItem("voiceToken") || "").trim();
+  if (!token) { sys("no access token — save one first", true); return stop(); }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${proto}://${location.host}/live?token=${encodeURIComponent(token)}` +
+              `&session=${encodeURIComponent(SESSION)}`;
+  ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => { $("foot").textContent = "connected · " + SESSION.slice(0, 8); };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== "string") {           // model audio, PCM16 @ output_rate
+      if (!player || !playResampler) return;
+      const f32 = playResampler.push(new Int16Array(ev.data));
+      player.port.postMessage({type: "pcm", buf: f32.buffer}, [f32.buffer]);
+      return;
+    }
+    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.type === "audio") {
+      // The ACTIVE backend's rates, read off core's backend.mic_rate server-side.
+      // Nothing about 16k/24k is decided in this file.
+      micRate = m.mic_rate; outputRate = m.output_rate; frameSamples = m.frame_samples;
+      playResampler = makeResampler(outputRate, ctx.sampleRate);
+      capture.port.postMessage({type: "config", micRate, frameSamples});
+      configured = true;
+      $("foot").textContent = `mic ${micRate} Hz · playback ${outputRate} Hz · ` +
+                              `device ${Math.round(ctx.sampleRate)} Hz`;
+    } else if (m.type === "interrupted") {
+      // Barge-in decided by core. Drop what has not been spoken yet.
+      if (player) player.port.postMessage({type: "flush"});
+      if (playResampler) playResampler.reset();
+    } else if (m.type === "state") {
+      setState(m.state);
+    } else if (m.type === "turn") {
+      turn(m.role, m.text);
+    } else if (m.type === "notice") {
+      sys(m.text);
+    } else if (m.type === "ended") {
+      sys("session ended (" + (m.reason || "") + ")");
+    } else if (m.type === "error") {
+      sys(m.text || "server error", true);
+    }
+  };
+
+  ws.onclose = (e) => {
+    if (e.code === 1008) sys("rejected — check the access token", true);
+    if (running) stop();
+  };
+  ws.onerror = () => sys("socket error", true);
+}
+
+async function start(){
+  running = true;
+  $("talk").textContent = "End conversation";
+  $("talk").classList.add("live");
+  setState("connecting");
+  try {
+    await openAudio();
+  } catch (e) {
+    sys("microphone unavailable: " + e.message, true);
+    return stop();
+  }
+  connect();
+}
+
+function stop(){
+  running = false;
+  $("talk").textContent = "Start conversation";
+  $("talk").classList.remove("live");
+  setState("idle");
+  try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: "stop"})); } catch (e) {}
+  try { if (ws) ws.close(); } catch (e) {}
+  ws = null;
+  closeAudio();
+  $("foot").textContent = "not connected";
+}
+
+$("talk").onclick = () => running ? stop() : start();
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>

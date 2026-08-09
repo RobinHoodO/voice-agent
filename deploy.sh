@@ -34,7 +34,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$ROOT/Thrivbe Voice.app"
+# THRIVBE_VOICE_APP is an override for tests/tests-of-the-gate only; the deploy path
+# always uses the bundle sitting next to this script, the one reload_app.sh just built.
+APP="${THRIVBE_VOICE_APP:-$ROOT/Thrivbe Voice.app}"
 BUNDLE_LIB="$APP/Contents/Resources/lib/python3.12"
 
 # Thrivbe-1 side of the house deploy. The project must be checked out at

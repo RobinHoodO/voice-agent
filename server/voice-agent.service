@@ -1,0 +1,48 @@
+# Thrivbe Voice — phone surface (Pam on the iPhone).
+#
+# NOT INSTALLED YET. voice-bridge is still Robin's live phone assistant on :8765
+# and must keep working until this replaces it. Install steps: server/README.md.
+#
+#   install -m0644 voice-agent.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now voice-agent
+#
+# Port 8767 — checked against Thrivbe-1's listeners on 2026-08-09; 8765 (voice-bridge
+# direct) and 8766 (voice-bridge behind `tailscale serve --https=8451`) stay untouched.
+#
+# TLS reuses voice-bridge's existing certificate. Those files are server-only and are
+# never deployed from the repo; this unit reads them in place rather than copying, so
+# there is exactly one certificate to renew. cert.key is root-only (0600), which is why
+# this unit runs as root exactly like voice-bridge.service does.
+
+[Unit]
+Description=Thrivbe Voice — phone surface (browser mic -> core LiveSession)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/voice-agent
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/voice-agent
+# Secrets: core.secrets resolves store -> env -> $CREDENTIALS_DIRECTORY. Nothing
+# secret belongs in this file; the units below hand systemd the paths instead.
+#   voice_agent_token — the shared client token (X-Voice-Token / ?token=)
+#   openai            — the Realtime API key core/config.py resolves as "openai"
+LoadCredential=voice_agent_token:/opt/voice-agent/secrets/voice_agent_token
+LoadCredential=openai:/opt/voice-agent/secrets/openai
+ExecStart=/opt/voice-agent/bin/uvicorn server.app:app \
+    --host 0.0.0.0 --port 8767 \
+    --ssl-keyfile /opt/voice-bridge/certs/cert.key \
+    --ssl-certfile /opt/voice-bridge/certs/cert.crt \
+    --ws-max-size 4194304 \
+    --timeout-graceful-shutdown 10
+Restart=always
+RestartSec=5
+# One live conversation is one paid realtime socket and one thread; keep the blast
+# radius of a stuck session small.
+Environment=VOICE_AGENT_MAX_SESSIONS=4
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
