@@ -1,10 +1,14 @@
 """LiveSession — one live Realtime conversation: orchestration only.
 
-The split-out collaborators live in: backends/ (wire protocol per provider),
-realtime_client.py (OpenAI constants/auth), audio.py (AudioMixin: mic/playback),
-shell.py (Shell), tools.py (TOOLS + helpers), live_prompt.py (instructions),
-macos_context.py (screen capture). This module wires them together and runs the
-asyncio event loop + the normalized-event handler.
+The split-out collaborators live in: core/backends/ (wire protocol per provider),
+core/realtime_client.py (OpenAI constants/auth), core/audio_core.py (AudioCoreMixin:
+the mic pump + VAD turn boundaries), core/shell.py (Shell), core/tools.py (TOOLS +
+helpers), core/live_prompt.py (instructions). This module wires them together and
+runs the asyncio event loop + the normalized-event handler.
+
+Anything that needs a real machine — the audio streams, a desktop notification, the
+screen, the clipboard — is a capability in core.caps, registered by the surface
+(mac.caps_install on this Mac). Nothing here imports macOS.
 """
 import asyncio
 import json
