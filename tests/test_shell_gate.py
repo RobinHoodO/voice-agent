@@ -175,17 +175,72 @@ def test_a_stale_stage_expires_instead_of_running(monkeypatch):
     run(lambda: (session, scenario))
 
 
-def test_only_one_command_is_staged_at_a_time(monkeypatch):
-    """Two staged actions and one spoken "yes" is a coin flip about which one runs."""
+def test_only_one_command_is_staged_at_a_time_and_the_FIRST_one_wins(monkeypatch):
+    """Two staged actions and one spoken "yes" is a coin flip about which one runs.
+
+    This test used to assert last-wins (the second stage silently replaced the first).
+    That was the bug, not the contract: the preview Robin HEARS is the first one, so
+    last-wins means his "yes" executes a command he was never read. The slot is now
+    first-wins — the second attempt is refused, not staged, not run.
+    """
     session = make_session("server", monkeypatch)
 
     async def scenario(s):
         await call_shell(s, "rm -rf /opt/a")
         s._ws.sent.clear()
-        await call_shell(s, "rm -rf /opt/b")
+        out = await call_shell(s, "rm -rf /opt/b")
+        assert "REFUSED" in out
+        assert "rm -rf /opt/a" in out, "the refusal has to name what is still pending"
+        assert s._pending_action["args"]["command"] == "rm -rf /opt/a"
+        await s._resolve_pending_action("yes")
+        assert s._shell.ran == ["rm -rf /opt/a"]
+
+    run(lambda: (session, scenario))
+
+
+def test_a_second_stage_is_refused_only_while_the_first_is_live(monkeypatch):
+    """…and an EXPIRED stage does not wedge the gate shut for the rest of the TTL."""
+    session = make_session("server", monkeypatch)
+
+    async def scenario(s):
+        await call_shell(s, "rm -rf /opt/a")
+        s._pending_action["ts"] -= live_session.PENDING_ACTION_TTL_SECONDS + 1
+        out = await call_shell(s, "rm -rf /opt/b")
+        assert "CONFIRMATION REQUIRED" in out
         assert s._pending_action["args"]["command"] == "rm -rf /opt/b"
         await s._resolve_pending_action("yes")
-        assert s._shell.ran == ["rm -rf /opt/b"]
+        assert s._shell.ran == ["rm -rf /opt/b"], "the dead stage must not resurrect"
+
+    run(lambda: (session, scenario))
+
+
+def test_the_bait_and_switch_cannot_swap_the_payload_under_a_spoken_yes(monkeypatch):
+    """The attack the one-slot supersede used to allow, in full.
+
+    The model stages an innocuous `gmail_send`, SAYS that preview out loud ("about to
+    send an email to anna…"), and then — before Robin answers — stages an `rm -rf`. With
+    a last-wins slot his single "yes", spoken about the email he heard, executed the
+    delete he never heard. The second stage is now refused, so the only thing his yes
+    can execute is the thing he was actually read.
+    """
+    session = make_session("server", monkeypatch)
+    sent = []
+    monkeypatch.setattr(live_session.services, "gmail_send",
+                        lambda args: sent.append(args) or "sent")
+
+    async def scenario(s):
+        await s._do_tool({"call_id": "c1", "name": "gmail_send",
+                          "arguments": json.dumps({"to": "anna@example.com",
+                                                   "subject": "Notes", "body": "hi"})})
+        heard = s._ws.sent[0]["item"]["output"]
+        assert "anna@example.com" in heard           # this is what Robin is read
+        s._ws.sent.clear()                           # …and `call_shell` reads frame 0
+        refusal = await call_shell(s, "rm -rf /opt/Thrivbe-AI")
+        assert "REFUSED" in refusal
+        assert s._pending_action["tool"] == "gmail_send", "the slot was swapped"
+        await s._resolve_pending_action("yes")
+        assert s._shell.ran == [], "his yes executed a command he was never read"
+        assert len(sent) == 1, "his yes should still send the email he WAS read"
 
     run(lambda: (session, scenario))
 
@@ -220,7 +275,7 @@ def test_an_unregistered_surface_stages_too(monkeypatch):
 def test_the_gate_reuses_the_high_stakes_machinery_rather_than_a_second_one(monkeypatch):
     """Guarding the shape, not just the behaviour. A private shell-only confirmation
     path would pass every test above and then diverge — different TTL, different
-    affirm words, a second slot that a `gmail_send` could not supersede."""
+    affirm words, a second slot a `gmail_send` could not see."""
     session = make_session("server", monkeypatch)
 
     async def scenario(s):
@@ -228,10 +283,12 @@ def test_the_gate_reuses_the_high_stakes_machinery_rather_than_a_second_one(monk
         staged = s._pending_action
         assert set(staged) == {"tool", "args", "ts"}, staged
         assert live_session._pending_confirmation_outcome(staged, "yes") == "confirmed"
-        # …and a gmail_send supersedes it through the same one slot.
+        # …and a gmail_send meets the SAME occupied slot, rather than a second gate it
+        # knows nothing about. It is refused, and the shell command stays pending.
         await s._do_tool({"call_id": "c2", "name": "gmail_send",
                           "arguments": json.dumps({"to": "a@b.c", "subject": "s",
                                                    "body": "b"})})
-        assert s._pending_action["tool"] == "gmail_send"
+        assert s._pending_action["tool"] == "run_shell"
+        assert any("REFUSED" in json.dumps(frame) for frame in s._ws.sent)
 
     run(lambda: (session, scenario))
