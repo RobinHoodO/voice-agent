@@ -53,6 +53,32 @@ MAC_ONLY_TOOLS = frozenset(_CLIPBOARD_TOOLS + _HERDR_LANE_TOOLS)
 SHELL_FREE = "free"
 SHELL_STAGE_DESTRUCTIVE = "stage_destructive"
 
+# --- how explicit the spoken "yes" has to be, per staged tool ------------------------
+# The gate is one mechanism, but not every staged action costs the same to get wrong.
+# A mis-sent email is embarrassing and recoverable — Robin can send a correction. An
+# `rm -rf` on Thrivbe-1 is not recoverable at all. So the affirmation bar is DATA here,
+# next to the profiles, rather than a constant buried in `core.live_session`:
+#
+#   normal — a short leading affirmation, possibly with a courtesy word ("yes please",
+#            "confirmed", "go ahead").
+#   strict — an unhedged leading yes / do it / kjør, at most three words, and drawn from
+#            a NARROWER vocabulary: the weak-and-ambiguous affirmations ("ok", "confirm",
+#            "proceed", "approved") do not carry a filesystem delete.
+#
+# Both bars reject questions, hedges and continuations; `core.live_session` owns that
+# machinery. This table only decides which bar a given staged tool has to clear.
+AFFIRM_NORMAL = "normal"
+AFFIRM_STRICT = "strict"
+
+CONFIRM_STRICTNESS = {
+    "run_shell": AFFIRM_STRICT,
+}
+
+# Anything not named above gets the normal bar — which is still an explicit spoken
+# affirmation, just a slightly wider vocabulary. New IRREVERSIBLE tools belong in the
+# table above; add the line in the same commit that adds the tool.
+DEFAULT_CONFIRM_STRICTNESS = AFFIRM_NORMAL
+
 PROFILES = {
     "mac": {
         "excluded_tools": frozenset(),
@@ -120,6 +146,12 @@ def shell_gate(name: str | None) -> str:
 
 def shell_host(name: str | None) -> str:
     return get(name)["shell_host"]
+
+
+def confirm_strictness(tool: str | None) -> str:
+    """Which affirmation bar a staged `tool` has to clear. Surface-independent: the
+    cost of a wrong `rm -rf` does not depend on who is asking."""
+    return CONFIRM_STRICTNESS.get(tool or "", DEFAULT_CONFIRM_STRICTNESS)
 
 
 def tools_for(name: str | None, tools) -> list:
