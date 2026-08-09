@@ -81,9 +81,9 @@ The model is given two function tools (OpenAI Realtime "flat" tool schema):
   terminal": ask it to do something, it issues real commands as you.
 - **`remember(note)`** — appends a timestamped line to `.voice-memory.log`.
 
-Beyond those two, `tools.py` declares a longer list of function tools — herdr task
+Beyond those two, `core/tools.py` declares a longer list of function tools — herdr task
 delegation, kernel/Bloom/CRM calls, and a set of direct service tools in
-`services.py` (Notion, Front, Gmail, Calendar, Drive) that `live_session.py`
+`core/services.py` (Notion, Front, Gmail, Calendar, Drive) that `core/live_session.py`
 dispatches generically by name. The Notion ones cover the full task lifecycle:
 `notion_create_task` (capture, with Robin's defaults), `notion_list_tasks` (read —
 filter by status and/or a title keyword), and `notion_update_task` (change status —
@@ -172,11 +172,11 @@ A 🎙 appears in your menu bar. The icon shows state: 🎙 idle · 🔴 listeni
 
 ### Deploying code changes without a rebuild
 A rebuild changes the bundle's signature and **resets all TCC permissions**. For
-pure code edits (`agent.py`, `realtime.py`, `pill.py`) copy the file into the
-bundle and relaunch instead — grants are preserved:
+pure code edits copy the file into the bundle and relaunch instead — grants are
+preserved. `core/` and `mac/` are copied verbatim into `Contents/Resources/lib/python3.12/`:
 
 ```
-cp realtime.py "Thrivbe Voice.app/Contents/Resources/realtime.py"
+cp core/live_session.py "Thrivbe Voice.app/Contents/Resources/lib/python3.12/core/live_session.py"
 osascript -e 'quit app "Thrivbe Voice"'; open "Thrivbe Voice.app"
 ```
 
@@ -212,7 +212,7 @@ cp projects/voice-agent/com.thrivbe.voice-agent.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.thrivbe.voice-agent.plist
 ```
 Logs → `projects/voice-agent/agent.log`. Unload: `launchctl unload ...plist`.
-The launch agent opens `Thrivbe Voice.app`; do not launch `agent.py` directly
+The launch agent opens `Thrivbe Voice.app`; do not launch `thrivbe_voice.py` directly
 for normal menu-bar use.
 
 ## Knobs (top of `realtime.py`)
@@ -226,7 +226,7 @@ comes from config — see below — not from constants.
 
 ## Config / secrets
 Per-user settings live in `~/Library/Application Support/ThrivbeVoice/config.json`
-(`config.py`); the **OpenAI API key is stored in the macOS Keychain** (service
+(`core/config.py`); the **OpenAI API key is stored in the macOS Keychain** (service
 `ThrivbeVoice`), not on disk. Enter it via the menu (**Set OpenAI key…**) or first-run
 setup. OpenAI is the only key needed. Dev fallback: the key is also read from
 `~/Thrivbe-AI/.env` if present, so the original workspace setup keeps working.

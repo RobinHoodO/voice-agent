@@ -140,24 +140,48 @@ flowchart TB
 
 ## 3. The files
 
-| File | Lines | Role |
-|---|---:|---|
-| `agent.py` | 567 | The rumps menubar app. Hotkey, icon state, task poller, launch. **Entry point.** |
-| `live_session.py` | 1043 | One conversation: event loop, tool dispatch, gates, watchdogs, persistence. **The core.** |
-| `tools.py` | 1521 | The 41-tool schema + the helpers behind delegation, herdr panes, `put_text`. |
-| `audio.py` | 308 | Mic capture → WS pump; model audio → speaker. Local VAD, barge-in, teardown. |
-| `backends/` | 463 | Wire protocol per provider. `base.py` normalizes both into one event vocabulary. |
-| `kernel_tools.py` | 593 | Stdlib client for the thrivbe-os kernel voice API on Thrivbe-1. |
-| `services.py` | 338 | Direct (non-kernel) service calls: Notion, Front, Gmail, Calendar, Drive. |
-| `memory.py` | 582 | Conversation store (SQLite + FTS5), durable learnings, crash journal, recall. |
-| `macos_context.py` | 311 | Screen context: cursor text, AX window text, window screenshot. |
-| `focus.py` | 298 | Pin one client/project folder as the subject; loads its text into context. |
-| `live_prompt.py` | 174 | Assembles the system prompt: persona + context + learnings + custom prompt. |
-| `config.py` | 268 | `config.json`, defaults, `activity()` feed. |
-| `settings.py` / `settings.html` | 327 | The settings UI. |
-| `pill.py` | 293 | The floating wave pill. |
-| `shell.py` | 121 | Persistent zsh so `cd` sticks across commands. |
-| `web.py` | 191 | Web search + URL reading. |
+The tree is split by **surface**, not by layer. `core/` is the brain and knows nothing
+about macOS; `mac/` is this machine; `server/` is where the headless surface lands.
+
+**`core/` — the brain. Imports cleanly on a headless Linux box with no PyObjC, no
+PortAudio, no Keychain.** Enforced by `tests/test_headless_core.py`, which blocks those
+modules at import time and imports every module in here.
+
+| File | Role |
+|---|---|
+| `live_session.py` | One conversation: event loop, tool dispatch, gates, watchdogs, persistence. **The core.** |
+| `tools.py` | The 41-tool schema + the helpers behind delegation, herdr panes, `put_text`. |
+| `audio_core.py` | The mic pump and the VAD turn boundaries. Transport-independent — a browser mic reuses it whole. |
+| `caps.py` | The capability registry: log sink, notifier, screen context, clipboard, audio transport. **The one seam.** |
+| `secrets.py` | One resolver, two providers: store (Keychain) → env fallback → `$CREDENTIALS_DIRECTORY`. |
+| `backends/` | Wire protocol per provider. `base.py` normalizes both into one event vocabulary. |
+| `kernel_tools.py` | Stdlib client for the thrivbe-os kernel voice API on Thrivbe-1. |
+| `services.py` | Direct (non-kernel) service calls: Notion, Front, Gmail, Calendar, Drive. |
+| `memory.py` | Conversation store (SQLite + FTS5), durable learnings, crash journal, recall. |
+| `focus.py` | Pin one client/project folder as the subject; loads its text into context. |
+| `live_prompt.py` | Assembles the system prompt: persona + context + learnings + custom prompt. |
+| `config.py` | `config.json`, defaults, `activity()` feed. |
+| `settings.py` | Settings state: voice list, HH:MM validator, memory counts, Tools inventory. |
+| `shell.py` | Persistent zsh so `cd` sticks across commands. |
+| `web.py` | Web search + URL reading. |
+| `paths.py` | RESOURCEPATH-in-a-bundle vs repo-root-in-dev, in one place. |
+
+**`mac/` — this machine.** The only place allowed to import AppKit/Quartz/PyObjC/
+sounddevice/rumps/pynput or shell out to `osascript` and the Keychain `security` CLI.
+
+| File | Role |
+|---|---|
+| `agent.py` | The rumps menubar app. Hotkey, icon state, task poller, launch. **Entry point.** |
+| `caps_install.py` | Registers every macOS capability into `core.caps` before a session starts. |
+| `audio.py` | PortAudio device enumeration, capture + playback streams (`MacAudioTransport`). |
+| `macos_context.py` | Screen context: cursor text, AX window text, window screenshot. |
+| `screen.py` / `clipboard.py` / `keychain.py` | The three thin capability adapters over the above + pbcopy + `security`. |
+| `settings.py` / `settings.html` | The settings window (NSWindow + WKWebView + the JS bridge). |
+| `pill.py` | The floating wave pill. |
+
+`thrivbe_voice.py` at the root is the py2app boot script — it puts Resources on
+`sys.path` and calls `mac.agent.main()`. It is **not** called `agent.py`: modulegraph
+keys modules by basename and would alias it over `mac/agent.py`, shipping neither.
 
 ---
 
@@ -235,8 +259,13 @@ unreachable · bounded playback queue (drop oldest, not unbounded latency) · `r
 - **One writer.** SQLite in WAL; the `_learn` thread and the main thread both write.
 - **Privacy is opt-in per layer.** Cursor text on; window text and screenshots off by
   default (`privacy.*`). All three off → she answers from speech alone.
+- **One direction.** `mac` imports `core`; `core` never imports `mac`. Anything the
+  brain needs from a machine is a capability in `core.caps` (or the secret store in
+  `core.secrets`), registered by the surface at startup. Three tests hold the line:
+  `test_headless_core.py` (imports, no osascript/pbcopy/security in `core`) and
+  `test_bundle_deps.py` (the .app keeps shipping what `mac/` imports).
 - **Deploy = `./reload_app.sh`** (quit → `build_app.sh` → relaunch). It signs with the
   stable *Thrivbe Voice Dev* identity so Accessibility/Input-Monitoring grants survive.
-  Editing the source dir alone changes nothing — modules load from
-  `Contents/Resources/lib/python312.zip`. Verify a deploy by the zip's mtime.
+  Editing the source dir alone changes nothing — `core/` and `mac/` are copied into
+  `Contents/Resources/lib/python3.12/`. Verify a deploy by those directories' mtime.
 - **Use `.venv/bin/python` (3.12).** System `python3` is 3.9 and dies on PEP 604 unions.
