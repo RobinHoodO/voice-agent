@@ -67,7 +67,7 @@ while [ $# -gt 0 ]; do
                     [ $# -gt 0 ] || { echo "deploy.sh: --ref needs a value" >&2; exit 1; }
                     REF="$1" ;;
     --ref=*)        REF="${1#--ref=}" ;;
-    -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "deploy.sh: unknown argument '$1' (try --help)" >&2; exit 1 ;;
   esac
   shift
