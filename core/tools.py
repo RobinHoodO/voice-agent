@@ -41,7 +41,13 @@ TOOLS = [
     {
         "type": "function",
         "name": "run_shell",
-        "description": "Run a command in the persistent shell (starts in Robin's configured base folder; cd/env persist; can act anywhere on the Mac). Use it to read, search, and act. To hand off a slow coding/research task, ALWAYS use the `delegate` tool (it runs `pi` in the background and auto-wakes with the result) — do NOT shell out to `claude` or `pi` yourself.",
+        # Surface-neutral on purpose: this description is sent to BOTH the Mac and
+        # Thrivbe-1 (check_tool_drift.py requires one shared text, because a tool
+        # description is prompt and two of them is two agents). "the machine you are
+        # running on" is the only phrasing that is true on both; which machine that is,
+        # and whether destructive commands stage, comes from the surface block the
+        # session assembles from its capability profile.
+        "description": "Run a command in the persistent shell on the machine you are running on (starts in Robin's configured base folder; cd/env persist; it can act anywhere on that machine's filesystem). Use it to read, search, and act. Reads always run immediately. On a surface where destructive commands are gated, the result will tell you the command was STAGED and did NOT run — then say plainly what it would do and ask Robin to confirm out loud. To hand off a slow coding/research task, ALWAYS use a delegation tool (`delegate` where you have it, otherwise `os_delegate`) — do NOT shell out to `claude` or `pi` yourself.",
         "parameters": {"type": "object",
                        "properties": {"command": {"type": "string"}},
                        "required": ["command"]},

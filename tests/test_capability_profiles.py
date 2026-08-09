@@ -100,6 +100,60 @@ def test_the_surface_note_cannot_rot_out_of_sync_with_the_exclusions():
         assert name in note
 
 
+def test_the_schema_actually_sent_to_the_model_is_the_filtered_one(monkeypatch):
+    """End to end, through `_configure`. Every assertion above is about the data; this
+    one is about the wire — the schema the model is handed at session setup is where
+    "absent" either happens or does not."""
+    import asyncio
+
+    from core import kernel_tools, live_session
+
+    captured = {}
+
+    class Backend:
+        async def send_setup(self, instructions, tools, voice):
+            captured["tools"] = [t["name"] for t in tools]
+            captured["instructions"] = instructions
+
+    monkeypatch.setattr(kernel_tools, "kernel_high_stakes", lambda: ["gmail_send"])
+    monkeypatch.setattr(live_session, "_grab_context", lambda: "(no context)")
+    monkeypatch.setattr(live_session, "_build_live_instructions",
+                        lambda ctx, cfg=None, profile=None:
+                        capabilities.surface_note(profile, TOOLS))
+
+    class Session(live_session.LiveSession):
+        PROFILE = "server"
+
+    session = Session()
+    session._backend = Backend()
+    session._cfg = {"live": {"agentic_shell": True}}
+
+    async def scenario():
+        session._loop = asyncio.get_running_loop()
+        await session._configure()
+
+    asyncio.run(scenario())
+
+    assert "run_shell" in captured["tools"]           # the server DOES get a full shell
+    assert "put_text" not in captured["tools"]
+    assert "delegate" not in captured["tools"]
+    assert "os_delegate" in captured["tools"]
+    # …and the instructions it is set up with say which machine it is on.
+    assert "Thrivbe-1" in captured["instructions"]
+
+
+def test_the_shared_base_prompt_is_contradicted_where_it_is_wrong():
+    """LIVE_SYSTEM opens by saying this runs on the user's Mac and offers the
+    clipboard. It cannot say otherwise without becoming a second prompt, so the surface
+    block has to override it in words — not leave the model choosing between two claims."""
+    from core.live_prompt import LIVE_SYSTEM
+
+    assert "Mac" in LIVE_SYSTEM, "the premise of this test moved; re-read the override"
+    note = capabilities.surface_note("server", TOOLS)
+    assert "does not apply here" in note
+    assert "no desktop" in note
+
+
 def test_the_registered_profiles_are_the_ones_the_surfaces_declare():
     """`mac/caps_install.py` and `server/session.py` each name a profile at module
     level; the name has to exist here or the surface dies at startup."""

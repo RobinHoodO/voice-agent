@@ -145,6 +145,13 @@ def surface_note(name: str | None, tools=None) -> str:
     lines = [f"THIS SURFACE: you are running on {profile['shell_host']}. "
              f"run_shell, and everything else you do, acts there — not on any other "
              f"machine Robin owns."]
+    if not profile["has_clipboard"]:
+        # The shared base prompt opens by saying this runs on the user's Mac, and it
+        # cannot say otherwise without becoming a second prompt. So contradict it here,
+        # explicitly, rather than leaving the model to pick between two claims.
+        lines.append("Anything earlier in these instructions that describes you as "
+                     "running on a Mac, or offers to paste into the window the user is "
+                     "in, does not apply here — this machine has no desktop at all.")
     if not profile["has_screen_context"]:
         lines.append("There is no screen, no cursor context and no screenshot here: "
                      "never claim to see what he is looking at. Ask instead.")
