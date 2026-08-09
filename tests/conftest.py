@@ -59,9 +59,13 @@ def voice_server(tmp_app, monkeypatch):
     monkeypatch.setattr(kernel_tools, "kernel_high_stakes", lambda: ["gmail_send"])
     monkeypatch.setattr(kernel_tools, "session_log", lambda *a, **k: None)
     monkeypatch.setattr(live_session, "_build_live_instructions",
-                        lambda ctx, cfg=None: "test instructions")
+                        lambda ctx, cfg=None, **kwargs: "test instructions")
 
     class _NoShell:
+        def __init__(self, *a, **k):
+            """Same signature freedom as the real Shell, which now takes the surface's
+            capability profile so it can pick zsh on the Mac and bash on Thrivbe-1."""
+
         def run(self, *a, **k):
             return ""
 
@@ -71,10 +75,14 @@ def voice_server(tmp_app, monkeypatch):
     monkeypatch.setattr(live_session, "Shell", _NoShell)
 
     # server.app's lifespan rewires core.caps process-wide; put it back afterwards so
-    # the rest of the suite sees the transport it expects.
+    # the rest of the suite sees the transport it expects. `_profile` is in that list
+    # for a reason a leaked value made obvious: it decides which shell binary
+    # `core.shell` spawns, so a server profile surviving this fixture had the Mac's own
+    # shell test spawning bash.
     monkeypatch.setattr(caps, "_log_sink", caps._log_sink, raising=False)
     monkeypatch.setattr(caps, "_notifier", caps._notifier, raising=False)
     monkeypatch.setattr(caps, "_audio_transport", caps._audio_transport, raising=False)
+    monkeypatch.setattr(caps, "_profile", caps._profile, raising=False)
 
     app_module = importlib.import_module("server.app")
     sessions: list = []

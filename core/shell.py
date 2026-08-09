@@ -12,7 +12,7 @@ import subprocess
 import time
 import uuid
 
-from core import config
+from core import capabilities, caps, config
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")   # strip terminal escape codes from shell output
 
@@ -28,8 +28,21 @@ class Shell:
     them (`cmd &`) and poll — the prompt tells the model to.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, profile: str | None = None) -> None:
+        # Which interpreter and rc file is profile data, not a constant: /bin/zsh is
+        # Robin's Mac (and the `claude` shell function lives in ~/.zshrc), Thrivbe-1 is
+        # a Debian box where zsh may not be installed at all. Hardcoding zsh there is a
+        # shell that never starts, and every run_shell answering "shell not started".
+        self._profile = profile
         self._spawn()
+
+    def _binary_and_rc(self) -> tuple[str, str]:
+        profile = capabilities.get(self._profile if self._profile is not None
+                                   else caps.profile())
+        for candidate in profile["shell_binaries"]:
+            if os.path.exists(candidate):
+                return candidate, profile["shell_rc"]
+        return profile["shell_binaries"][-1], profile["shell_rc"]
 
     def _spawn(self) -> None:
         # Start in the configured base folder (live.workspace) so the agent's
@@ -45,8 +58,9 @@ class Shell:
             start = os.path.expanduser("~")
         # start_new_session=True puts the shell + its children in their own process
         # group, so a runaway command can be killed wholesale on timeout (_respawn).
+        binary, rc = self._binary_and_rc()
         self.p = subprocess.Popen(
-            ["/bin/zsh"],
+            [binary],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
             # Force UTF-8: in a py2app bundle the locale is often ASCII/C, so text=True
@@ -55,7 +69,7 @@ class Shell:
             encoding="utf-8", errors="replace",
             cwd=start, start_new_session=True,
             env=config.subprocess_env())   # strip API keys: model-run commands must not read them
-        self.p.stdin.write("source ~/.zshrc 2>/dev/null\n")
+        self.p.stdin.write(f"source {rc} 2>/dev/null\n")
         self.p.stdin.flush()
         self._drain(0.6)
 
@@ -83,7 +97,10 @@ class Shell:
             self._respawn()
         mark = f"__VA_{uuid.uuid4().hex}__"
         try:
-            self.p.stdin.write(f'{cmd}\nprint -r -- "{mark}$?"\n')
+            # printf, not zsh's `print -r --`: the sentinel has to work in whichever
+            # interpreter the profile picked, and bash has no `print` builtin — the
+            # marker never appears and every command reads as a 20s timeout.
+            self.p.stdin.write(f'{cmd}\nprintf \'%s\\n\' "{mark}$?"\n')
             self.p.stdin.flush()
         except Exception as e:
             return f"error: {e}"

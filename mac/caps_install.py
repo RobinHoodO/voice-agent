@@ -7,6 +7,11 @@ inline `try/except` blocks had before they were hoisted into `core.caps`.
 """
 from core import caps
 
+# Which capability profile this surface runs (see core/capabilities.py). Declared at
+# module level because `check_tool_drift.py` reads it without importing this file —
+# importing it needs PyObjC, and the checker has to work from any checkout.
+SURFACE_PROFILE = "mac"
+
 _installed = False
 
 
@@ -14,6 +19,7 @@ def install(log_sink=None) -> None:
     global _installed
     if log_sink is not None:
         caps.set_log_sink(log_sink)
+    caps.set_profile(SURFACE_PROFILE)
     if _installed:
         return
 

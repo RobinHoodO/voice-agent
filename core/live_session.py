@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 
-from core import caps, config
+from core import capabilities, caps, config, destructive
 from core import kernel_tools
 from core.audio_core import AudioCoreMixin
 from core.backends import base as events
@@ -92,9 +92,13 @@ HIGH_STAKES_EXECUTORS = {
 }
 
 
-def _confirmation_preview(tool: str, args: dict) -> str:
+def _confirmation_preview(tool: str, args: dict, host: str = "this machine") -> str:
     """The sentence the model reads back before Robin says yes. Specific beats generic —
     'send an email to X' is checkable by ear; 'run gmail_send' is not."""
+    if tool == "run_shell":
+        command = (args.get("command") or "").strip()
+        return (f"about to run this on {host} — it "
+                f"{destructive.classify(command).reason}: {command}")
     if tool == "gmail_send":
         return (f"about to send an email to {args.get('to')} "
                 f"with subject '{args.get('subject')}'")
@@ -186,6 +190,12 @@ class LiveSession(AudioCoreMixin):
     (rumps) thread; everything else runs on the session's own asyncio thread.
     Audio I/O comes from AudioMixin."""
 
+    # Capability profile for THIS session (core/capabilities.py). None = ask
+    # `caps.profile()`, and if nothing registered, `capabilities.get` hands back the
+    # strict fallback. A surface with its own session class pins it here instead
+    # (server/session.py), so the gate is right even before startup finishes.
+    PROFILE: str | None = None
+
     def __init__(self, on_state=None, announce=None, on_auto_stop=None, on_task_spoken=None,
                  announce_tid=None):
         self.on_state = on_state or (lambda s: None)
@@ -213,6 +223,11 @@ class LiveSession(AudioCoreMixin):
         self._shell: Shell | None = None             # persistent zsh for this session
         self._fn_names: dict = {}                     # call_id -> tool name (from output_item.added)
         self._pending_action: dict | None = None      # the one staged high-stakes action
+        # Executors that need THIS session (the persistent shell), consulted before the
+        # module-level HIGH_STAKES_EXECUTORS so monkeypatching that dict still works.
+        self._surface_executors = {
+            "run_shell": lambda args: self._run_in_shell(args.get("command", "")),
+        }
         # Fail closed until the manifest says otherwise: assume every kernel-backed tool
         # needs confirmation. _configure narrows this to the real highStakes set once the
         # kernel answers; if it never does, we over-confirm instead of under-confirming.
@@ -251,6 +266,13 @@ class LiveSession(AudioCoreMixin):
         self._offered_tasks: queue.Queue = queue.Queue()
         self._offered_tids: set = set()
         self._offered_lock = threading.Lock()
+
+    @property
+    def profile_name(self) -> str | None:
+        """This session's capability profile: pinned by the surface's session class, or
+        whatever the surface registered at startup. Read live rather than snapshotted in
+        __init__ so a session built before `install()` still sees the real answer."""
+        return self.PROFILE or caps.profile()
 
     @property
     def _ws(self):
@@ -585,7 +607,7 @@ class LiveSession(AudioCoreMixin):
         ws = await self._backend.connect()
         try:
             try:
-                self._shell = Shell()
+                self._shell = Shell(profile=self.profile_name)
             except Exception as e:
                 _log(f"persistent shell start failed: {e!r}")
             await self._configure()
@@ -632,7 +654,7 @@ class LiveSession(AudioCoreMixin):
             self._high_stakes = set(declared) | set(LOCAL_HIGH_STAKES)
             _log(f"high-stakes gate set: {sorted(self._high_stakes)}")
         live = self._cfg.get("live") or {}
-        instructions = _build_live_instructions(ctx, self._cfg)
+        instructions = _build_live_instructions(ctx, self._cfg, profile=self.profile_name)
         voice = live.get("voice") or VOICE
         # Respect the agentic-shell toggle. Fail CLOSED — default False to match
         # config.DEFAULTS and the menu, so a missing key never exposes the shell.
@@ -640,6 +662,10 @@ class LiveSession(AudioCoreMixin):
         # (clipboard/paste) and remember stay available either way.
         tools = TOOLS if live.get("agentic_shell", False) else [
             t for t in TOOLS if t.get("name") not in ("run_shell", "delegate")]
+        # …then drop everything this surface cannot do at all. ABSENT, not
+        # present-and-erroring: a tool in the schema is a promise the model makes out
+        # loud, and "no clipboard on this surface" is a promise broken in Robin's ear.
+        tools = capabilities.tools_for(self.profile_name, tools)
         await self._backend.send_setup(instructions, tools, voice)
 
     # ----- realtime events -----
@@ -725,7 +751,7 @@ class LiveSession(AudioCoreMixin):
         if outcome != "confirmed":
             _log(f"{tool} confirmation dropped: {outcome}")
             return
-        executor = HIGH_STAKES_EXECUTORS.get(tool)
+        executor = self._surface_executors.get(tool) or HIGH_STAKES_EXECUTORS.get(tool)
         if executor is None:
             # Gated but not executable from here (e.g. a manifest tool this surface
             # doesn't implement). Say so rather than silently swallowing the yes.
@@ -998,6 +1024,8 @@ class LiveSession(AudioCoreMixin):
                 out = await self._loop.run_in_executor(None, close_finished_tasks, args)
                 _log(f"close_finished_tasks: {out}")
                 config.activity("🛤  closed finished task lanes")
+        elif name == "run_shell":
+            out = await self._shell_tool(args)
         elif name in self._high_stakes:
             # Irreversible or outward-facing → stage it; nothing runs until Robin says
             # yes out loud. Membership is DATA (kernel manifest highStakes ∪ the local
@@ -1112,7 +1140,10 @@ class LiveSession(AudioCoreMixin):
             _log(f"list_inbox_items: {args!r}")
             config.activity("🧠  listed inbox items")
         else:
-            out = await self._loop.run_in_executor(None, self._run_in_shell, args.get("command", ""))
+            # An unnamed tool call is a shell command (see `name` above, which defaults
+            # to run_shell when the provider omits it). It goes through the SAME gate —
+            # a hole here would be a shell that skips the gate by not naming itself.
+            out = await self._shell_tool(args)
         await self._backend.send_tool_result(call_id, out)
         await self._backend.trigger_response()
         self._awaiting_reply_since = self._loop.time()   # arm the stall watchdog
@@ -1131,6 +1162,36 @@ class LiveSession(AudioCoreMixin):
                 self._out_q.put_nowait(chunk)
             except queue.Full:
                 pass
+
+    async def _shell_tool(self, args: dict) -> str:
+        """run_shell, through this surface's shell gate.
+
+        On the Mac the gate is `free`: Robin is sitting at the machine and the shell has
+        always run what it was told. On the server it is `stage_destructive` — reads run
+        free, and anything `core.destructive` cannot prove is a read becomes the ONE
+        staged pending action, executed only by his next short spoken affirmation.
+
+        This deliberately reuses `_pending_action` rather than inventing a second gate:
+        the TTL, the DENY-beats-AFFIRM rule, the "an unrelated utterance drops it"
+        behaviour and the one-at-a-time supersede are already right there, already
+        tested, and already what Robin has learned to expect from `gmail_send`.
+        """
+        command = args.get("command", "")
+        gate = capabilities.shell_gate(self.profile_name)
+        if gate == capabilities.SHELL_FREE:
+            return await self._loop.run_in_executor(None, self._run_in_shell, command)
+        verdict = destructive.classify(command)
+        if not verdict.destructive:
+            return await self._loop.run_in_executor(None, self._run_in_shell, command)
+        if getattr(self, "_pending_action", None):
+            _log("run_shell: superseded a previously staged action awaiting confirmation")
+        self._pending_action = {"tool": "run_shell", "args": {"command": command},
+                                "ts": time.time()}
+        host = capabilities.shell_host(self.profile_name)
+        _log(f"run_shell staged for confirmation ({verdict.reason}): {command!r}")
+        config.activity(f"⏸  shell command awaiting confirmation: {command}")
+        return (f"CONFIRMATION REQUIRED: {_confirmation_preview('run_shell', args, host)}. "
+                "It has NOT run. Say what it will do and ask the user to confirm out loud.")
 
     def _run_in_shell(self, command: str) -> str:
         if self._shell is None:

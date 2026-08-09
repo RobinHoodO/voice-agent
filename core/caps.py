@@ -12,6 +12,26 @@ degrade the answer, never kill the conversation.
 from __future__ import annotations
 
 
+# --- surface profile --------------------------------------------------------
+# WHICH surface this is, by name, resolved against `core.capabilities.PROFILES`.
+# Everything else in this module is "how do I reach the machine"; this is "what am I
+# allowed to do on it", and unlike the rest it does NOT fail soft into a permissive
+# default: an unregistered surface resolves to `capabilities.FALLBACK_PROFILE`, which
+# is the strictest profile there is. A forgotten `install()` must cost a confirmation
+# prompt, never an unstaged `rm` on a server.
+_profile: str | None = None
+
+
+def set_profile(name: str) -> None:
+    """Declare which capability profile this surface runs. Called once at startup."""
+    global _profile
+    _profile = name
+
+
+def profile() -> str | None:
+    return _profile
+
+
 # --- log --------------------------------------------------------------------
 # Was: `try: from agent import LOG; LOG(msg) except Exception: pass` repeated in
 # eleven modules — an import-time dependency on the macOS menubar app.

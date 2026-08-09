@@ -18,9 +18,21 @@ from core import caps
 from core.live_session import LiveSession
 from server.audio_ws import BrowserAudioBridge
 
+# Which capability profile this surface runs (see core/capabilities.py): no clipboard,
+# no herdr lanes, no screen — and a shell on Thrivbe-1 whose destructive commands stage
+# through the spoken confirmation gate. Declared at module level so
+# `check_tool_drift.py` can read it without importing the server package.
+SURFACE_PROFILE = "server"
+
 
 class BrowserLiveSession(LiveSession):
     """A LiveSession whose speaker, microphone and status light are a browser tab."""
+
+    # Structural, not a check: there is no way to get a browser session that is not on
+    # the server profile, because this is the class the server surface instantiates.
+    # `install_capabilities()` registering the same name is belt to this braces — a
+    # session built before startup finished would still be gated correctly.
+    PROFILE = SURFACE_PROFILE
 
     def __init__(self, bridge: BrowserAudioBridge, **kwargs):
         # Set before super().__init__: the transport reads `_bridge` off the session,
@@ -64,6 +76,7 @@ def install_capabilities(log_sink=None) -> None:
     which is what fail-soft was built for. Secrets need nothing: `core.secrets` already
     resolves env → `$CREDENTIALS_DIRECTORY`, which is what the systemd unit provides.
     """
+    caps.set_profile(SURFACE_PROFILE)
     caps.set_log_sink(log_sink or _print_log)
     caps.set_notifier(_notify_log)
     from server import audio_ws

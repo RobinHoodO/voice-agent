@@ -6,8 +6,9 @@ what's on screen this turn). Pure assembly — reads config + memory, returns a 
 """
 import os
 
-from core import caps, config
+from core import capabilities, caps, config
 from core import kernel_tools
+from core.tools import TOOLS
 
 
 def _log(msg: str) -> None:
@@ -114,9 +115,18 @@ def _load_herdr_doctrine(limit: int = 1500) -> str:
             _herdr_skill_warned = True
             _log(f"herdr doctrine unavailable: {e!r}")
         return ""
-def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
+def _build_live_instructions(ctx: str, cfg: dict | None = None,
+                             profile: str | None = None) -> str:
     """LIVE_SYSTEM + per-session context from config: optional workspace + its skills,
-    the delegation line, the memory tail, and what's under the cursor right now."""
+    the delegation line, the memory tail, and what's under the cursor right now.
+
+    `profile` names this surface's capability profile. LIVE_SYSTEM is SHARED by every
+    surface — check_tool_drift.py requires that, because a per-surface base prompt is
+    how two surfaces quietly become two agents — so anything true of only one machine
+    has to be assembled here, from the profile data, at session start. Without it the
+    server's model would read "running on the user's Mac" and offer to paste into a
+    window that does not exist.
+    """
     cfg = cfg or config.load()
     blocks = []
     attention = kernel_tools.kernel_attention_brief(timeout=2.5)
@@ -126,6 +136,7 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None) -> str:
     if persona:
         blocks.append(f"Kernel-served identity:\n{persona}")
     blocks.append(LIVE_SYSTEM)
+    blocks.append(capabilities.surface_note(profile, TOOLS))
     ws = (cfg.get("live") or {}).get("workspace")
     if ws:
         ws = os.path.expanduser(ws)
