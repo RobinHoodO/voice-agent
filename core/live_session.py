@@ -87,7 +87,15 @@ DENY_RE = re.compile(r"\b(no|nope|cancel|reject|rejected|stop|abort|don't|nei)\b
 
 # Courtesy words that neither add nor remove consent. Stripped from either end before
 # the phrase is matched, so "yes please" and "ok, do it now" reduce to "yes"/"do it".
-_AFFIRM_COURTESY = frozenset({"please", "now", "then", "ok", "okay", "sir", "pam", "and", "så"})
+_AFFIRM_COURTESY = frozenset({"now", "then", "ok", "okay", "sir", "pam", "and", "så"})
+
+# "please" is courtesy at the END of an affirmation ("yes please") and a REQUEST at the
+# start of one. "please confirm" is Robin asking Pam to confirm, not Robin confirming —
+# it used to clear the normal bar because "please" was stripped as courtesy and
+# "confirm" is a complete affirmation. A leading request marker is now a disqualifier,
+# in the same place as the interrogative openers and for the same reason.
+_AFFIRM_COURTESY_TRAILING = _AFFIRM_COURTESY | {"please", "takk"}
+_REQUEST_OPENERS = frozenset({"please", "kindly", "vennligst"})
 
 # A question is a request for information, never an instruction. Both the punctuation
 # and the opener are checked: transcripts frequently drop the "?".
@@ -164,12 +172,14 @@ def _is_short_affirm(text: str, strictness: str = capabilities.DEFAULT_CONFIRM_S
         return False
     if words[0] in _INTERROGATIVE:                   # (a) …even without the "?"
         return False
+    if words[0] in _REQUEST_OPENERS:                 # (a') "please confirm" is a request
+        return False
     if any(w in _HEDGE for w in words):              # (c) hedge / continuation
         return False
     trimmed = list(words)
     while trimmed and trimmed[0] in _AFFIRM_COURTESY:
         trimmed.pop(0)
-    while trimmed and trimmed[-1] in _AFFIRM_COURTESY:
+    while trimmed and trimmed[-1] in _AFFIRM_COURTESY_TRAILING:
         trimmed.pop()
     if not trimmed:
         return False
@@ -425,7 +435,16 @@ class LiveSession(AudioCoreMixin):
     def _journal(self, event: str, tool: str, args=None, result=None) -> None:
         """One line in `actions.jsonl` for a tool call or a gate event, on EVERY
         surface — the accountability record lives in core precisely so a new surface
-        cannot ship without it."""
+        cannot ship without it.
+
+        `audit.record` masks, in the result, whatever it masked in THIS call's args. A
+        result can also quote a DIFFERENT action's arguments — every sentence about the
+        one pending action does — and those args are invisible from there, so they are
+        scrubbed here, where the pending action is in reach.
+        """
+        pending = getattr(self, "_pending_action", None) or {}
+        if pending.get("tool") and pending.get("tool") != tool and result is not None:
+            result = audit.scrub(result, pending.get("args") or {})
         audit.record(event, tool, args, result, surface=self.profile_name or "unknown",
                      session=getattr(getattr(self, "_bridge", None), "session_key", "")
                      or "", pii=privacy.touches_pii(tool))
@@ -1338,15 +1357,23 @@ class LiveSession(AudioCoreMixin):
         # through — a per-branch call would be a line someone forgets to add with the
         # next tool. "staged" vs "call" is read off the gate, not guessed at.
         staged = getattr(self, "_pending_action", None)
+        journalled = out
         if self._stage_refused:
             # The gate was already occupied: nothing was staged and nothing ran. Saying
             # "call" here would read, weeks later, as if it had.
             event = "refused_gate_busy"
+            # `out` is the refusal SENTENCE, and that sentence describes the OTHER
+            # action — it interpolates the blocked-on tool's arguments (a recipient, a
+            # subject) into a record whose `args` belong to this call, where this
+            # module's redaction cannot see them. The record says which tool held the
+            # gate; the held action has its own `staged` line with its own redaction.
+            event_tool = (staged or {}).get("tool") or "another action"
+            journalled = f"not staged and not run — {event_tool} was awaiting confirmation"
         elif staged and staged.get("tool") == name:
             event = "staged"
         else:
             event = "call"
-        self._journal(event, name, args, out)
+        self._journal(event, name, args, journalled)
         if privacy.touches_pii(name):
             self._pii_touched = True
         await self._backend.send_tool_result(call_id, out)

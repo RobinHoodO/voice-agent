@@ -61,6 +61,15 @@ AFFIRM_TABLE = [
     ("yes if you must",             False, False),
     ("send it tomorrow",            False, False),
     ("approve the invoice first",   False, False),
+    # --- "please X" is Robin ASKING for X, not consenting to it. "please" used to be
+    # stripped as courtesy from either end, which left "confirm" — a complete
+    # affirmation — and cleared the normal bar. It is courtesy only at the END.
+    ("please confirm",              False, False),
+    ("please approve",              False, False),
+    ("please confirm it",           False, False),
+    ("please go ahead",             False, False),
+    ("please do it",                False, False),
+    ("vennligst bekreft",           False, False),
     ("",                            False, False),
     ("   ",                         False, False),
     # --- real affirmations: these must keep working at BOTH bars ---
