@@ -85,6 +85,39 @@ def test_an_excluded_tool_is_refused_at_dispatch_and_never_reaches_a_handler(
     asyncio.run(scenario())
 
 
+def test_a_permitted_tool_s_OUTPUT_is_surface_aware_too(monkeypatch, tmp_app, tmp_path):
+    """The other half of "absent means absent", and the one a blind review found open.
+
+    `focus` is not excluded — it works fine from the phone. What used to leak was its
+    RESULT: the digest opened with "Your shell is now IN this folder", and a tool result
+    lands after the system prompt, so the phone was told it had a shell by the strongest
+    instruction position in the conversation. The guard above cannot catch that: nothing
+    was refused, the tool simply answered with a promise this surface cannot keep.
+    """
+    from core import config
+
+    workspace = tmp_path / "ws"
+    acme = workspace / "clients" / "Acme"
+    acme.mkdir(parents=True)
+    (acme / "README.md").write_text("Acme is a paying client.")
+    (acme / "deck.pdf").write_bytes(b"%PDF-1.4")
+    config.set_("live.workspace", str(workspace))
+
+    session = _phone_session(monkeypatch)
+    monkeypatch.setattr(session, "_run_in_shell", lambda command: "")
+
+    async def scenario():
+        session._loop = asyncio.get_running_loop()
+        await session._do_tool({"call_id": "f1", "name": "focus",
+                                "arguments": json.dumps({"subject": "Acme"})})
+
+    asyncio.run(scenario())
+    result = json.dumps(session._ws.sent)
+    assert "Acme is a paying client." in result, "focus still has to work here"
+    assert "run_shell" not in result, result[:600]
+    assert "os_delegate" in result
+
+
 def test_the_mac_still_dispatches_everything_it_owns(monkeypatch):
     """The guard is a subtraction driven by the profile, not a blocklist of its own —
     on the Mac, where nothing is excluded, nothing may be refused."""

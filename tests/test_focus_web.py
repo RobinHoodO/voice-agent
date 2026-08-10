@@ -79,6 +79,63 @@ def test_focus_digest_respects_budget(tmp_path):
     assert len(focus.digest(acme)) < focus.DOC_BUDGET + 2000
 
 
+# --- focus output is prompt too --------------------------------------------
+# The digest is the TOOL RESULT, and a tool result lands AFTER the system prompt — the
+# strongest instruction position there is. `focus` is in the phone's tool list, so every
+# focus call on that surface used to answer with "Your shell is now IN this folder",
+# contradicting the surface note a few thousand characters above it.
+
+def _mixed_folder(tmp_path):
+    """One non-text file (drives the inventory line) and one document (drives the
+    loaded/truncated line) — enough to reach every branch that used to name a shell."""
+    _ws, acme = _workspace(tmp_path)
+    (tmp_path / "clients" / "Acme - Jane Doe" / "deck.pdf").write_bytes(b"%PDF-1.4" + b"0" * 2000)
+    return acme
+
+
+def test_focus_output_never_names_a_shell_on_a_shell_less_surface(tmp_path, monkeypatch):
+    acme = _mixed_folder(tmp_path)
+    monkeypatch.setattr(focus, "PER_DOC", 8)      # force the TRUNCATED branch as well
+    out = focus.digest(acme, profile="phone")
+    assert "run_shell" not in out
+    assert "pdftotext" not in out                  # the shell recipe goes with it
+    assert "Your shell is now IN this folder" not in out
+    assert "TRUNCATED" in out, "the truncation branch has to actually be exercised here"
+    assert "deck.pdf" in out, "the inventory is still worth having without a shell"
+    assert "os_delegate" in out                    # ...and it says who reads it instead
+
+
+def test_focus_output_on_an_empty_folder_is_also_shell_free(tmp_path):
+    bare = tmp_path / "clients" / "Bare"
+    bare.mkdir(parents=True)
+    out = focus.digest(str(bare), profile="phone")
+    assert "Nothing readable as text" in out and "run_shell" not in out
+
+
+def test_focus_output_defaults_to_the_strict_surface(tmp_path):
+    """A caller that forgets to thread the profile through must under-promise, never
+    over-promise — the same fail-closed direction as capabilities.tools_for."""
+    assert "run_shell" not in focus.digest(_mixed_folder(tmp_path))
+
+
+def test_focus_output_at_the_desk_is_unchanged(tmp_path):
+    """Nothing was taken away from the surface Robin sits at."""
+    out = focus.digest(_mixed_folder(tmp_path), profile="mac")
+    assert "Your shell is now IN this folder" in out
+    assert "pdftotext" in out
+
+
+def test_the_focus_tool_hands_its_session_profile_to_the_digest(tmp_app, tmp_path, monkeypatch):
+    """The plumbing, not just the function: live_session calls focus(args, profile=...),
+    and focus has to pass it on or the whole surface-awareness stops at the door."""
+    ws, _acme = _workspace(tmp_path)
+    (tmp_path / "clients" / "Acme - Jane Doe" / "deck.pdf").write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(config, "get",
+                        lambda p, d=None: ws if p == "live.workspace" else _real_get(p, d))
+    assert "run_shell" not in focus.focus({"subject": "Acme"}, profile="phone")
+    assert "pdftotext" in focus.focus({"subject": "Acme"}, profile="mac")
+
+
 def test_prompt_carries_focus_into_a_new_session(tmp_app, tmp_path):
     from core import live_prompt
     cfg = {"live": {"focus": {"subject": "acme", "name": "Acme", "dir": str(tmp_path)}}}

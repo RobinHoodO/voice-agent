@@ -19,7 +19,7 @@ Self-check:  python3 focus.py
 import difflib
 import os
 
-from core import caps, config
+from core import capabilities, caps, config
 
 SEARCH_ROOTS = ("clients", "projects", "lab")
 PRIORITY_DOCS = ("CLAUDE.md", "README.md")
@@ -149,10 +149,23 @@ def _rel(path: str, folder: str) -> str:
     return os.path.relpath(path, folder)
 
 
-def digest(folder: str) -> str:
+def digest(folder: str, *, profile: str | None = None) -> str:
     """The folder's full readable content, plus an inventory of what else is in it.
 
-    The shell is cd'd here when focus runs, so every path below is usable as-is."""
+    `profile` is the capability profile of the surface that will READ this
+    (core/capabilities.py), and it has to be a parameter rather than a constant: this
+    string is tool OUTPUT, so it lands after the system prompt — the strongest
+    instruction position there is — and on a surface with no `run_shell` "your shell is
+    now IN this folder" is an instruction the model cannot follow. It tries, finds no
+    tool, and says so out loud, which is the same broken promise as shipping the tool.
+
+    The default is None, which resolves to the STRICTEST profile — the same fallback
+    `capabilities.tools_for` uses, so a caller that forgets to thread the profile
+    through describes fewer capabilities than it has, never more.
+
+    On a shell surface the shell is cd'd here when focus runs, so every path below is
+    usable as-is."""
+    has_shell = capabilities.has_shell(profile)
     budget = config.get("live.focus_budget") or DOC_BUDGET
     try:
         budget = max(10_000, int(budget))
@@ -160,7 +173,11 @@ def digest(folder: str) -> str:
         budget = DOC_BUDGET
     docs, others = walk(folder)
     lines = [f"Focused folder: {folder}",
-             "Your shell is now IN this folder, so relative paths work: `cat proposal.md`."]
+             "Your shell is now IN this folder, so relative paths work: `cat proposal.md`."
+             if has_shell else
+             "That folder is the subject of this conversation now. What is loaded below "
+             "is what you have — you cannot read the rest yourself here, so hand "
+             "anything else in it to os_delegate or a delegate lane."]
     if others:
         inventory = []
         for path in others[:40]:
@@ -169,8 +186,12 @@ def digest(folder: str) -> str:
                 inventory.append(f"{_rel(path, folder)} ({kb}KB)")
             except OSError:
                 inventory.append(_rel(path, folder))
-        lines.append("Other files here — not text, so not loaded below, but you can open "
-                     "them with run_shell if asked (PDFs: `pdftotext <file> -`):\n  "
+        lines.append(("Other files here — not text, so not loaded below, but you can open "
+                      "them with run_shell if asked (PDFs: `pdftotext <file> -`):\n  "
+                      if has_shell else
+                      "Other files here — not text, so not loaded below, and you cannot "
+                      "open them yourself on this surface; os_delegate can read one for "
+                      "you if it matters:\n  ")
                      + "\n  ".join(inventory))
     used, loaded, clipped = 0, [], []
     for path in _doc_paths(folder):
@@ -188,12 +209,17 @@ def digest(folder: str) -> str:
         (loaded if whole else clipped).append(rel)
         lines.append(f"\n--- {rel} ---\n{body}")
     if not used:
-        lines.append("(Nothing readable as text here — use run_shell to look deeper.)")
+        lines.append("(Nothing readable as text here — use run_shell to look deeper.)"
+                     if has_shell else
+                     "(Nothing readable as text here — os_delegate can look deeper for you.)")
     else:
         note = f"\nLoaded {len(loaded) + len(clipped)} document(s) in full ({used:,} chars)."
         if clipped:
             note = (f"\nLoaded {len(loaded) + len(clipped)} document(s), {used:,} chars. "
-                    f"TRUNCATED (read the rest with run_shell before answering on them): "
+                    + (f"TRUNCATED (read the rest with run_shell before answering on them): "
+                       if has_shell else
+                       f"TRUNCATED (os_delegate has to read the rest before you answer on "
+                       f"them): ")
                     + ", ".join(clipped))
         lines.append(note)
     return "\n".join(lines)
@@ -205,7 +231,9 @@ def current() -> dict:
     return foc if isinstance(foc, dict) and foc.get("dir") else {}
 
 
-def focus(args: dict) -> str:
+def focus(args: dict, *, profile: str | None = None) -> str:
+    """`profile` is threaded straight through to `digest` — see its docstring: the
+    digest is tool output, and what it tells the model to do next depends on the seat."""
     subject = (args.get("subject") or "").strip()
     ws = os.path.expanduser(config.get("live.workspace") or "~")
     if subject.lower() in CLEAR_WORDS:
@@ -225,7 +253,7 @@ def focus(args: dict) -> str:
     others = ", ".join(n for _, n, _ in matches[1:4])
     if others:
         head += f" (Also matched: {others} — say a name to switch.)"
-    return head + "\n\n" + digest(path)
+    return head + "\n\n" + digest(path, profile=profile)
 
 
 if __name__ == "__main__":
@@ -261,34 +289,42 @@ if __name__ == "__main__":
         with open(os.path.join(acme, "deck.pdf"), "wb") as f:
             f.write(b"%PDF-1.4" + b"0" * 3000)
 
-        d = digest(acme)
+        d = digest(acme, profile="mac")
         assert "Acme is a paying client." in d          # README pulled in
         assert "notes-2026.md" in d                     # top-level markdown pulled in
         assert "coordination agent" in d, "nested docs must be read, not just listed"
         assert "deck.pdf" in d, "non-text files must still be inventoried"
         assert "pdftotext" in d                         # and she's told how to open them
 
+        # ...and the same folder read from a shell-less seat never names a shell tool
+        phone = digest(acme, profile="phone")
+        assert "deck.pdf" in phone, "the inventory is still useful without a shell"
+        assert "run_shell" not in phone and "pdftotext" not in phone
+        assert "os_delegate" in phone                   # the way out is still named
+        assert "run_shell" not in digest(acme), "the default profile is the strict one"
+
         # a big doc lands WHOLE — the old 1400-char clip is what made her half-remember
         with open(os.path.join(acme, "transcript.md"), "w") as f:
             f.write("A" * 40000 + "ENDMARKER")
-        assert "ENDMARKER" in digest(acme), "a 40KB transcript must not be truncated"
+        assert "ENDMARKER" in digest(acme, profile="mac"), "a 40KB transcript must not be truncated"
 
         # ...but the total is still bounded, so a runaway folder can't blow up the turn
         for i in range(12):
             with open(os.path.join(acme, f"bulk{i}.md"), "w") as f:
                 f.write("z" * 30000)
-        assert len(digest(acme)) < DOC_BUDGET + 20000
+        assert len(digest(acme, profile="mac")) < DOC_BUDGET + 20000
 
         # skip-dirs stay out
         os.makedirs(os.path.join(acme, "node_modules", "pkg"))
         with open(os.path.join(acme, "node_modules", "pkg", "README.md"), "w") as f:
             f.write("NOISE_FROM_NODE_MODULES")
-        assert "NOISE_FROM_NODE_MODULES" not in digest(acme)
+        assert "NOISE_FROM_NODE_MODULES" not in digest(acme, profile="mac")
 
         # an empty folder still returns something usable, not a crash
         bare = os.path.join(tmp, "clients", "Bare")
         os.makedirs(bare)
-        assert "Nothing readable as text" in digest(bare)
+        assert "Nothing readable as text" in digest(bare, profile="mac")
+        assert "Nothing readable as text" in digest(bare, profile="phone")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("FOCUS OK")

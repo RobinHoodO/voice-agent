@@ -1158,7 +1158,11 @@ class LiveSession(AudioCoreMixin):
         elif name == "focus":
             from core import focus as focus_mod
             import shlex
-            out = await self._loop.run_in_executor(None, focus_mod.focus, args)
+            # The digest is TOOL OUTPUT and lands after the system prompt, so what it
+            # tells the model to do next has to match THIS seat: on a shell-less surface
+            # "your shell is now in this folder" is a promise nothing here can keep.
+            out = await self._loop.run_in_executor(
+                None, lambda: focus_mod.focus(args, profile=self.profile_name))
             self._cfg = config.load()   # so the rest of this session sees the new focus
             # Move the ALREADY-RUNNING shell into the folder (Shell._spawn only covers a
             # fresh session). Without this a mid-conversation switch leaves the shell in
