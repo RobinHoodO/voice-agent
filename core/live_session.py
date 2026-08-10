@@ -221,7 +221,8 @@ class LiveSession(AudioCoreMixin):
         self._awaiting_reply_since: float | None = None  # loop.time() a turn went silent
         self._resume_handle: str | None = None        # provider handle, survives a reconnect
         self._reconnected = False                     # next session must say it dropped out
-        self.level: float = 0.0                       # live mic level 0..1 (drives the wave pill)
+        self.level: float = 0.0                       # smoothed mic level 0..1 (wave pill, barge-in)
+        self.level_raw: float = 0.0                   # this frame only — ends the turn (see audio_core)
         self._local_speaking = False
         self._local_silence_since: float | None = None
         self._local_loud_since: float | None = None   # start of the current loud run (barge-in hold)

@@ -41,6 +41,7 @@ class _Session(audio_core.AudioCoreMixin):
         self._running = True
         self._mic_q = asyncio.Queue()
         self.level = 0.0
+        self.level_raw = 0.0
         self._local_speaking = False
         self._local_silence_since = None
         self._local_loud_since = None
@@ -57,7 +58,7 @@ class _Session(audio_core.AudioCoreMixin):
         return self._now
 
     def _update_level(self, data):       # scripted levels instead of real PCM
-        self.level = self._levels.pop(0)
+        self.level = self.level_raw = self._levels.pop(0)
         self._now += self._tick
         if not self._levels:
             self._running = False
@@ -122,6 +123,49 @@ def test_thinking_pause_mid_sentence_does_not_end_the_turn():
     assert s.stopped == 0, "a 1.0s thinking pause must not be treated as end-of-turn"
     assert s._backend.ends == 0
     assert s.started == 1, "and it is still one continuous turn, not two"
+
+
+def test_the_smoothed_tail_does_not_delay_end_of_turn():
+    """The 'she got slower' regression, as a number.
+
+    `_update_level` smooths the level (level*0.85 + lvl*0.15), so after loud speech it
+    needs ~1.4s to decay to the 0.10 bar. Ending the turn off THAT meant every reply
+    waited decay + silence_sec (~2.9s) instead of silence_sec (1.5s). End-of-turn now
+    reads the raw frame; starting one still reads the smoothed level.
+    """
+    s = _Session([0.9] * 2, agent_speaking=False, tick=0.1)
+    # Real decay: the frame goes quiet but the smoothed tail is still above the bar.
+    s._levels = [0.9, 0.9] + [0.0] * 20
+    real_smoothed = []
+
+    def decaying(_data):
+        raw = s._levels.pop(0)
+        s.level_raw = raw
+        s.level = raw if raw > s.level else s.level * 0.85 + raw * 0.15
+        real_smoothed.append(s.level)
+        s._now += s._tick
+        if not s._levels:
+            s._running = False
+
+    stopped_at = []
+    real_stop = s._on_speech_stopped
+
+    async def record_stop():
+        stopped_at.append(s._now)
+        await real_stop()
+
+    s._update_level = decaying
+    s._on_speech_stopped = record_stop
+    s.run()
+
+    assert s.stopped == 1, "the turn must end"
+    assert s._backend.ends == 1
+    # Speech ends at 0.2s; the window is 1.5s. Anything approaching 0.2+1.4+1.5 means the
+    # smoothed decay is being waited on again.
+    assert stopped_at[0] <= 0.2 + 1.5 + 0.3, (
+        f"end-of-turn at {stopped_at[0]:.1f}s — the smoothed decay is back in the path")
+    # And it really did end while the smoothed tail was still above the bar.
+    assert max(real_smoothed[-3:]) > s._vad_bar or stopped_at[0] < 1.9
 
 
 def test_defaults_are_wired_from_config():

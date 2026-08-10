@@ -69,6 +69,13 @@ class AudioCoreMixin:
                 bar = self._vad_bar_speaking if speaking else self._vad_bar
                 hold = self._vad_hold if speaking else 0.0
                 silence = self._vad_silence
+                # STARTING a turn (and barge-in) reads the SMOOTHED level: its slow decay
+                # is what bridges the gaps between words so a real interruption sustains
+                # past the hold. ENDING one reads the RAW frame, because the decay is pure
+                # lag there — after loud speech the smoothed level needs ~1.4 s to fall to
+                # the bar before the silence timer would even start, on top of silence_sec.
+                # That is what made her feel slow: ~2.9 s to answer against a 1.5 s window.
+                quiet_now = self.level_raw <= bar
                 if self.level > bar:
                     if self._local_loud_since is None:
                         self._local_loud_since = self._loop.time()
@@ -86,9 +93,12 @@ class AudioCoreMixin:
                                  f"(bar {bar:.2f}) — she was speaking")
                         await self._backend.send_activity_start()
                         await self._on_speech_started()
-                    elif self._local_speaking:
+                    elif self._local_speaking and not quiet_now:
+                        # Still actually making sound — the turn is alive. If the frame is
+                        # quiet and only the smoothed tail is above the bar, fall through
+                        # so the silence timer below can start now rather than in 1.4 s.
                         self._local_silence_since = None
-                else:
+                if quiet_now:
                     self._local_loud_since = None
                     if self._local_speaking:
                         if self._local_silence_since is None:
@@ -132,18 +142,16 @@ class AudioCoreMixin:
             if s.size:
                 rms = float(np.sqrt(np.mean(s.astype(np.float32) ** 2)))
                 lvl = min(1.0, rms / 4000.0)
-                # fast attack, slow decay — feels like it's catching your words
-                #
-                # MEASURED COST, left as it is on purpose (2026-08-10, phone surface
-                # review): `_pump_mic` ends a turn off this SMOOTHED level, so after loud
-                # speech it has to decay from 1.0 to the 0.10 bar — ~1.4 s at 0.85/frame
-                # — BEFORE the `silence_sec` timer starts. End-of-turn therefore takes
-                # ~3.0 s against a configured 1.5 s. Both surfaces pay it equally, which
-                # is why the phone still matches the desk; measuring silence off the raw
-                # frame RMS would halve it, but the same `level > bar` comparison also
-                # drives barge-in, where the decay is what bridges the gaps BETWEEN words
-                # inside the 0.25 s hold. Changing it is a change to how interrupting her
-                # feels, and belongs in a round that can verify it on Robin's actual mic.
+                # THIS frame, unsmoothed. `_pump_mic` ends a turn off this, because the
+                # smoothed level below decays from 1.0 to the 0.10 bar in ~1.4 s and that
+                # delay lands on every single reply. Robin reported her "slower" on
+                # 2026-08-10 and this was the reason: ~2.9 s to start answering against a
+                # 1.5 s configured window.
+                self.level_raw = lvl
+                # fast attack, slow decay — feels like it's catching your words, and the
+                # decay is deliberately kept for STARTING a turn: it bridges the gaps
+                # between words so a real barge-in sustains past the 0.25 s hold instead
+                # of flickering under the bar mid-sentence.
                 self.level = lvl if lvl > self.level else self.level * 0.85 + lvl * 0.15
         except Exception:
             pass
