@@ -124,9 +124,9 @@ def test_the_scrub_reaches_nested_and_long_values_only():
 
 def test_a_refusal_does_not_journal_the_other_actions_arguments(monkeypatch):
     """The gate-busy refusal SPEAKS a preview of the action holding the gate. That
-    sentence carries the other tool's recipient into a record whose own `args` are a
-    shell command — where this module's redaction cannot see it."""
-    session = make_session("server", monkeypatch)
+    sentence carries the other tool's recipient into a record whose own `args` belong to
+    a different call — where this module's redaction cannot see it."""
+    session = make_session("mac", monkeypatch)
     monkeypatch.setattr(live_session.services, "gmail_send", lambda args: "sent")
 
     async def scenario(s):
@@ -134,7 +134,10 @@ def test_a_refusal_does_not_journal_the_other_actions_arguments(monkeypatch):
                           "arguments": json.dumps({"to": "anna@example.com",
                                                    "subject": "Q3", "body": "b"})})
         s._ws.sent.clear()
-        await call_shell(s, "rm -rf /opt/a")     # refused: the gate is occupied
+        # Refused: the gate is occupied by the email.
+        await s._do_tool({"call_id": "c2", "name": "kernel_decide",
+                          "arguments": json.dumps({"approvalId": 7,
+                                                   "decision": "approve"})})
 
     run(lambda: (session, scenario))
     refusal = [e for e in entries() if e["event"] == "refused_gate_busy"][-1]
@@ -167,22 +170,32 @@ def test_rotation_keeps_the_permissions(monkeypatch):
 # ── gate events, not just calls ─────────────────────────────────────────────
 def test_every_gate_event_is_recorded(monkeypatch):
     """Staged, denied, confirmed. "Nothing happened" has to be as provable as
-    "something happened" — otherwise a missing line reads as a missing gate."""
-    session = make_session("server", monkeypatch)
+    "something happened" — otherwise a missing line reads as a missing gate.
+
+    The subject is what the assertions read: `to` is masked in the record on purpose
+    (`test_recipients_are_recognisable_but_not_readable`), so it cannot identify which
+    of the two staged actions a line belongs to."""
+    session = make_session("mac", monkeypatch)
+    monkeypatch.setattr(live_session.services, "gmail_send", lambda args: "sent")
+
+    async def stage(s, subject, call_id):
+        await s._do_tool({"call_id": call_id, "name": "gmail_send",
+                          "arguments": json.dumps({"to": "a@b.c", "subject": subject,
+                                                   "body": "b"})})
 
     async def scenario(s):
-        await call_shell(s, "rm -rf /opt/a")
+        await stage(s, "denied one", "c1")
         await s._resolve_pending_action("no")
         s._ws.sent.clear()
-        await call_shell(s, "rm -rf /opt/b")
+        await stage(s, "confirmed one", "c2")
         await s._resolve_pending_action("yes")
 
     run(lambda: (session, scenario))
-    events = [(e["event"], e["args"].get("command")) for e in entries()]
-    assert ("staged", "rm -rf /opt/a") in events
-    assert ("denied", "rm -rf /opt/a") in events
-    assert ("staged", "rm -rf /opt/b") in events
-    assert ("confirmed", "rm -rf /opt/b") in events
+    events = [(e["event"], e["args"].get("subject")) for e in entries()]
+    assert ("staged", "denied one") in events
+    assert ("denied", "denied one") in events
+    assert ("staged", "confirmed one") in events
+    assert ("confirmed", "confirmed one") in events
 
 
 def test_a_guard_refusal_is_recorded(monkeypatch):
@@ -199,14 +212,20 @@ def test_a_guard_refusal_is_recorded(monkeypatch):
     assert any(e["event"] == "refused_loop_guard" for e in entries())
 
 
-@pytest.mark.parametrize("profile", ["mac", "server"])
+@pytest.mark.parametrize("profile", ["mac", "phone"])
 def test_both_surfaces_journal(monkeypatch, profile):
     """The writer is in core, so it cannot be surface-specific. Proven by running the
-    same read on both profiles and finding a line tagged with each."""
+    same call on both profiles and finding a line tagged with each.
+
+    `notion_search`, not `run_shell`: the phone surface has no shell, so a shell call
+    would be journalled there as a refusal and this test would be asserting two
+    different things under one name."""
     session = make_session(profile, monkeypatch)
+    monkeypatch.setattr(live_session.services, "notion_search", lambda args: "no results")
 
     async def scenario(s):
-        await call_shell(s, "ls /opt")
+        await s._do_tool({"call_id": "n1", "name": "notion_search",
+                          "arguments": json.dumps({"query": "invoices"})})
 
     run(lambda: (session, scenario))
     assert [e for e in entries() if e["surface"] == profile]

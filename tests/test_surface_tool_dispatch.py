@@ -3,9 +3,13 @@
 `capabilities.tools_for` removes a surface's excluded tools from the schema, and
 `test_capability_profiles.py` proves it. But the schema is a request to the provider,
 not an enforcement point. `_do_tool` dispatches on whatever name arrives, so a stale
-session, a hallucinated name or a provider quirk used to reach the Mac handler anyway —
-and `delegate` reaches `_run_in_shell` DIRECTLY, which means a backgrounded command on
-Thrivbe-1 with no `core.destructive` classification and no confirmation gate at all.
+session, a hallucinated name or a provider quirk can still deliver one.
+
+Since 2026-08-10 the tool that matters most here is `run_shell`. The phone surface does
+not have it, and this is the layer where "does not have it" is enforced rather than
+requested — there is no shell gate behind it any more to catch a call that gets through,
+because the gate and its command classifier were deleted. If the name reaches
+`_shell_tool`, the command runs on Robin's Mac.
 
 Found by a blind review, which noted it did not demonstrate a provider actually emitting
 an out-of-schema name over a live socket. That is the point: this is the layer behind
@@ -18,7 +22,7 @@ import pytest
 
 from core import capabilities, live_session
 
-SERVER_EXCLUDED = sorted(capabilities.excluded_tools("server"))
+PHONE_EXCLUDED = sorted(capabilities.excluded_tools("phone"))
 
 
 class Ws:
@@ -29,11 +33,11 @@ class Ws:
         self.sent.append(json.loads(message))
 
 
-def _server_session(monkeypatch):
+def _phone_session(monkeypatch):
     monkeypatch.setattr(live_session.config, "activity", lambda _message: None)
 
     class Session(live_session.LiveSession):
-        PROFILE = "server"
+        PROFILE = "phone"
 
     session = Session()
     session._cfg = {"live": {"shell_timeout": 5}}
@@ -43,16 +47,18 @@ def _server_session(monkeypatch):
 
 def test_there_is_something_to_guard():
     """A profile that stopped excluding anything would make every test below vacuous."""
-    assert SERVER_EXCLUDED, "the server profile excludes nothing — the guard is untested"
+    assert PHONE_EXCLUDED, "the phone profile excludes nothing — the guard is untested"
+    assert "run_shell" in PHONE_EXCLUDED, "the shell is the whole reason for this guard"
 
 
-@pytest.mark.parametrize("name", SERVER_EXCLUDED)
+@pytest.mark.parametrize("name", PHONE_EXCLUDED)
 def test_an_excluded_tool_is_refused_at_dispatch_and_never_reaches_a_handler(
         monkeypatch, name):
-    session = _server_session(monkeypatch)
+    session = _phone_session(monkeypatch)
     ran = []
     # Every route out of the excluded handlers, wired to a tripwire. `_run_in_shell` is
-    # the one that matters — `delegate` calls it directly with a backgrounded command.
+    # the one that matters: it is where `run_shell` lands, and nothing downstream of it
+    # inspects the command any more.
     monkeypatch.setattr(session, "_run_in_shell", lambda command: ran.append(command))
     monkeypatch.setattr(live_session, "delegate_task",
                         lambda *a, **k: ran.append("delegate_task"))
@@ -69,8 +75,9 @@ def test_an_excluded_tool_is_refused_at_dispatch_and_never_reaches_a_handler(
         await session._do_tool({"call_id": "x1", "name": name,
                                 "arguments": json.dumps({"instruction": "wipe it",
                                                          "text": "hi",
+                                                         "command": "rm -rf /opt",
                                                          "task_name": "t"})})
-        assert ran == [], f"{name} reached a handler on the server surface: {ran}"
+        assert ran == [], f"{name} reached a handler on the phone surface: {ran}"
         result = json.dumps(session._ws.sent)
         assert "no " + name + " tool on this surface" in result, result
         assert session._pending_action is None
@@ -107,14 +114,14 @@ def test_the_refusal_is_journalled_rather_than_silently_swallowed(monkeypatch, t
     from core import audit
 
     monkeypatch.setenv("VOICE_AGENT_ACTIONS_LOG", str(tmp_path / "actions.jsonl"))
-    session = _server_session(monkeypatch)
+    session = _phone_session(monkeypatch)
     monkeypatch.setattr(session, "_run_in_shell", lambda command: "should not happen")
 
     async def scenario():
         session._loop = asyncio.get_running_loop()
-        await session._do_tool({"call_id": "j1", "name": "delegate",
-                                "arguments": json.dumps({"instruction": "rm -rf /"})})
+        await session._do_tool({"call_id": "j1", "name": "run_shell",
+                                "arguments": json.dumps({"command": "rm -rf /"})})
 
     asyncio.run(scenario())
     events = [(e["event"], e["tool"]) for e in audit.read_all()]
-    assert ("refused_not_on_surface", "delegate") in events, events
+    assert ("refused_not_on_surface", "run_shell") in events, events

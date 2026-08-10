@@ -94,8 +94,14 @@ def _herdr_section(text: str, heading: str) -> str:
     return rest if end < 0 else rest[:end]
 
 
-def _load_herdr_doctrine(limit: int = 1500) -> str:
-    """Small skill digest; an absent learned tail never blocks session startup."""
+def _load_herdr_doctrine(limit: int = 1500, has_shell: bool = True) -> str:
+    """Small skill digest; an absent learned tail never blocks session startup.
+
+    `has_shell` decides how the digest tells the model to read the rest of the skill.
+    On a surface with no `run_shell` (the phone) the old line — "read the full skill
+    with run_shell" — is an instruction it cannot follow, which is the same failure as
+    offering a tool that is not there: it tries, discovers nothing, and says so out loud.
+    """
     global _herdr_skill_warned
     try:
         with open(HERDR_SKILL_PATH, encoding="utf-8") as f:
@@ -107,8 +113,11 @@ def _load_herdr_doctrine(limit: int = 1500) -> str:
         etiquette = _herdr_section(text, "## Etiquette")
         learned = text[text.index(marker):]
         compact = (protected.strip()[:400], etiquette.strip()[:400], learned.strip()[:600])
-        digest = ("Herdr doctrine digest — read the full skill with run_shell before a non-routine move.\n"
-                  + "\n".join(part for part in compact if part))
+        header = ("Herdr doctrine digest — read the full skill with run_shell before a "
+                  "non-routine move.") if has_shell else (
+            "Herdr doctrine digest — this is all of it you get on this surface, so for a "
+            "non-routine move ask Robin rather than guessing at the rest.")
+        digest = (header + "\n" + "\n".join(part for part in compact if part))
         return digest[:limit]
     except Exception as e:
         if not _herdr_skill_warned:
@@ -122,12 +131,19 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None,
 
     `profile` names this surface's capability profile. LIVE_SYSTEM is SHARED by every
     surface — check_tool_drift.py requires that, because a per-surface base prompt is
-    how two surfaces quietly become two agents — so anything true of only one machine
-    has to be assembled here, from the profile data, at session start. Without it the
-    server's model would read "running on the user's Mac" and offer to paste into a
-    window that does not exist.
+    how two surfaces quietly become two agents — so anything true of only one seat has
+    to be assembled here, from the profile data, at session start. Without it the phone
+    surface's model would read "you have a PERSISTENT shell (run_shell)" and offer to go
+    read a file it has no tool to open.
+
+    `capabilities.surface_note` carries the contradiction of the shared text. What this
+    function additionally owns is the blocks it BUILDS: the workspace line, the focus
+    line and the herdr digest each used to end in "…with run_shell", and a per-session
+    block that names a tool the session does not have is the same broken promise, just
+    written by us instead of by LIVE_SYSTEM.
     """
     cfg = cfg or config.load()
+    has_shell = capabilities.has_shell(profile)
     blocks = []
     attention = kernel_tools.kernel_attention_brief(timeout=2.5)
     if attention:
@@ -140,8 +156,13 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None,
     ws = (cfg.get("live") or {}).get("workspace")
     if ws:
         ws = os.path.expanduser(ws)
-        blocks.append(f"Workspace: {ws} — its operating contract may be {ws}/CLAUDE.md. "
-                      f"Read files there with run_shell when relevant.")
+        blocks.append(
+            f"Workspace: {ws} — its operating contract may be {ws}/CLAUDE.md. "
+            + (f"Read files there with run_shell when relevant."
+               if has_shell else
+               f"You cannot read those files yourself on this surface — no shell. When "
+               f"the answer is in them, hand the reading to a delegate lane or "
+               f"os_delegate and say you're doing that."))
         try:
             cats = ", ".join(sorted(os.listdir(os.path.join(ws, "skills"))))
             blocks.append(f"Skill categories in the workspace: {cats}")
@@ -152,13 +173,17 @@ def _build_live_instructions(ctx: str, cfg: dict | None = None,
         blocks.append(
             f"Current focus: {foc.get('name') or foc.get('subject')} — folder {foc['dir']}. "
             "Robin set this in an earlier session, so treat it as the standing subject: "
-            "read files there with run_shell when he asks about the work. Don't open with "
-            "it — it's background until he brings it up. Call focus again to reload its "
-            "docs, or focus with subject 'clear' to drop it.")
+            + ("read files there with run_shell when he asks about the work. "
+               if has_shell else
+               "focus itself loads its documents into this conversation, which is how "
+               "you read them here — there is no shell on this surface, so anything "
+               "focus could not load has to go to a delegate lane. ")
+            + "Don't open with it — it's background until he brings it up. Call focus "
+              "again to reload its docs, or focus with subject 'clear' to drop it.")
     deleg = _delegation_line(cfg)
     if deleg:
         blocks.append(deleg)
-    doctrine = _load_herdr_doctrine()
+    doctrine = _load_herdr_doctrine(has_shell=has_shell)
     if doctrine:
         blocks.append(doctrine)
     custom = ((cfg.get("live") or {}).get("custom_prompt") or "").strip()

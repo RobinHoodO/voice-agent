@@ -10,20 +10,28 @@ telling a machine to delete a directory.
 So there are two layers of test here, deliberately:
 
   * `test_the_affirm_table` — the predicate, cheap and exhaustive, both bars;
-  * `test_the_staged_rm_survives_every_ambiguous_utterance` — the same strings against
-    the REAL `_shell_tool` + `_resolve_pending_action`, asserting the FakeShell never
-    ran. A predicate test alone would pass even if the gate stopped consulting it.
+  * `test_the_staged_rm_survives_every_ambiguous_utterance` — the same strings against a
+    REAL `confirm_gate.PendingSlot` holding a real `rm -rf`, and
+    `test_the_staged_email_survives_every_ambiguous_utterance` — the same, through a
+    real `LiveSession`. A predicate test alone would pass even if the gate stopped
+    consulting it.
 
-`ASYMMETRY` is the third piece: `capabilities.CONFIRM_STRICTNESS` says an irreversible
+The asymmetry is the third piece: `capabilities.CONFIRM_STRICTNESS` says an irreversible
 shell command needs a plainer yes than a recoverable email, and that difference has to
 be visible in a test or it will be optimised away by someone tidying the vocabulary.
+
+Why the shell half no longer drives a `LiveSession`: no live conversation stages a shell
+command any more. The desk surface runs what it is told (Robin is sitting there) and the
+phone surface has no `run_shell` at all, so the surface that still stages one is
+`mac/reverse_channel.py` — and it stages into this same `PendingSlot`. The vocabulary is
+one implementation; which object holds it is not what these strings are about.
 """
 import asyncio
 import json
 
 import pytest
 
-from core import capabilities, live_session
+from core import capabilities, confirm_gate, live_session
 
 NORMAL = capabilities.AFFIRM_NORMAL
 STRICT = capabilities.AFFIRM_STRICT
@@ -119,14 +127,20 @@ def test_run_shell_is_the_strict_one_and_that_is_data():
 
 
 # ── the same strings, against the real gate ──────────────────────────────────
-class FakeShell:
-    def __init__(self):
-        self.ran = []
-
-    def run(self, command, timeout=20):
-        self.ran.append(command)
-        return f"ran: {command}"
-
+# Two bars, two harnesses, because as of 2026-08-10 they live in different places.
+#
+#   NORMAL — `gmail_send` in a real `LiveSession`, through `_do_tool` and
+#            `_resolve_pending_action`. Unchanged.
+#   STRICT — `run_shell`, through a real `confirm_gate.PendingSlot`. No live
+#            conversation stages a shell command any more: the desk surface runs what it
+#            is told and the phone surface has no shell at all, so the surface that
+#            still stages one is `mac/reverse_channel.py`, which holds THIS object.
+#            Driving the slot directly is the honest way to say "the strict bar is still
+#            wired to the vocabulary", and `tests/test_reverse_channel.py` carries the
+#            same assertion over real HTTP.
+#
+# Either way the point is the same one the predicate tests cannot make: a table test
+# would still pass if the gate stopped consulting the table.
 
 class Ws:
     def __init__(self):
@@ -136,53 +150,65 @@ class Ws:
         self.sent.append(json.loads(message))
 
 
-def _server_session(monkeypatch):
+def _session(monkeypatch):
     monkeypatch.setattr(live_session.config, "activity", lambda _message: None)
 
     class Session(live_session.LiveSession):
-        PROFILE = "server"
+        PROFILE = "mac"
 
     session = Session()
-    session._shell = FakeShell()
     session._cfg = {"live": {"shell_timeout": 5}}
     session._ws = Ws()
     return session
 
 
+def _staged_shell_slot():
+    """A real gate holding a real `rm -rf`, exactly as the reverse channel stages one."""
+    slot = confirm_gate.PendingSlot()
+    slot.stage("run_shell", {"command": "rm -rf /opt/voice-agent"})
+    return slot
+
+
 AMBIGUOUS = [row[0] for row in AFFIRM_TABLE if not row[2] and row[0].strip()]
 UNAMBIGUOUS = [row[0] for row in AFFIRM_TABLE if row[2]]
+AMBIGUOUS_AT_THE_NORMAL_BAR = [row[0] for row in AFFIRM_TABLE
+                               if not row[1] and row[0].strip()]
 
 
 @pytest.mark.parametrize("utterance", AMBIGUOUS)
-def test_the_staged_rm_survives_every_ambiguous_utterance(monkeypatch, utterance):
-    """Stage the delete fresh, say the thing, assert nothing was deleted. This is the
+def test_the_staged_rm_survives_every_ambiguous_utterance(utterance):
+    """Stage the delete fresh, say the thing, assert it was not confirmed. This is the
     blind review's own harness, kept as a regression."""
-    session = _server_session(monkeypatch)
-
-    async def scenario():
-        session._loop = asyncio.get_running_loop()
-        out = await session._shell_tool({"command": "rm -rf /opt/voice-agent"})
-        assert "CONFIRMATION REQUIRED" in out
-        await session._resolve_pending_action(utterance)
-        assert session._shell.ran == [], \
-            f"{utterance!r} executed a staged rm -rf"
-        assert session._pending_action is None, \
-            f"{utterance!r} left the action staged for the NEXT utterance to catch"
-
-    asyncio.run(scenario())
+    outcome, pending = _staged_shell_slot().resolve(utterance)
+    assert pending["args"]["command"] == "rm -rf /opt/voice-agent"
+    assert outcome != "confirmed", f"{utterance!r} executed a staged rm -rf"
 
 
 @pytest.mark.parametrize("utterance", UNAMBIGUOUS)
-def test_a_real_yes_still_runs_the_staged_command(monkeypatch, utterance):
+def test_a_real_yes_still_confirms_the_staged_command(utterance):
     """The other direction. A gate nobody can pass is a gate Robin routes around."""
-    session = _server_session(monkeypatch)
+    outcome, _pending = _staged_shell_slot().resolve(utterance)
+    assert outcome == "confirmed", f"{utterance!r} was meant to be a yes"
+
+
+@pytest.mark.parametrize("utterance", AMBIGUOUS_AT_THE_NORMAL_BAR)
+def test_the_staged_email_survives_every_ambiguous_utterance(monkeypatch, utterance):
+    """The normal bar, end to end through a live session: staged, spoken at, not sent."""
+    session = _session(monkeypatch)
+    sent = []
+    monkeypatch.setattr(live_session.services, "gmail_send",
+                        lambda args: sent.append(args) or "sent")
 
     async def scenario():
         session._loop = asyncio.get_running_loop()
-        await session._shell_tool({"command": "rm -rf /opt/voice-agent/tmp"})
+        await session._do_tool({"call_id": "c1", "name": "gmail_send",
+                                "arguments": json.dumps({"to": "a@b.c", "subject": "s",
+                                                         "body": "b"})})
+        assert session._pending_action["tool"] == "gmail_send"
         await session._resolve_pending_action(utterance)
-        assert session._shell.ran == ["rm -rf /opt/voice-agent/tmp"], \
-            f"{utterance!r} was meant to be a yes"
+        assert sent == [], f"{utterance!r} sent a staged email"
+        assert session._pending_action is None, \
+            f"{utterance!r} left the action staged for the NEXT utterance to catch"
 
     asyncio.run(scenario())
 
@@ -190,17 +216,16 @@ def test_a_real_yes_still_runs_the_staged_command(monkeypatch, utterance):
 def test_a_weak_yes_confirms_an_email_but_not_a_delete(monkeypatch):
     """The asymmetry, end to end and in one place: the SAME word, two staged tools,
     two answers."""
-    session = _server_session(monkeypatch)
+    session = _session(monkeypatch)
     sent = []
     monkeypatch.setattr(live_session.services, "gmail_send",
                         lambda args: sent.append(args) or "sent")
 
+    outcome, _pending = _staged_shell_slot().resolve("approved")
+    assert outcome != "confirmed", "'approved' confirmed a delete"
+
     async def scenario():
         session._loop = asyncio.get_running_loop()
-        await session._shell_tool({"command": "rm -rf /opt/voice-agent"})
-        await session._resolve_pending_action("approved")
-        assert session._shell.ran == [], "'approved' deleted a directory"
-
         await session._do_tool({"call_id": "c9", "name": "gmail_send",
                                 "arguments": json.dumps({"to": "a@b.c", "subject": "s",
                                                          "body": "b"})})

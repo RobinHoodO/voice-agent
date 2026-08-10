@@ -17,15 +17,22 @@ WHAT IT GUARDS
    re-declares one of those symbols it is compared, field by field, and any difference
    is drift.
 
-1b. **Declared capability differences.** Some differences are real and intended: there
-   is no clipboard and no herdr on Thrivbe-1, so those tools must be ABSENT from the
-   server's tool list rather than present and erroring. A surface says so by declaring
+1b. **Declared capability differences.** Some differences are real and intended: the
+   phone surface has no `run_shell` and no `put_text`, so those tools must be ABSENT
+   from its tool list rather than present and erroring. A surface says so by declaring
    `SURFACE_PROFILE = "<name>"` at module level, naming a profile in `core`'s `PROFILES`
    (core/capabilities.py). The exclusions in that profile are subtracted before the
    comparison, and printed. So an intended difference is DATA this check reports, and
    any difference that is not in the data is still drift. Once `core` defines `PROFILES`,
    a surface that declares no profile is refused (exit 2) — an unclassified surface is
    the blind spot this whole section exists to close.
+
+   Nothing here is keyed to a profile NAME, and that matters more than it looks: the
+   profile set is not fixed. `server` (a voice instance on Thrivbe-1) existed until
+   2026-08-10 and is gone; `phone` replaced it when Robin ruled that there is one brain,
+   on his Mac, and the phone is its microphone. This checker reads whatever `PROFILES`
+   says today — the directory names it walks (`DEFAULT_SURFACES`) are the only fixed
+   strings, and those are packages, not capabilities.
 
 2. **The kernel manifest.** Each surface is still checked tool-by-tool against
    `GET /tools` on the voice API (:8790). The manifest's `highStakes` flags are what

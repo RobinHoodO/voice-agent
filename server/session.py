@@ -18,20 +18,23 @@ from core import caps
 from core.live_session import LiveSession
 from server.audio_ws import BrowserAudioBridge
 
-# Which capability profile this surface runs (see core/capabilities.py): no clipboard,
-# no herdr lanes, no screen — and a shell on Thrivbe-1 whose destructive commands stage
-# through the spoken confirmation gate. Declared at module level so
-# `check_tool_drift.py` can read it without importing the server package.
-SURFACE_PROFILE = "server"
+# Which capability profile this surface runs (see core/capabilities.py). This process
+# is Mac-Pam — the same brain, on Robin's Mac — and this package is only the transport
+# that puts its microphone and speaker in a browser tab on his phone. So the profile is
+# `phone`, named for the SEAT rather than for a machine: no screen he can see, no window
+# to paste into, and no `run_shell` at all. The herdr lanes and every kernel tool stay,
+# because they run here on the Mac. Declared at module level so `check_tool_drift.py`
+# can read it without importing the server package.
+SURFACE_PROFILE = "phone"
 
 
 class BrowserLiveSession(LiveSession):
     """A LiveSession whose speaker, microphone and status light are a browser tab."""
 
     # Structural, not a check: there is no way to get a browser session that is not on
-    # the server profile, because this is the class the server surface instantiates.
+    # the phone profile, because this is the class the browser surface instantiates.
     # `install_capabilities()` registering the same name is belt to this braces — a
-    # session built before startup finished would still be gated correctly.
+    # session built before startup finished would still be narrowed correctly.
     PROFILE = SURFACE_PROFILE
 
     def __init__(self, bridge: BrowserAudioBridge, **kwargs):
@@ -68,13 +71,14 @@ class BrowserLiveSession(LiveSession):
 
 
 def install_capabilities(log_sink=None) -> None:
-    """Register the server surface's capabilities into `core.caps`.
+    """Register the browser surface's capabilities into `core.caps`.
 
-    Deliberately partial. There is no screen and no clipboard on Thrivbe-1, so
-    `caps.screen()` and `caps.clipboard()` keep their null implementations and the
-    tools that use them degrade to "(no context)" / "no clipboard on this surface" —
-    which is what fail-soft was built for. Secrets need nothing: `core.secrets` already
-    resolves env → `$CREDENTIALS_DIRECTORY`, which is what the systemd unit provides.
+    Deliberately partial. The Mac's screen and clipboard exist, but Robin is not in
+    front of them when he is on his phone, so `caps.screen()` and `caps.clipboard()`
+    keep their null implementations here and the tools that use them degrade to
+    "(no context)" — which is what fail-soft was built for. `put_text` does not degrade,
+    it is excluded outright (core/capabilities.py): a paste that SUCCEEDS into a window
+    he cannot see is worse than one that fails.
     """
     caps.set_profile(SURFACE_PROFILE)
     caps.set_log_sink(log_sink or _print_log)

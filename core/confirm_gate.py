@@ -37,7 +37,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from core import capabilities, destructive
+from core import capabilities
 
 # How long a staged action stays confirmable. Long enough for a sentence to be read out
 # and answered; short enough that a forgotten stage cannot be executed by an unrelated
@@ -164,12 +164,13 @@ def confirmation_preview(tool: str, args: dict, host: str = "this machine") -> s
     """The sentence the model reads back before Robin says yes. Specific beats generic —
     'send an email to X' is checkable by ear; 'run gmail_send' is not."""
     if tool == "run_shell":
-        # Dashes, not "it {reason}": the reasons are a mix of verb phrases ("deletes
-        # files") and clauses ("systemctl restart is not a read"), and this sentence is
-        # SPOKEN — one connector has to carry both without turning into word salad.
+        # No classifier verdict in this sentence any more (`core.destructive` is gone —
+        # see core/capabilities.py). Nothing decides that a command is "safe enough" to
+        # skip the gate, so nothing has to explain why this one did not: the only
+        # surface that still stages a command stages EVERY command, and the command
+        # itself is the thing Robin has to hear.
         command = (args.get("command") or "").strip()
-        return (f"about to run this on {host} — {destructive.classify(command).reason} "
-                f"— the command is: {command}")
+        return f"about to run this on {host} — the command is: {command}"
     if tool == "gmail_send":
         return (f"about to send an email to {args.get('to')} "
                 f"with subject '{args.get('subject')}'")

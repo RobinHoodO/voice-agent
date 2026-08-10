@@ -96,7 +96,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable
 
-from core import audit, capabilities, config, confirm_gate, destructive
+from core import audit, capabilities, config, confirm_gate
 from mac import shell_sandbox
 
 # Which capability profile this surface runs. NOT named `SURFACE_PROFILE`: that symbol
@@ -250,8 +250,8 @@ def scope_violation(command: str, root: str) -> str | None:
     or `~` path that does not land under the workspace; any relative path that climbs
     out with `..`. It cannot see through a variable, a command substitution, or a
     symlink created after the check — nothing short of a sandbox can. Scope is the
-    FIRST fence here, not the only one: a destructive command still stages behind the
-    confirm gate, and the whole channel is off unless Robin turned it on.
+    FIRST fence here, not the only one: every command stages behind the confirm gate,
+    and the whole channel is off unless Robin turned it on.
     """
     if not (command or "").strip():
         return "empty command"
@@ -284,8 +284,13 @@ def scope_violation(command: str, root: str) -> str | None:
 
 
 # --- the operations ---------------------------------------------------------------------
-# Mutation classes. `CLASSIFY` means "ask core.destructive" — a read runs, a write stages.
-NEVER, ALWAYS, CLASSIFY = "never", "always", "classify"
+# Mutation classes. Two, not three: there used to be a `CLASSIFY` class meaning "ask
+# `core.destructive` whether this command is a read", and `run_shell` was on it. That
+# classifier is gone (see core/capabilities.py — three rounds of adversarial review
+# broke the read-detection, so the approach was abandoned rather than patched again), so
+# a command has no way to prove it is harmless and every one of them stages. Strictly
+# stricter than what it replaced: what used to run free now waits for a spoken yes.
+NEVER, ALWAYS = "never", "always"
 
 
 @dataclass(frozen=True)
@@ -592,7 +597,7 @@ def _guard_screenshot(channel: "ReverseChannel", args: dict) -> None:
 
 
 OPERATIONS = {
-    "run_shell": Operation("run_shell", CLASSIFY, ("command",), _op_run_shell,
+    "run_shell": Operation("run_shell", ALWAYS, ("command",), _op_run_shell,
                            _guard_shell_scope),
     "open_file": Operation("open_file", ALWAYS, ("path",), _op_open_file,
                            _guard_open_scope),
@@ -688,13 +693,8 @@ class ReverseChannel:
         return self._stage(op, args, request_id)
 
     def _is_mutating(self, op: Operation, args: dict) -> bool:
-        if op.mutating == NEVER:
-            return False
-        if op.mutating == ALWAYS:
-            return True
-        # CLASSIFY: `core.destructive` is the same classifier the Mac's own run_shell
-        # gate uses, so "what counts as destructive" has one definition here too.
-        return destructive.classify(args.get("command", "")).destructive
+        """NEVER or ALWAYS — there is no third answer to ask a classifier for."""
+        return op.mutating != NEVER
 
     def _stage(self, op: Operation, args: dict, request_id: str) -> dict:
         with self._lock:
@@ -702,7 +702,7 @@ class ReverseChannel:
         if staged.status == confirm_gate.REFUSED:
             busy = staged.pending
             preview = confirm_gate.confirmation_preview(
-                busy["tool"], busy["args"], capabilities.shell_host(REVERSE_PROFILE))
+                busy["tool"], busy["args"], capabilities.host(REVERSE_PROFILE))
             self._journal("refused_gate_busy", op.name, args,
                           f"blocked by {busy['tool']}", request_id)
             raise Refused(f"NOT STAGED AND NOT RUN — an action is already awaiting "
@@ -713,7 +713,7 @@ class ReverseChannel:
             self._journal("expired", expired["tool"], expired["args"],
                           "not executed", request_id)
         preview = confirm_gate.confirmation_preview(
-            op.name, args, capabilities.shell_host(REVERSE_PROFILE))
+            op.name, args, capabilities.host(REVERSE_PROFILE))
         self._journal("staged", op.name, args, preview, request_id)
         return {
             "status": "staged",
@@ -737,7 +737,7 @@ class ReverseChannel:
             "tool": current["tool"],
             "preview": confirm_gate.confirmation_preview(
                 current["tool"], current["args"],
-                capabilities.shell_host(REVERSE_PROFILE)),
+                capabilities.host(REVERSE_PROFILE)),
             "age_s": round(time.time() - current["ts"], 1),
         }
 

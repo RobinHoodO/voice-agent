@@ -9,9 +9,11 @@ conversation. That distinction is the whole point:
   * this is an accountability record — what was done, when, on whose word, and whether
     a gate stood in the way. Deleting it is evidence destruction.
 
-Robin's assistant sends mail as him, decides kernel approvals, and (since the server
-surface) runs shell commands on Thrivbe-1. Every one of those needs to be answerable
-weeks later without replaying a transcript.
+Robin's assistant sends mail as him, decides kernel approvals, and runs shell commands
+on his Mac. Every one of those needs to be answerable weeks later without replaying a
+transcript — and so does the surface it happened FROM, which is why every line carries
+one: an action taken while he was at the keyboard and one taken from his phone are not
+the same event.
 
 WHAT IS WRITTEN: one JSON object per line — timestamp, surface, session, event, tool,
 redacted args, truncated result. Nothing else, and never the raw body of anything.
@@ -38,7 +40,7 @@ sets above is written verbatim. Two consequences worth knowing before you read t
 file out loud or ship it anywhere:
 
   * `run_shell` commands are recorded IN FULL, by design. The command is the whole
-    point of the record — "something was deleted on Thrivbe-1" is not an answer to
+    point of the record — "something was deleted" is not an answer to
     "what did it delete?". A command that inlines a secret (`PGPASSWORD=… psql …`) puts
     that secret in this file. Treat actions.jsonl as sensitive as the shell history it
     describes: 0600, owner-only directory, never pasted into a ticket.

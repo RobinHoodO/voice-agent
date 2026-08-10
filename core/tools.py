@@ -41,13 +41,14 @@ TOOLS = [
     {
         "type": "function",
         "name": "run_shell",
-        # Surface-neutral on purpose: this description is sent to BOTH the Mac and
-        # Thrivbe-1 (check_tool_drift.py requires one shared text, because a tool
-        # description is prompt and two of them is two agents). "the machine you are
-        # running on" is the only phrasing that is true on both; which machine that is,
-        # and whether destructive commands stage, comes from the surface block the
-        # session assembles from its capability profile.
-        "description": "Run a command in the persistent shell on the machine you are running on (starts in Robin's configured base folder; cd/env persist; it can act anywhere on that machine's filesystem). Use it to read, search, and act. Reads always run immediately. On a surface where destructive commands are gated, the result will tell you the command was STAGED and did NOT run — then say plainly what it would do and ask Robin to confirm out loud. To hand off a slow coding/research task, ALWAYS use a delegation tool (`delegate` where you have it, otherwise `os_delegate`) — do NOT shell out to `claude` or `pi` yourself.",
+        # ONE description for every surface (check_tool_drift.py requires one shared
+        # text, because a tool description is prompt and two of them is two agents) —
+        # and the surfaces that do not have this tool never see it at all, because
+        # `capabilities.tools_for` removes the whole entry rather than rewording it.
+        # So this text can simply describe the shell as it is where it exists: Robin's
+        # Mac, with him sitting at it. There is no staging sentence any more; nothing
+        # classifies a command, and no surface with this tool gates it.
+        "description": "Run a command in the persistent shell on Robin's Mac (starts in his configured base folder; cd/env persist; it can act anywhere on that machine's filesystem). Use it to read, search, and act — it runs immediately, so don't ask permission for ordinary reads and do say plainly what you're about to do when a command changes something. To hand off a slow coding/research task, ALWAYS use a delegation tool (`delegate` where you have it, otherwise `os_delegate`) — do NOT shell out to `claude` or `pi` yourself.",
         "parameters": {"type": "object",
                        "properties": {"command": {"type": "string"}},
                        "required": ["command"]},

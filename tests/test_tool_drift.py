@@ -303,11 +303,16 @@ def test_an_exclusion_naming_a_dead_tool_is_drift(tmp_path, manifest_url):
 
 
 def test_the_real_surfaces_declare_different_profiles(manifest_url):
-    """The live tree: mac and server are on different profiles, and the ONLY tools the
-    server is missing are the ones core's profile removes."""
+    """The live tree: the two surface packages are on different profiles, and the ONLY
+    tools the browser/phone surface is missing are the ones core's profile removes.
+
+    Note which name is asserted where: `server` is a DIRECTORY (the package that serves
+    the phone's browser tab, from this Mac) and `phone` is the PROFILE that package
+    declares. They stopped being the same word on 2026-08-10, when the Thrivbe-1 voice
+    instance was dropped and the phone became a microphone for the Mac's own session."""
     result = run(REPO, manifest_url)
     assert "profile=mac" in result.stdout, result.stdout + result.stderr
-    assert "profile=server" in result.stdout
+    assert "profile=phone" in result.stdout
     assert "server does not have (by profile):" in result.stdout
     assert "Surfaces converged: mac, server" in result.stdout
 
@@ -315,7 +320,8 @@ def test_the_real_surfaces_declare_different_profiles(manifest_url):
     line = next(l for l in result.stdout.splitlines()
                 if "server does not have (by profile):" in l)
     absent = {name.strip() for name in line.split(":", 1)[1].split(",")}
-    assert absent == set(capabilities.MAC_ONLY_TOOLS)
+    assert absent == set(capabilities.PHONE_EXCLUDED_TOOLS)
+    assert "run_shell" in absent, "the phone surface got a shell back"
 
 
 def _load_checker():

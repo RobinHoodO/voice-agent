@@ -279,17 +279,35 @@ def test_an_empty_command_is_refused(workspace):
     assert rc.scope_violation("   ", workspace) is not None
 
 
-def test_in_scope_reads_run(caller):
-    status, payload = caller.op("run_shell", {"command": "cat notes/hello.md"})
-    assert status == 200, payload
-    assert payload["status"] == "ok"
+def _run_confirmed(caller, command):
+    """Stage a command and answer it with a plain yes — the only way one runs here.
+
+    Every command stages now, reads included. There used to be a classifier
+    (`core.destructive`) that let a provable read run immediately; three rounds of
+    adversarial review broke it (env as an exec wrapper, `git ls-remote --upload-pack`,
+    uniq writing its second operand), so it was deleted rather than patched a fourth
+    time. Nothing can prove a command is a read, so nothing runs unasked.
+    """
+    status, staged = caller.op("run_shell", {"command": command})
+    assert staged.get("status") == "staged", (status, staged)
+    return caller.confirm(staged["id"], "yes")
+
+
+def test_in_scope_reads_stage_and_then_run(caller):
+    status, staged = caller.op("run_shell", {"command": "cat notes/hello.md"})
+    assert status == 200, staged
+    assert staged["status"] == "staged", "a read ran without a spoken yes"
+    assert ("staged", "run_shell") in journal_events()
+
+    _status, payload = caller.confirm(staged["id"], "yes")
+    assert payload["status"] == "confirmed", payload
     assert "hi" in payload["result"]
-    assert ("call", "run_shell") in journal_events()
+    assert ("confirmed", "run_shell") in journal_events()
 
 
 def test_a_command_runs_at_the_workspace_root_every_time(caller, workspace):
     """No persistent shell: a `cd` in one call cannot move the next one out of scope."""
-    _status, payload = caller.op("run_shell", {"command": "pwd"})
+    _status, payload = _run_confirmed(caller, "pwd")
     assert os.path.realpath(payload["result"].strip()) == workspace
 
 
@@ -386,7 +404,7 @@ def test_every_command_runs_inside_the_sandbox(caller, workspace, monkeypatch):
         return _ok()
 
     monkeypatch.setattr(rc.subprocess, "run", fake_run)
-    caller.op("run_shell", {"command": "ls"})
+    _run_confirmed(caller, "ls")
     assert seen["argv"][0] == rc.shell_sandbox.SANDBOX_EXEC
     assert seen["argv"][1] == "-p"
     profile = seen["argv"][2]
@@ -1079,12 +1097,21 @@ def test_the_journal_records_the_reverse_surface_by_name(caller, monkeypatch):
 
 # --- 8. the profile ----------------------------------------------------------------------
 
-def test_the_reverse_profile_stages_destructive_commands():
-    """The Mac's own profile runs the shell free because Robin is at the keyboard.
-    Over the reverse channel he is not, so this profile must not inherit that."""
-    assert capabilities.shell_gate("mac") == capabilities.SHELL_FREE
-    assert capabilities.shell_gate(rc.REVERSE_PROFILE) == \
-        capabilities.SHELL_STAGE_DESTRUCTIVE
+def test_the_reverse_channel_stages_every_command_it_is_handed():
+    """The Mac's own surface runs the shell free because Robin is at the keyboard. Over
+    the reverse channel he is not, so nothing here runs unasked — and since
+    `core.destructive` was deleted there is no longer a category of command that could
+    be let through. `mutating` is the whole decision, and it is two values."""
+    assert rc.OPERATIONS["run_shell"].mutating == rc.ALWAYS
+    assert not hasattr(rc, "CLASSIFY"), "the read/write classifier came back"
+    assert not hasattr(capabilities, "shell_gate")
+
+
+def test_the_desk_surface_still_runs_its_own_shell_free():
+    """The other half of the same sentence: nothing above was traded for a gate on the
+    machine Robin is sitting at."""
+    assert capabilities.has_shell("mac")
+    assert not capabilities.has_shell("phone")
 
 
 def test_run_shell_keeps_the_strict_affirmation_bar_here_too():
@@ -1161,11 +1188,16 @@ def _http(url, body=None, headers=AUTH, method=None):
         return error.code, json.loads(error.read())
 
 
-def test_over_http_a_read_answers_and_a_delete_stages(live_socket, workspace):
+def test_over_http_a_read_stages_and_a_yes_answers_it(live_socket, workspace):
     status, payload = _http(f"{live_socket}/op",
                             {"op": "run_shell", "args": {"command": "cat notes/hello.md"}})
+    assert (status, payload["status"]) == (200, "staged")
+    status, payload = _http(f"{live_socket}/confirm",
+                            {"id": payload["id"], "transcript": "yes"})
     assert (status, payload["result"].strip()) == (200, "hi")
 
+
+def test_over_http_a_delete_stages_and_a_question_drops_it(live_socket, workspace):
     status, payload = _http(f"{live_socket}/op",
                             {"op": "run_shell", "args": {"command": "rm -rf notes"}})
     assert payload["status"] == "staged"

@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-from core import audit, capabilities, caps, config, confirm_gate, destructive, privacy
+from core import audit, capabilities, caps, config, confirm_gate, privacy
 from core import kernel_tools
 from core.audio_core import AudioCoreMixin
 from core.backends import base as events
@@ -269,7 +269,7 @@ class LiveSession(AudioCoreMixin):
             busy = result.pending
             self._stage_refused = True
             preview = _confirmation_preview(busy["tool"], busy["args"],
-                                            capabilities.shell_host(self.profile_name))
+                                            capabilities.host(self.profile_name))
             _log(f"{tool}: refused — {busy['tool']} is already awaiting confirmation")
             config.activity(f"⛔  {tool.replace('_', ' ')} refused — "
                             f"{busy['tool'].replace('_', ' ')} is still awaiting confirmation")
@@ -1262,33 +1262,25 @@ class LiveSession(AudioCoreMixin):
                 pass
 
     async def _shell_tool(self, args: dict) -> str:
-        """run_shell, through this surface's shell gate.
+        """run_shell — it runs, or this surface does not have it at all.
 
-        On the Mac the gate is `free`: Robin is sitting at the machine and the shell has
-        always run what it was told. On the server it is `stage_destructive` — reads run
-        free, and anything `core.destructive` cannot prove is a read becomes the ONE
-        staged pending action, executed only by his next short spoken affirmation.
+        There is no gate here and no command classifier behind it. A surface either has
+        `run_shell` or it does not (`core.capabilities`), and the only surface that has
+        it is Robin sitting at his own keyboard, where the shell has always run what it
+        was told. The phone has no `run_shell` in its schema, and `_do_tool`'s profile
+        guard refuses the name before dispatch ever reaches this method — including the
+        unnamed tool call that `_do_tool` defaults to `run_shell`, which is how an
+        anonymous call would otherwise have slipped past a name-keyed check.
 
-        This deliberately reuses `_pending_action` rather than inventing a second gate:
-        the TTL, the DENY-beats-AFFIRM rule, the "an unrelated utterance drops it"
-        behaviour and the one-action-at-a-time slot are already right there, already
-        tested, and already what Robin has learned to expect from `gmail_send`.
-        Staging goes through `_stage_pending`, so a shell command can neither be
-        overwritten by a later action nor overwrite one Robin has already been read.
+        What used to be here was `stage_destructive`: classify the command, run it if it
+        looked like a read, stage it otherwise. Three rounds of adversarial review broke
+        that classifier (`env` as an exec wrapper, `git ls-remote --upload-pack`, `uniq`
+        writing its second operand), so the approach was abandoned rather than patched
+        again. The spoken confirmation gate it borrowed is untouched and still guards
+        `gmail_send` and `kernel_decide`.
         """
-        command = args.get("command", "")
-        gate = capabilities.shell_gate(self.profile_name)
-        if gate == capabilities.SHELL_FREE:
-            return await self._loop.run_in_executor(None, self._run_in_shell, command)
-        verdict = destructive.classify(command)
-        if not verdict.destructive:
-            return await self._loop.run_in_executor(None, self._run_in_shell, command)
-        host = capabilities.shell_host(self.profile_name)
-        _log(f"run_shell wants confirmation ({verdict.reason}): {command!r}")
-        return self._stage_pending(
-            "run_shell", {"command": command},
-            f"CONFIRMATION REQUIRED: {_confirmation_preview('run_shell', args, host)}. "
-            "It has NOT run. Say what it will do and ask the user to confirm out loud.")
+        return await self._loop.run_in_executor(
+            None, self._run_in_shell, args.get("command", ""))
 
     def _run_in_shell(self, command: str) -> str:
         if self._shell is None:
