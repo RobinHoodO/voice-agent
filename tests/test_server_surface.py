@@ -172,6 +172,56 @@ def test_client_activity_controls_are_ignored(voice_server):
     _run(scenario())
 
 
+# ── 4b. the microphone is not gated on the prompt build ─────────────────────
+def test_the_tab_may_start_its_microphone_before_the_prompt_is_built(voice_server,
+                                                                     monkeypatch):
+    """index.html drops every captured frame until the `audio` frame lands (it does not
+    know what rate to resample to), so whatever that frame waits on is dead air at the
+    top of the conversation — measured at 2.3 s over the tailnet, which is most of a
+    first sentence.
+
+    It used to wait on `_configure`: kernel persona, memory recall, the high-stakes
+    manifest. Nothing in there tells the tab anything about audio. The slow build below
+    stands in for that, and the assertion is ordering, not a stopwatch: the tab is
+    configured while the prompt is still being assembled.
+    """
+    import threading
+    import time
+
+    from core import live_session
+
+    # threading.Events, not asyncio ones: the prompt is built on the SESSION's thread,
+    # and the test watches from the client's loop.
+    building, release = threading.Event(), threading.Event()
+
+    def slow_build(ctx, cfg=None, **kwargs):
+        building.set()
+        while not release.is_set():
+            time.sleep(0.01)
+        return "test instructions"
+
+    monkeypatch.setattr(live_session, "_build_live_instructions", slow_build)
+    server, sessions = voice_server
+
+    async def scenario():
+        ws = await connect(server.ws_url(TOKEN, str(uuid.uuid4())), max_size=None)
+        client = Client(ws)
+        await client.__aenter__()
+        try:
+            await client.expect("hello")
+            await await_for(building.is_set, what="the prompt build to start")
+            # THE assertion: the audio config arrives while the prompt is still building.
+            audio = await client.expect("audio", timeout=5)
+            assert audio["mic_rate"] == 16000
+            assert not release.is_set(), "the prompt build finished first"
+        finally:
+            release.set()
+            await client.__aexit__()
+            await ws.close()
+
+    _run(scenario())
+
+
 # ── 5. transcripts and lifecycle reach the tab ──────────────────────────────
 def test_transcripts_and_end_of_session_reach_the_tab(voice_server):
     server, sessions = voice_server
