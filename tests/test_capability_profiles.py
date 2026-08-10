@@ -115,6 +115,8 @@ def test_no_shell_gate_machinery_came_back():
     assert not hasattr(capabilities, "SHELL_STAGE_DESTRUCTIVE")
     for name, profile in capabilities.PROFILES.items():
         assert "shell_gate" not in profile, name
+    with pytest.raises(ImportError):
+        from core import destructive          # noqa: F401
 
 
 def test_the_surface_note_tells_the_model_what_is_missing():
