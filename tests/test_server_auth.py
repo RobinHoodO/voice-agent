@@ -93,7 +93,19 @@ def test_uvicorn_never_logs_the_token():
 def test_two_tabs_never_cross_confirm(voice_server, monkeypatch):
     """Two tabs, one staged irreversible action. Saying "yes" in the wrong tab must do
     nothing — the staged action lives on that tab's own LiveSession, and confirmation
-    is resolved against that object, not a server-wide slot."""
+    is resolved against that object, not a server-wide slot.
+
+    The two tabs are now SEQUENTIAL, and that is not a softening of the test: since
+    `server/app.py` started enforcing one conversation per phone (a second tab is a
+    bystander, its session never started), two tabs talking at once is unreachable, so
+    a test that needed it would be testing a state production cannot produce. The way
+    Robin's second tab actually gets a voice is the Take-over button — which is exactly
+    when a stale staged action from the previous tab is most dangerous, because he is
+    mid-sentence and has just changed devices. So that is the scenario:
+
+        A stages → A confirms (the mechanism works at all, once)
+        A stages again → B TAKES OVER → "yes" in B must not fire A's action
+    """
     from core import live_session
 
     server, sessions = voice_server
@@ -101,41 +113,87 @@ def test_two_tabs_never_cross_confirm(voice_server, monkeypatch):
     monkeypatch.setitem(live_session.HIGH_STAKES_EXECUTORS, "gmail_send",
                         lambda args: executed.append(args) or "sent")
 
+    def stage(sess, call_id, subject):
+        sess.fake.push(sess._loop, {
+            "kind": "tool_call", "call_id": call_id, "name": "gmail_send",
+            "args": json.dumps({"to": "robin@meta.thrivbe.com", "subject": subject}),
+        })
+
     async def scenario():
         key_a, key_b = str(uuid.uuid4()), str(uuid.uuid4())
         ws_a = await connect(server.ws_url(TOKEN, key_a), max_size=None)
-        ws_b = await connect(server.ws_url(TOKEN, key_b), max_size=None)
-        ca, cb = Client(ws_a), Client(ws_b)
+        ca = Client(ws_a)
         await ca.__aenter__()
-        await cb.__aenter__()
         try:
             await ca.expect("audio")
-            await cb.expect("audio")
-            assert len(sessions) == 2
-            sess_a, sess_b = sessions[0], sessions[1]
-            assert sess_a is not sess_b
+            sess_a = sessions[-1]
 
-            # Tab A's model asks to send an email — gated, so it is only STAGED.
-            sess_a.fake.push(sess_a._loop, {
-                "kind": "tool_call", "call_id": "call-a", "name": "gmail_send",
-                "args": json.dumps({"to": "robin@meta.thrivbe.com", "subject": "tab A"}),
-            })
+            # Tab A's model asks to send an email — gated, so it is only STAGED — and
+            # the same words in the SAME tab confirm it, exactly once.
+            stage(sess_a, "call-a1", "tab A first")
             await await_for(lambda: sess_a._pending_action, what="A's staged action")
-            assert sess_b._pending_action is None
-
-            # Tab B says yes. It is a real, well-formed confirmation — in the wrong tab.
-            sess_b.fake.push(sess_b._loop, {"kind": "user_transcript", "text": "yes"})
-            await await_for(lambda: cb.of("turn"), what="B's transcript to land")
-            await asyncio.sleep(0.4)
-            assert executed == [], "a yes in tab B confirmed tab A's action"
-            assert sess_a._pending_action is not None, "A's action was consumed by B"
-
-            # …and the same words in tab A do confirm it, exactly once.
             sess_a.fake.push(sess_a._loop, {"kind": "user_transcript", "text": "yes"})
             await await_for(lambda: executed, what="A's confirmation to execute")
-            assert len(executed) == 1
-            assert executed[0]["subject"] == "tab A"
+            assert len(executed) == 1 and executed[0]["subject"] == "tab A first"
             assert sess_a._pending_action is None
+
+            # Now A stages a second one and does NOT answer.
+            stage(sess_a, "call-a2", "tab A second")
+            await await_for(lambda: sess_a._pending_action, what="A's second staged action")
+
+            # Robin picks up another tab and takes the conversation over. A ends; its
+            # staged action goes with it.
+            ws_b = await connect(server.ws_url(TOKEN, key_b) + "&takeover=1", max_size=None)
+            cb = Client(ws_b)
+            await cb.__aenter__()
+            try:
+                await cb.expect("audio")
+                sess_b = sessions[-1]
+                assert sess_b is not sess_a
+                assert sess_b._pending_action is None, "B inherited A's staged action"
+
+                # A real, well-formed confirmation — in the wrong tab.
+                sess_b.fake.push(sess_b._loop, {"kind": "user_transcript", "text": "yes"})
+                await await_for(lambda: cb.of("turn"), what="B's transcript to land")
+                await asyncio.sleep(0.4)
+                assert len(executed) == 1, "a yes in tab B confirmed tab A's action"
+                assert sess_b._pending_action is None
+            finally:
+                await cb.__aexit__()
+                await ws_b.close()
+        finally:
+            await ca.__aexit__()
+            await ws_a.close()
+
+    _run(scenario())
+
+
+def test_a_bystander_tab_gets_its_own_session_and_no_conversation(voice_server):
+    """The other half of the same guarantee, on the tab that did NOT take over.
+
+    A second tab is accepted (Robin must be able to take over from it) and is given its
+    own `LiveSession` object, so there is no shared confirmation slot to reach — but it
+    is never started, so it has no conversation, no provider socket and no way to hear
+    a "yes" at all. Isolation by structure, twice over.
+    """
+    server, sessions = voice_server
+
+    async def scenario():
+        ws_a = await connect(server.ws_url(TOKEN, str(uuid.uuid4())), max_size=None)
+        ca = Client(ws_a)
+        await ca.__aenter__()
+        await ca.expect("audio")
+
+        ws_b = await connect(server.ws_url(TOKEN, str(uuid.uuid4())), max_size=None)
+        cb = Client(ws_b)
+        await cb.__aenter__()
+        await cb.expect("busy")
+        try:
+            assert len(sessions) == 2 and sessions[0] is not sessions[1]
+            assert sessions[1]._pending_action is None
+            assert not sessions[1]._running, "the bystander tab started a conversation"
+            assert getattr(sessions[1], "fake", None) is None, \
+                "the bystander tab built a provider backend"
         finally:
             await ca.__aexit__()
             await cb.__aexit__()

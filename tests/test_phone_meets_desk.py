@@ -143,37 +143,77 @@ def test_the_pwa_only_arms_takeover_inside_the_button_handler():
     assert armed_at > handler_at, "TAKEOVER is armed outside the button handler"
 
 
-# ── 4. the floor is a SEAT, so the phone's own tabs do not fight ─────────────
-def test_two_phone_tabs_share_one_claim_and_release_it_together(voice_server):
-    """Per-tab isolation of a staged action is a different mechanism and stays intact
-    (test_server_auth.py). What the floor must not do is refuse Robin's second tab, or
-    hand the floor back while the first one is still talking."""
-    from core import floor
-    from server.app import PHONE_FLOOR_KEY
+# ── 4. one phone, two tabs: one seat, and — separately — ONE conversation ────
+def _running(sessions):
+    return [s for s in sessions if getattr(s, "_running", False)]
 
-    server, _sessions = voice_server
+
+def _reached_the_model(sessions):
+    """Sessions that actually opened a conversation with a provider.
+
+    `RecordedSession._make_backend` runs on the session thread, so a session that was
+    never started has no `fake` at all; `fake.setup` is set by `send_setup`, which is
+    the first thing a real conversation does. Either half alone would be weaker: the
+    attribute proves no backend was built, the setup proves none was configured.
+    """
+    out = []
+    for s in sessions:
+        fake = getattr(s, "fake", None)
+        if fake is not None and fake.setup is not None:
+            out.append(s)
+    return out
+
+
+def test_two_phone_tabs_share_one_claim_and_release_it_together(voice_server):
+    """The floor keys this whole surface as ONE seat, so it cannot be what stops two
+    tabs from running two conversations — and for a while nothing did. Two tabs on one
+    phone meant two `LiveSession`s started, two paid realtime sockets, and two brains
+    answering into the same room off the same speaker.
+
+    So: the second tab is still accepted (it is Robin's own phone, and he must be able
+    to take over from it), it still gets its own LiveSession object for confirmation
+    isolation — but it is NOT started, and it is told who is talking.
+    """
+    from core import floor
+    from server.app import SESSIONS, PHONE_FLOOR_KEY
+
+    server, sessions = voice_server
 
     async def scenario():
         ws_a = await connect(server.ws_url(TOKEN, str(uuid.uuid4())), max_size=None)
-        ws_b = await connect(server.ws_url(TOKEN, str(uuid.uuid4())), max_size=None)
-        ca, cb = Client(ws_a), Client(ws_b)
+        ca = Client(ws_a)
         await ca.__aenter__()
+        await ca.expect("audio")                    # tab A is in the conversation
+
+        ws_b = await connect(server.ws_url(TOKEN, str(uuid.uuid4())), max_size=None)
+        cb = Client(ws_b)
         await cb.__aenter__()
-        await ca.expect("audio")
-        await cb.expect("audio")
-        assert ca.of("busy") == [] and cb.of("busy") == []
+        await cb.expect("hello")                    # not refused: a real socket
+        busy = await cb.expect("busy")
+        assert busy["holder"] == "phone", busy
+        assert cb.of("audio") == [], "the second tab was given a conversation"
+
+        # THE invariant. One phone, one brain, whatever the tab count.
+        await await_for(lambda: len(SESSIONS) == 2, what="both tabs registered")
+        assert len(_running(sessions)) == 1, \
+            f"{len(_running(sessions))} conversations running on one phone"
+        assert len(_reached_the_model(sessions)) == 1, \
+            "a second tab opened its own provider socket"
+        assert len(sessions) == 2, "the bystander must still get its own session object"
+
         held = floor.holder()
         assert held is not None and held.key == PHONE_FLOOR_KEY
+        assert held.session is _running(sessions)[0], \
+            "the floor points at a tab that is not the one talking"
 
-        # First tab leaves. The floor stays with the phone, because Robin is still on it.
-        await ca.__aexit__()
-        await ws_a.close()
-        await await_for(lambda: len(__import__("server.app", fromlist=["SESSIONS"]).SESSIONS) == 1,
-                        what="one tab left")
-        assert floor.holder() is not None, "the floor was released while a tab was live"
-
+        # The bystander leaves. The floor stays: Robin is still talking in tab A.
         await cb.__aexit__()
         await ws_b.close()
+        await await_for(lambda: len(SESSIONS) == 1, what="the bystander left")
+        assert floor.holder() is not None, "the floor was released while a tab was live"
+
+        await ca.__aexit__()
+        await ws_a.close()
 
     _run(scenario())
 
@@ -184,6 +224,47 @@ def test_two_phone_tabs_share_one_claim_and_release_it_together(voice_server):
     while f.holder() is not None and _t.time() < deadline:
         _t.sleep(0.05)
     assert f.holder() is None, "the phone kept the floor after its last tab closed"
+
+
+def test_a_second_tab_takes_the_conversation_over_only_when_asked(voice_server):
+    """The bystander's way out is the same deliberate act the desk case has: the
+    Take-over button, and nothing automatic. The loser ends through its own `stop()`,
+    so its transcript is persisted, and the count of running conversations never goes
+    above one on the way through."""
+    from server.app import SESSIONS
+
+    server, sessions = voice_server
+    key_b = str(uuid.uuid4())
+
+    async def scenario():
+        ws_a = await connect(server.ws_url(TOKEN, str(uuid.uuid4())), max_size=None)
+        ca = Client(ws_a)
+        await ca.__aenter__()
+        await ca.expect("audio")
+
+        # Same tab id as the bystander would use, now carrying a human's decision.
+        ws_b = await connect(server.ws_url(TOKEN, key_b) + "&takeover=1", max_size=None)
+        cb = Client(ws_b)
+        await cb.__aenter__()
+        await cb.expect("audio")                     # B is now the conversation
+        assert cb.of("busy") == []
+        ended = await ca.expect("ended")             # A was told, not just dropped
+        assert "another tab" in ended["reason"]
+
+        await await_for(lambda: len(_running(sessions)) == 1,
+                        what="exactly one conversation after the takeover")
+        assert _running(sessions)[0] is sessions[-1], "the wrong tab kept the floor"
+        await await_for(lambda: SESSIONS.get(key_b) is not None
+                        and SESSIONS[key_b].owns_conversation,
+                        what="the new tab owns the conversation")
+
+        await ca.__aexit__()
+        await cb.__aexit__()
+        await ws_a.close()
+        await ws_b.close()
+
+    _run(scenario())
+    assert len(_running(sessions)) == 0
 
 
 # ── 5. and the desk can get it back afterwards ───────────────────────────────

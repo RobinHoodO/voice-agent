@@ -348,8 +348,15 @@ function connect(){
     } else if (m.type === "ended") {
       sys("session ended (" + (m.reason || "") + ")");
     } else if (m.type === "busy") {
-      // One brain, and it is busy elsewhere. Nothing at the desk was touched.
+      // One brain, and it is busy elsewhere — at the desk (holder "desk", socket
+      // closes), or in another tab on this same phone (holder "phone", socket stays
+      // open so this tab can still take over). Nothing over there was touched.
+      // Either way this tab is NOT in a conversation, so hand the microphone back:
+      // holding it would light the recording indicator for a tab that is only
+      // watching, and iOS would keep it reserved.
       sys(m.text || "Pam is in a conversation somewhere else.");
+      idle("waiting — " + (m.holder === "phone" ? "another tab" : "the desk") +
+           " has the conversation");
       $("takeover").style.display = "block";
     } else if (m.type === "error") {
       sys(m.text || "server error", true);
@@ -378,16 +385,24 @@ async function start(){
   connect();
 }
 
-function stop(){
+// Back to not-talking, microphone handed back, WITHOUT touching the socket. Split out
+// of stop() because a `busy` frame needs exactly this and must NOT close the socket:
+// when another tab on this phone holds the conversation, this socket is what Robin
+// takes over from.
+function idle(foot){
   running = false;
   $("talk").textContent = "Start conversation";
   $("talk").classList.remove("live");
   setState("idle");
+  closeAudio();
+  $("foot").textContent = foot || "not connected";
+}
+
+function stop(){
   try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: "stop"})); } catch (e) {}
   try { if (ws) ws.close(); } catch (e) {}
   ws = null;
-  closeAudio();
-  $("foot").textContent = "not connected";
+  idle();
 }
 
 $("talk").onclick = () => running ? stop() : start();
@@ -397,7 +412,11 @@ $("talk").onclick = () => running ? stop() : start();
 $("takeover").onclick = () => {
   TAKEOVER = true;
   $("takeover").style.display = "none";
-  sys("taking over — ending the conversation at the desk");
+  sys("taking over — ending the conversation that is running");
+  // A "busy" socket may still be open (the other tab is on this same phone). Close it
+  // before reconnecting, so this tab never has two sockets under one session id.
+  try { if (ws) ws.close(); } catch (e) {}
+  ws = null;
   start();
 };
 

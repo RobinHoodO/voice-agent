@@ -20,12 +20,25 @@ Every turn boundary, guard, watchdog and confirmation gate is the one core alrea
 for the menubar; this file is a transport, an auth boundary, and the place the floor is
 claimed.
 
-**One brain, so one conversation.** `core.floor` holds it. A phone that connects while
-Robin is mid-sentence at his desk is REFUSED — his desk session is not touched — and
-told who has the floor. `?takeover=1`, which only the PWA's "Take over" button ever
-sets, is the deliberate second act that ends the other conversation through its own
-`stop()`. The reasoning, including why automatic takeover is the option that CAN lose a
-turn, is written out in `core/floor.py`.
+**One brain, so one conversation — and that takes TWO mechanisms, not one.**
+
+  * BETWEEN SEATS (desk vs phone) it is `core.floor`. A phone that connects while Robin
+    is mid-sentence at his desk is REFUSED — his desk session is not touched — and told
+    who has the floor.
+  * WITHIN this surface (tab vs tab on the same phone) the floor cannot help: every tab
+    claims the same `PHONE_FLOOR_KEY`, and the floor treats a re-claim on its own key as
+    the same seat arriving again, which is exactly right for a seat and useless as a cap
+    on conversations. So the cap lives here: `Conn.owns_conversation`, handed out by
+    `_conversation_owner()` in the one synchronous stretch of `/live` that contains no
+    `await`. A second tab gets a socket and a `busy` frame; it never calls
+    `session.start()`, so it never opens a second paid realtime socket and never becomes
+    a second brain answering into the same room.
+
+Either refusal carries the same `busy` frame and therefore the same "Take over"
+affordance in the PWA. `?takeover=1`, which only that button ever sets, is the deliberate
+second act that ends the other conversation through its own `stop()`. The reasoning,
+including why automatic takeover is the option that CAN lose a turn, is written out in
+`core/floor.py`.
 
 **Auth** is voice-bridge's proven pattern, unchanged in shape because it is the one that
 has survived a year on Robin's phone:
@@ -69,9 +82,12 @@ RELEASE_PATH = os.path.join(HERE, "RELEASE")
 def _max_sessions() -> int:
     """How many tabs may hold a socket at once.
 
-    Only ONE of them can be in a conversation — the floor sees to that — so this is a
-    cap on sockets and threads, not on conversations. Read live from config so the
-    menubar's setting applies without a restart.
+    Sockets, not conversations. What caps CONVERSATIONS at one is
+    `Conn.owns_conversation` (see `_conversation_owner`) — the floor does not, because
+    every tab on this phone claims the same seat key. This number bounds only how many
+    tabs may sit here at once; the surplus ones hold a socket and an unstarted
+    `LiveSession` object, so they cost no provider connection and no thread. Read live
+    from config so the menubar's setting applies without a restart.
     """
     env = os.getenv("VOICE_AGENT_MAX_SESSIONS")
     if env:
@@ -162,20 +178,31 @@ SESSION_FACTORY = BrowserLiveSession
 
 # This whole surface's claim on the conversation floor (`core.floor`). ONE key for every
 # tab, because the floor arbitrates SEATS: Robin's phone is one seat whether he has one
-# tab open or three. What keeps two tabs from confirming each other's staged action is a
-# different mechanism entirely — a `LiveSession` per tab, each with its own gate — and it
-# is unchanged. See `core/floor.py` for why these are separate questions.
+# tab open or three. Two OTHER questions are deliberately not this one's, and each has
+# its own mechanism here:
+#   * "may a second tab hold a second conversation?" — no: `Conn.owns_conversation`.
+#   * "may a spoken yes in one tab confirm what another tab staged?" — no: a
+#     `LiveSession` per tab, each with its own gate, unchanged.
+# See `core/floor.py` for why these are separate questions.
 PHONE_FLOOR_KEY = "phone:surface"
 
 
 class Conn:
-    """One authenticated tab: its bridge, its session, when it opened."""
+    """One authenticated tab: its bridge, its session, when it opened.
+
+    `owns_conversation` is the per-surface half of "one brain, one conversation": true
+    for the ONE tab whose `LiveSession` was started, false for every other tab holding a
+    socket. It is set and cleared only from the server's event loop thread, which is why
+    it needs no lock — and only inside stretches of `/live` that contain no `await`,
+    which is what makes the check-then-claim atomic.
+    """
 
     def __init__(self, key: str, bridge: BrowserAudioBridge, session):
         self.key = key
         self.bridge = bridge
         self.session = session
         self.opened_at = time.time()
+        self.owns_conversation = False
 
 
 def _token() -> str | None:
@@ -284,6 +311,9 @@ def health(x_voice_token: str = Header(default=None)):
                 "mic_frames_in": c.bridge.mic_frames_in,
                 "audio_frames_out": c.bridge.audio_frames_out,
                 "running": bool(getattr(c.session, "_running", False)),
+                # Which tab holds the phone's one conversation. Every other tab here is
+                # a socket showing a `busy` frame and nothing else.
+                "talking": c.owns_conversation,
             }
             for k, c in list(SESSIONS.items())
         ],
@@ -306,19 +336,43 @@ def _wants_takeover(websocket: WebSocket) -> bool:
     return str(websocket.query_params.get("takeover", "")).lower() in ("1", "true", "yes")
 
 
-def _evict_phone() -> None:
-    """Robin took the conversation back at his desk. End every phone tab, the normal way.
+def _end_tab(conn: "Conn", reason: str) -> None:
+    """End one tab's conversation the normal way, and give up its conversation slot.
 
-    `LiveSession.stop()` is the same call a spoken sign-off makes, so each transcript is
+    `LiveSession.stop()` is the same call a spoken sign-off makes, so the transcript is
     persisted by the path that already persists them. The tab is told first, so the PWA
     can say what happened instead of showing a socket that went quiet.
+
+    Synchronous on purpose, and that is load-bearing: `stop()` clears `_running` before
+    it returns, so a caller may start the replacement conversation immediately without a
+    window in which two are running.
     """
+    conn.owns_conversation = False
+    conn.bridge.send_json({"type": "ended", "reason": reason})
+    try:
+        conn.session.stop()
+    except Exception as e:
+        caps.log(f"phone session stop failed ({reason}): {e!r}")
+
+
+def _evict_phone() -> None:
+    """Robin took the conversation back at his desk. End every phone tab."""
     for conn in list(SESSIONS.values()):
-        conn.bridge.send_json({"type": "ended", "reason": "taken over at the desk"})
-        try:
-            conn.session.stop()
-        except Exception as e:
-            caps.log(f"phone session stop on eviction failed: {e!r}")
+        _end_tab(conn, "taken over at the desk")
+
+
+def _conversation_owner(exclude: str | None = None) -> "Conn | None":
+    """The tab that holds this phone's ONE conversation, if any.
+
+    This is the per-surface cap the floor cannot provide (`PHONE_FLOOR_KEY` is one seat
+    for every tab). Callers must not `await` between this returning None and setting
+    `owns_conversation` on their own `Conn` — that unbroken stretch is the whole reason
+    two tabs racing into `/live` cannot both be granted the conversation.
+    """
+    for key, conn in list(SESSIONS.items()):
+        if key != exclude and conn.owns_conversation:
+            return conn
+    return None
 
 
 @app.websocket("/live")
@@ -341,15 +395,27 @@ async def live(websocket: WebSocket):
 
     await websocket.accept()
 
-    # ── the floor, before anything is built ──────────────────────────────────
+    takeover = _wants_takeover(websocket)
+
+    # ── who is talking, before anything is built ─────────────────────────────
     # A refusal has to cost nothing: no bridge, no LiveSession, and above all no call
-    # to `session.start()`, which is what opens the paid realtime socket. So the claim
-    # comes first and carries no session yet; the session is attached below with a
-    # second claim on the same key, which the floor treats as the same seat arriving
-    # again rather than as a rival.
-    claim = floor.take if _wants_takeover(websocket) else floor.claim
+    # to `session.start()`, which is what opens the paid realtime socket.
+    #
+    # Everything from here to `conn.owns_conversation = True` runs without an `await`.
+    # That is deliberate and it is the concurrency argument: the event loop cannot
+    # interleave another `/live` between the question "is a tab already talking?" and
+    # this tab's answer to it.
+    rival = _conversation_owner(exclude=session_key)
+
+    # The seat. Claimed carrying the session that is ACTUALLY in the conversation, so
+    # `floor.session()` keeps pointing at it even when the arriving tab turns out to be
+    # a bystander (below) — a background job must never be routed to a tab that is
+    # sitting on a `busy` frame.
+    claim = floor.take if takeover else floor.claim
     try:
-        claim(floor.PHONE, PHONE_FLOOR_KEY, on_evict=_evict_phone)
+        claim(floor.PHONE, PHONE_FLOOR_KEY,
+              session=None if rival is None else rival.session,
+              on_evict=_evict_phone)
     except floor.Busy as busy:
         # Robin is mid-conversation somewhere else. His conversation is NOT touched.
         caps.log(f"session {session_key[:8]} refused — {busy.holder.surface} has the floor")
@@ -362,35 +428,74 @@ async def live(websocket: WebSocket):
         await websocket.close(code=FLOOR_BUSY_CLOSE)
         return
 
+    # ── the conversation, which the seat does NOT bound ──────────────────────
+    # Another tab on this same phone is talking. On iOS that is two taps away — the
+    # home-screen PWA and a Safari tab are separate `sessionStorage` contexts, so they
+    # are separate session UUIDs — and it must not become two brains in one room.
+    if rival is not None and takeover:
+        # A finger, on the Take-over button. Same act, same path as taking the floor
+        # from the desk: the loser ends through its own stop(), which persists its
+        # transcript and clears `_running` before it returns.
+        caps.log(f"session {session_key[:8]} takes over from tab {rival.key[:8]}")
+        _end_tab(rival, "taken over by another tab on this phone")
+        rival = None
+
     # Same tab reconnecting (dropped mobile network): retire the old one first, so two
-    # sessions never share a key — and never share a confirmation.
+    # sessions never share a key — and never share a confirmation. Popped here (no
+    # await) and shut down below, after this tab has taken its decision, so the gap
+    # cannot be mistaken by a third tab for a free conversation slot.
     old = SESSIONS.pop(session_key, None)
-    if old is not None:
-        caps.log(f"session {session_key[:8]} reconnected — retiring the previous one")
-        await _shutdown(old)
 
     loop = asyncio.get_running_loop()
     bridge = BrowserAudioBridge(websocket, loop, session_key=session_key)
     session = SESSION_FACTORY(bridge=bridge, on_auto_stop=lambda: bridge.send_json(
         {"type": "ended", "reason": "auto-stop"}))
     conn = Conn(session_key, bridge, session)
+    # THE line. `rival is None` was decided above with no `await` in between, so no
+    # other tab can have been granted the conversation since. A bystander keeps its
+    # socket (it is a tab Robin can still take over from) and gets its own LiveSession
+    # object for confirmation isolation — but that object is never STARTED, so there is
+    # no second realtime socket, no second mic pump and no second brain in the room.
+    conn.owns_conversation = rival is None
     SESSIONS[session_key] = conn
-    # Attach the session to the claim we already hold, so a finished background task
-    # can be offered to whoever Robin is actually talking to (`floor.session()`).
-    floor.claim(floor.PHONE, PHONE_FLOOR_KEY, session=session, on_evict=_evict_phone)
+    if conn.owns_conversation:
+        # Attach the session to the claim we already hold, so a finished background task
+        # can be offered to whoever Robin is actually talking to (`floor.session()`).
+        floor.claim(floor.PHONE, PHONE_FLOOR_KEY, session=session, on_evict=_evict_phone)
+
+    if old is not None:
+        caps.log(f"session {session_key[:8]} reconnected — retiring the previous one")
+        old.owns_conversation = False
+        await _shutdown(old)
 
     # Everything from here is inside the try, so a failure in `start()` cannot leave
     # this connection in SESSIONS or leave the surface holding the floor.
     try:
         await websocket.send_json({"type": "hello", "session": session_key,
                                    "release": _release()})
-        session.start()
-        caps.log(f"session {session_key[:8]} open ({len(SESSIONS)} live)")
+        if conn.owns_conversation:
+            session.start()
+            caps.log(f"session {session_key[:8]} open ({len(SESSIONS)} live)")
+        else:
+            caps.log(f"session {session_key[:8]} is a bystander — "
+                     f"tab {rival.key[:8]} holds the conversation")
+            # The SAME frame the desk refusal sends, so the PWA renders the same
+            # "Take over" affordance for both. Only the holder differs.
+            await websocket.send_json({
+                "type": "busy",
+                "holder": floor.PHONE,
+                "since_s": round(time.time() - rival.opened_at, 1),
+                "text": ("Another tab on this phone is already in the conversation. "
+                         "One brain — finish there, or take over here."),
+            })
 
-        recv = asyncio.ensure_future(_pump_browser(websocket, conn))
-        watch = asyncio.ensure_future(_watch_session(conn))
-        done, pending = await asyncio.wait([recv, watch],
-                                           return_when=asyncio.FIRST_COMPLETED)
+        tasks = [asyncio.ensure_future(_pump_browser(websocket, conn))]
+        if conn.owns_conversation:
+            # Nothing to watch on a bystander: its session was never started, so the
+            # "session ended on its own" test would fire immediately and close a socket
+            # Robin may still want to take over from.
+            tasks.append(asyncio.ensure_future(_watch_session(conn)))
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
@@ -399,14 +504,24 @@ async def live(websocket: WebSocket):
             if exc:
                 caps.log(f"session {session_key[:8]} task failed: {exc!r}")
     finally:
+        was_owner = conn.owns_conversation
+        conn.owns_conversation = False
         if SESSIONS.get(session_key) is conn:
             SESSIONS.pop(session_key, None)
         await _shutdown(conn)
-        # Last tab out turns the light off. Checked AFTER the pop and against the live
-        # registry, so a tab that reconnected (its replacement is already registered
-        # under the same key) does not hand the floor back on its predecessor's way out.
-        if not SESSIONS:
+        # The floor follows the CONVERSATION, not the socket count. Checked after the
+        # pop and against the live registry, so (a) a tab that reconnected — its
+        # replacement already owns the conversation under the same key — does not hand
+        # the floor back on its predecessor's way out, and (b) a bystander tab left
+        # staring at a busy frame cannot keep Robin's desk locked out.
+        if _conversation_owner() is None:
             floor.release(PHONE_FLOOR_KEY)
+            if was_owner:
+                for other in list(SESSIONS.values()):
+                    other.bridge.send_json({
+                        "type": "notice",
+                        "text": "The conversation is free — start one here when ready.",
+                    })
         try:
             await websocket.close(code=1000)
         except Exception:
@@ -428,7 +543,13 @@ async def _pump_browser(websocket: WebSocket, conn: Conn) -> None:
             return
         data = frame.get("bytes")
         if data is not None:
-            conn.bridge.feed_mic(session, data)
+            # The one and only reason a frame is ever dropped here, and it is not a
+            # turn-boundary decision: this tab holds no conversation (another tab on
+            # this phone does), so there is no started session to feed and its mic
+            # queue would just grow. The PWA of a bystander never gets the `audio`
+            # config frame and so sends nothing anyway; this is the belt.
+            if conn.owns_conversation:
+                conn.bridge.feed_mic(session, data)
             continue
         text = frame.get("text")
         if not text:

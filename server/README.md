@@ -21,7 +21,7 @@ tailscale serve  :8443   ── proxies ──▶  127.0.0.1:8767   (uvicorn, lo
 
 | File | Role |
 |---|---|
-| `app.py` | FastAPI: auth boundary, session registry, the floor, the `/live` WebSocket. |
+| `app.py` | FastAPI: auth boundary, session registry, the floor, the one-conversation cap, the `/live` WebSocket. |
 | `audio_ws.py` | `BrowserAudioBridge` + `BrowserAudioTransport` — `mac/audio.py`'s sibling. |
 | `session.py` | `BrowserLiveSession`: four surface hooks, plus the two per-session pins. |
 | `index.html` | The installable PWA. Two AudioWorklets, no VAD. |
@@ -51,7 +51,8 @@ persisted, so it comes back after a relaunch.
 3. **Session state is per tab.** One `LiveSession` per session UUID, so the one staged
    high-stakes action lives on that object. A spoken "yes" in another tab reaches a
    different object and cannot confirm it. `tests/test_server_auth.py::
-   test_two_tabs_never_cross_confirm` is the regression guard.
+   test_two_tabs_never_cross_confirm` is the regression guard. Per-tab isolation is not
+   the same guarantee as one-conversation-per-phone — see "Two tabs on the same phone".
 4. **Nothing here may rewire `core.caps`.** Both surfaces share one process now, so a
    process-wide `set_profile` / `set_audio_transport` reroutes the *menubar's* audio and
    shell. What differs per seat is pinned on the session class (`PROFILE`,
@@ -91,9 +92,44 @@ Nothing is discarded.
 takeover for the same reason: a keypress on this keyboard is unambiguously Robin, here,
 deliberately. It evicts the phone through the identical path.
 
-**Scope.** The floor arbitrates *seats*, not sockets. The phone holds one claim however
-many tabs it has open — that is one human in one room — and per-tab confirmation
-isolation (point 3 above) is a separate mechanism that is unchanged.
+## Two tabs on the same phone
+
+Not the same question, and it took a second mechanism. The floor keys this whole
+surface as **one seat** (`PHONE_FLOOR_KEY`), and `floor.claim` treats a second arrival
+on that key as the same seat coming back — correct for a seat, and useless as a cap on
+conversations. Left there, two tabs meant two started `LiveSession`s: two paid realtime
+sockets and two tool-dispatching brains listening to one room off one speaker. On iOS
+that is two taps away, because a home-screen PWA and a Safari tab are separate
+`sessionStorage` contexts and therefore separate session UUIDs.
+
+So `server/app.py` caps it directly: `Conn.owns_conversation`, handed out by
+`_conversation_owner()` in the one stretch of `/live` that contains no `await` — which
+is what makes the check-then-claim atomic against another tab racing in on the same
+event loop. The second tab:
+
+* **is accepted** — a real socket, its own `hello`, and it stays open, because it is
+  Robin's own phone and he must be able to take over from it;
+* **gets its own `LiveSession` object**, so there is still no shared confirmation slot;
+* **is never started** — no `send_setup`, no provider socket, no mic pump. `_pump_browser`
+  drops its binary frames for that reason and no other, and `_watch_session` does not run
+  for it (its session was never running, so "the session ended" would fire at once);
+* **gets the same `busy` frame** the desk refusal sends, with `"holder": "phone"`, so the
+  PWA renders the same **Take over** button. Taking over ends the other tab through its
+  own `stop()`, exactly as taking over from the desk does.
+
+The floor then follows the *conversation*, not the socket count: when the talking tab
+closes and only a bystander is left, the phone releases the floor (and the bystander is
+told it is free), so a tab parked on a busy frame can never lock Robin out of his desk.
+
+Guarded by `tests/test_phone_meets_desk.py::
+test_two_phone_tabs_share_one_claim_and_release_it_together` — which asserts that at most
+one of the phone's `LiveSession`s is `_running` and that exactly one reached `send_setup`
+— and by its takeover sibling.
+
+**Scope, in one line each.** The floor: which *seat* may talk (desk vs phone).
+`owns_conversation`: which *tab* of that seat may talk. One `LiveSession` per tab: which
+*sentence* a spoken "yes" answers. Three questions, three mechanisms; none of them
+substitutes for another.
 
 **One more consequence, and it is a feature:** while the phone holds the floor,
 `mac/agent.py` routes a finished background job to the phone conversation instead of

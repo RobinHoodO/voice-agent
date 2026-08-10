@@ -11,14 +11,25 @@ the phone's microphone, which the barge-in detector reads as Robin interrupting.
 there is ONE floor and this module holds it.
 
 WHAT THE FLOOR IS AND IS NOT SCOPED TO
-    A SEAT — the desk, or the phone — not a socket. The phone surface holds one claim
-    however many tabs it has open, and inside that claim the per-tab isolation that was
-    already there still governs: one `LiveSession` per tab, so the one staged
-    high-stakes action lives on that tab's own object and a spoken "yes" in another tab
-    cannot reach it (`tests/test_server_auth.py::test_two_tabs_never_cross_confirm`).
-    Those are different questions and they get different mechanisms. This one is about
-    Robin being in two PLACES; that one is about a confirmation being bound to the
-    sentence he was actually read.
+    A SEAT — the desk, or the phone — not a socket, and NOT, by itself, a count of
+    concurrent conversations. Say it plainly, because a comment here once claimed
+    otherwise and the code did not back it up: the phone surface holds ONE claim
+    however many tabs it has open, and `claim()` treats a second arrival on that same
+    key as the same seat coming back (below). So a seat-level claim alone would let two
+    tabs on one phone start two conversations. It does not bound them; something else
+    has to, and does:
+
+      * WITHIN the phone surface — `server/app.py`'s `Conn.owns_conversation`, handed
+        out by `_conversation_owner()`. Exactly one tab is ever started; the others get
+        a socket, a `busy` frame and the same "Take over" affordance a desk refusal
+        gives them.
+      * WITHIN a tab — one `LiveSession` per tab, so the one staged high-stakes action
+        lives on that tab's own object and a spoken "yes" in another tab cannot reach
+        it (`tests/test_server_auth.py::test_two_tabs_never_cross_confirm`).
+
+    Three questions, three mechanisms. This one is about Robin being in two PLACES; the
+    second is about one phone growing a second brain; the third is about a confirmation
+    being bound to the sentence he was actually read.
 
 THE RULE, and the reason it is this one:
 
@@ -119,7 +130,10 @@ class Floor:
 
         Re-claiming with the SAME key succeeds and refreshes the holder: that is the
         same SEAT arriving again — a tab reconnecting after a dropped mobile network,
-        or a second tab on the same phone — not a rival claimant.
+        or a second tab on the same phone — not a rival claimant. Note what that means
+        and does not mean: it is NOT permission to hold a second conversation. The
+        surface that shares a key is responsible for that, and `server/app.py` is (see
+        the scope section at the top of this file).
         """
         with self._lock:
             current = self._holder
