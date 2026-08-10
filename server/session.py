@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from core import caps
 from core.live_session import LiveSession
+from server import audio_ws
 from server.audio_ws import BrowserAudioBridge
 
 # Which capability profile this surface runs (see core/capabilities.py). This process
@@ -33,9 +34,19 @@ class BrowserLiveSession(LiveSession):
 
     # Structural, not a check: there is no way to get a browser session that is not on
     # the phone profile, because this is the class the browser surface instantiates.
-    # `install_capabilities()` registering the same name is belt to this braces — a
-    # session built before startup finished would still be narrowed correctly.
+    #
+    # It is now the ONLY thing that makes a session the phone, and that is deliberate.
+    # The surface used to also call `caps.set_profile("phone")` at startup, which was
+    # right when this package was the only thing in its process on Thrivbe-1 and is
+    # actively wrong now: it runs inside the menubar app, where the process-wide profile
+    # is `mac` and has to stay `mac` for Robin's own desk conversation and for
+    # `core.shell`. Per-session, or it is a bug.
     PROFILE = SURFACE_PROFILE
+
+    # This session's speaker and microphone are a WebSocket, not PortAudio. Pinned here
+    # for exactly the same reason as PROFILE — the menubar surface in this process keeps
+    # `core.caps`' PortAudio transport, and neither may reroute the other.
+    AUDIO_TRANSPORT = audio_ws.transport()
 
     def __init__(self, bridge: BrowserAudioBridge, **kwargs):
         # Set before super().__init__: the transport reads `_bridge` off the session,
@@ -70,21 +81,34 @@ class BrowserLiveSession(LiveSession):
         self._bridge.send_json({"type": "turn", "role": role, "text": text})
 
 
-def install_capabilities(log_sink=None) -> None:
-    """Register the browser surface's capabilities into `core.caps`.
+def ensure_capabilities() -> None:
+    """Make sure THIS MAC is registered in `core.caps` — and change nothing if it is.
 
-    Deliberately partial. The Mac's screen and clipboard exist, but Robin is not in
-    front of them when he is on his phone, so `caps.screen()` and `caps.clipboard()`
-    keep their null implementations here and the tools that use them degrade to
-    "(no context)" — which is what fail-soft was built for. `put_text` does not degrade,
-    it is excluded outright (core/capabilities.py): a paste that SUCCEEDS into a window
-    he cannot see is worse than one that fails.
+    This surface no longer installs "the phone" into the process, because there is no
+    such machine: the phone is a seat, and the machine under every seat is this Mac
+    (Robin, 2026-08-10). What the phone-ness narrows is per-session — `PROFILE` and
+    `AUDIO_TRANSPORT` above — and what `core.caps` answers is "how do I reach the
+    machine", which has one true answer here whoever is asking.
+
+    So the normal case (running inside the menubar app, where `mac.caps_install.install`
+    already ran) is a NO-OP, deliberately: rewiring the log sink or the audio transport
+    out from under Robin's own desk conversation is the exact bug this replaces.
+
+    The other case is a bare `uvicorn server.app:app` for development. Then nothing is
+    registered, the strict `unknown` profile is in force, and `core.shell` would pick a
+    shell by guesswork — so we install the Mac's capabilities, because that is the
+    machine this process is on either way.
     """
-    caps.set_profile(SURFACE_PROFILE)
-    caps.set_log_sink(log_sink or _print_log)
-    caps.set_notifier(_notify_log)
-    from server import audio_ws
-    audio_ws.install()
+    if caps.profile() is not None:
+        return
+    try:
+        from mac import caps_install
+        caps_install.install(log_sink=_print_log)
+    except Exception as e:      # noqa: BLE001 — a dev run without PyObjC still serves
+        caps.set_log_sink(_print_log)
+        caps.set_notifier(_notify_log)
+        caps.log(f"phone surface: macOS capabilities unavailable ({e!r}) — "
+                 f"running with core's fail-soft defaults")
 
 
 def _print_log(msg: str) -> None:

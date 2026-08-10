@@ -46,6 +46,27 @@ OPTIONS = {
         # module `mac/*.py` touches has to be named in `includes` below.
         # tests/test_bundle_deps.py fails the build if that list falls behind.
         "mac",
+        # The phone surface. `packages`, not `includes`, for a reason that has nothing
+        # to do with imports: `server/app.py` serves `index.html`, `manifest.json` and
+        # `sw.js` from its OWN directory (`os.path.dirname(__file__)`). An `includes`
+        # entry zips the .py files into python3xx.zip and leaves the static shell
+        # behind, so the app would boot, listen, and serve a 404 to the phone.
+        "server",
+        # …and its stack. Same rule as `mac`: a package here is copied verbatim and
+        # NOT scanned, so anything imported dynamically has to be a package too.
+        # uvicorn is the reason that matters — it resolves its protocol and loop
+        # implementations from strings at runtime ("uvicorn.protocols.http.h11_impl"),
+        # which no static scan can follow.
+        "fastapi",
+        "uvicorn",
+        "starlette",
+        "pydantic",
+        "pydantic_core",
+        "annotated_types",
+        "anyio",
+        "sniffio",
+        "h11",
+        "click",
     ],
     "includes": [
         # PyObjC frameworks. Cocoa + WebKit are here because mac/settings.py and

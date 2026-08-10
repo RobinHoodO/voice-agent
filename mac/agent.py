@@ -21,7 +21,7 @@ import rumps
 import rumps.rumps as rumps_core
 from pynput import keyboard
 
-from core import config
+from core import caps, config, floor
 from mac import caps_install
 
 # --- diagnostics: log to the app's own log dir (out of /tmp for the product)
@@ -167,9 +167,19 @@ class VoiceAgent(rumps.App):
         self._ctrl_press_t = 0.0
         self._ctrl_clean = False     # True while a Control press has no other key with it
         self._last_ctrl_tap = 0.0
+        # The phone surface: this Mac's brain, reached from Robin's iPhone over the
+        # tailnet (mac/phone_surface.py). Built lazily and left OFF unless config says
+        # otherwise — see _start_phone_if_enabled at the end of __init__.
+        self.phone = None
+        self._phone_item = rumps.MenuItem("📱 Phone surface: off",
+                                          callback=lambda _: self._toggle_phone())
+        self._phone_link_item = rumps.MenuItem("Copy phone link + token",
+                                               callback=lambda _: self._copy_phone_link())
         # Slim menu — everything configurable now lives in the Settings window.
         self.menu = [
             rumps.MenuItem("🎧 Live conversation (double-tap Control)", callback=lambda _: self.toggle_live()),
+            self._phone_item,
+            self._phone_link_item,
             rumps.MenuItem("⚙ Settings…", callback=lambda _: self._open_settings()),
             None,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
@@ -208,6 +218,7 @@ class VoiceAgent(rumps.App):
                 config.activity("💾  recovered a conversation from the previous run")
         except Exception as e:
             LOG(f"journal recovery failed: {e!r}")
+        self._start_phone_if_enabled()
         if trusted is False:
             LOG("NOT TRUSTED — grant 'Thrivbe Voice' in Accessibility + Input Monitoring, then relaunch.")
             rumps.notification("Thrivbe Voice", "Permission needed",
@@ -216,6 +227,94 @@ class VoiceAgent(rumps.App):
 
     ICONS = {"idle": "🎙", "listening": "🔴", "thinking": "💭", "acting": "⚙️", "speaking": "🗣"}
     KERNEL_TUNNEL_ITEM = "Kernel tunnel down — check hetzner-tunnels"
+
+    # This desk's claim on the conversation floor (core/floor.py). One string, because
+    # there is one desk: a second double-tap is the same claimant, not a rival.
+    FLOOR_KEY = "desk:menubar"
+
+    # --- the phone surface ---------------------------------------------------
+    def _phone(self):
+        """The PhoneSurface, built on first use. Importing it pulls in FastAPI/uvicorn,
+        which the app should not pay for at launch when the surface is off."""
+        if self.phone is None:
+            from mac.phone_surface import PhoneSurface
+            self.phone = PhoneSurface()
+        return self.phone
+
+    def _start_phone_if_enabled(self):
+        """Honour `phone_surface.enabled` at launch, so a relaunch does not silently
+        take Robin's phone away from him."""
+        if not config.get("phone_surface.enabled", False):
+            return
+        try:
+            url = self._phone().start()
+            LOG(f"phone surface restored at launch: {url}")
+        except Exception as e:
+            LOG(f"phone surface failed to start at launch: {e!r}")
+            rumps.notification("Thrivbe Voice", "Phone surface did not start", str(e))
+        self._reconcile_phone_menu()
+
+    def _toggle_phone(self):
+        """Menu action: switch the phone surface on or off. Requirement: Robin can see
+        that it is on, and turn it off, without a terminal."""
+        status = self._phone().toggle()
+        self._reconcile_phone_menu()
+        if status["on"] and status["url"]:
+            rumps.notification("Thrivbe Voice", "Phone surface on",
+                               f"{status['url']} — 'Copy phone link + token' for the token")
+        elif not status["on"] and not status["error"]:
+            rumps.notification("Thrivbe Voice", "Phone surface off", "")
+
+    def _copy_phone_link(self):
+        """Put the URL and the access token on the clipboard — the once-per-phone setup.
+
+        Deliberately not shown in the menu title: the title is visible over Robin's
+        shoulder in every screen share, and a shared secret is not a status line.
+        """
+        try:
+            from mac import phone_surface
+            token = phone_surface.ensure_token()
+            url = self._phone().url or "(surface is off — turn it on first)"
+            caps.clipboard().put_text(f"{url}\ntoken: {token}", paste=False)
+            rumps.notification("Thrivbe Voice", "Copied", "Phone link + token on the clipboard")
+        except Exception as e:
+            LOG(f"copy phone link failed: {e!r}")
+            rumps.notification("Thrivbe Voice", "Could not copy the phone link", str(e))
+
+    def _reconcile_phone_menu(self):
+        """Repaint the phone menu item from the surface's own status. Main thread."""
+        try:
+            status = self._phone().status() if self.phone is not None else {"on": False}
+        except Exception:
+            return
+        if status.get("error") and not status.get("on"):
+            title = f"📱 Phone surface: {status['error'][:48]}"
+        elif not status.get("on"):
+            title = "📱 Phone surface: off"
+        elif status.get("in_conversation"):
+            title = "📱 Phone surface: in conversation — click to turn off"
+        else:
+            title = f"📱 Phone surface: on · {status.get('tls_port')} — click to turn off"
+        if self._phone_item.title != title:
+            self._phone_item.title = title
+
+    # --- the conversation floor ----------------------------------------------
+    def _evicted_from_floor(self):
+        """The phone took the conversation over (Robin tapped "Take over" there).
+
+        Ends this desk session through the SAME `stop()` a spoken sign-off uses, so the
+        transcript is persisted by the normal path. Called from the server's event loop
+        thread, so it touches plain attributes only — the pill is reconciled in _tick.
+        """
+        LOG("floor: the phone took over — ending the desk conversation")
+        live = self.live
+        if live is not None:
+            try:
+                live.stop()
+            except Exception as e:
+                LOG(f"desk stop on eviction failed: {e!r}")
+        self._auto_stopped()
+        caps.notify("Pam moved to your phone — the desk conversation was ended.")
 
     def _open_settings(self):
         try:
@@ -244,6 +343,7 @@ class VoiceAgent(rumps.App):
         if self.title != title:
             self.title = title
         self._reconcile_pill()
+        self._reconcile_phone_menu()
 
     def _probe_kernel_tunnel(self):
         """Background-only TCP check; _tick applies its result on the AppKit thread."""
@@ -379,7 +479,10 @@ class VoiceAgent(rumps.App):
                 tid = f[:-5]
                 if tid in self._announced or tid in self._announcing:
                     continue
-                live = self.live if self.live_on else None
+                # Whoever holds the floor gets the result, which now includes the phone:
+                # a job finishing while Robin is on the sofa belongs in the conversation
+                # he is actually in, not spoken at an empty room from the Mac's speaker.
+                live = self.live if self.live_on else floor.session()
                 if live is not None:
                     if live.offer_task(tid, self._read_task_out(tid)):
                         LOG(f"task {tid} done while live — queued for next turn")
@@ -430,9 +533,10 @@ class VoiceAgent(rumps.App):
         new = [(k, t) for k, t in snapshot if k not in self._woken_keys]
         if not new:
             return
-        # Idle-only: never barge into a live conversation. Not marked as woken, so the
-        # item retries on a later tick — once quiet hours end or the session closes.
-        if self.live_on or _in_quiet_hours():
+        # Idle-only: never barge into a live conversation — on EITHER surface, which is
+        # what `floor.busy()` adds. Not marked as woken, so the item retries on a later
+        # tick, once quiet hours end or the conversation closes.
+        if self.live_on or floor.busy() or _in_quiet_hours():
             return
         from core import kernel_tools
         LOG(f"urgent wake: {len(new)} new kernel item(s)")
@@ -505,12 +609,26 @@ class VoiceAgent(rumps.App):
                                              on_auto_stop=self._auto_stopped,
                                              on_task_spoken=self._task_spoken,
                                              announce_tid=announce_tid)
+            # `claim`, NOT `take`: nobody asked for this. An auto-wake is the agent's
+            # own idea, and the floor's rule is that only Robin ends a conversation.
+            # Refused means the caller leaves the item un-announced and retries on a
+            # later tick, exactly as it already does during quiet hours.
+            floor.claim(floor.DESK, self.FLOOR_KEY, session=self.live,
+                        on_evict=self._evicted_from_floor)
             self.live_on = True
             self.status = "listening"
             self.live.start()
             return True
+        except floor.Busy as busy:
+            LOG(f"wake-and-speak deferred — {busy.holder.surface} has the floor")
+            self.live = None
+            self.live_on = False
+            self.status = "idle"
+            self._close_activity_window()
+            return False
         except Exception as e:
             LOG(f"wake-and-speak failed: {e!r}")
+            floor.release(self.FLOOR_KEY)
             self.live_on = False
             self.status = "idle"
             return False
@@ -627,6 +745,7 @@ class VoiceAgent(rumps.App):
                 self.live = None
             self._announcing.clear()
             self.status = "idle"
+            floor.release(self.FLOOR_KEY)
             self._close_activity_window()   # detached background jobs keep running
             return
         LOG("LIVE: starting")
@@ -638,11 +757,18 @@ class VoiceAgent(rumps.App):
             self.live = realtime.LiveSession(on_state=self._on_live_state,
                                              on_auto_stop=self._auto_stopped,
                                              on_task_spoken=self._task_spoken)
+            # `take`, not `claim`: a double-tap of Control is Robin, at this keyboard,
+            # deliberately. That is exactly the human act the floor allows to end
+            # another conversation — and it ends the phone's through its own stop(),
+            # so nothing is dropped mid-flight that a sign-off would have kept.
+            floor.take(floor.DESK, self.FLOOR_KEY, session=self.live,
+                       on_evict=self._evicted_from_floor)
             self.live_on = True
             self.status = "listening"
             self.live.start()
         except Exception as e:
             LOG(f"LIVE start failed: {e!r}")
+            floor.release(self.FLOOR_KEY)
             self.live_on = False
             self.status = "idle"
 
@@ -654,6 +780,9 @@ class VoiceAgent(rumps.App):
         self.live = None
         self._announcing.clear()
         self.status = "idle"
+        # Give the floor back. Keyed, so if the phone has already taken it this is the
+        # no-op it should be rather than a clear of someone else's claim.
+        floor.release(self.FLOOR_KEY)
         self._close_activity_window()
 
     def _on_live_state(self, state):

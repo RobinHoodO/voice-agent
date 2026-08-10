@@ -50,6 +50,7 @@
     color:var(--ink);padding:12px;font:14px/1 inherit
   }
   #setup button{width:auto;padding:12px 16px;font-size:14px}
+  #takeover{display:none;background:#33240f;border-color:#7a5a1f;color:#ffe2b0}
   small{color:var(--dim);font-size:11px}
 </style>
 </head>
@@ -66,6 +67,7 @@
 <footer>
   <div id="meter"><i id="meterbar"></i></div>
   <button id="talk">Start conversation</button>
+  <button id="takeover">Take over from the desk</button>
   <div id="setup">
     <input id="token" type="password" placeholder="access token" autocomplete="off"
            autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -93,6 +95,18 @@
    does is flush its own audio buffer on that frame.
    ─────────────────────────────────────────────────────────────────────────── */
 
+/* ── Why the takeover flag is only ever set by a tap ─────────────────────────
+   There is ONE brain, on the Mac, so the desk and this phone are the same Pam.
+   When the server says {"type":"busy"} it means Robin is mid-conversation at his
+   desk; it has NOT touched that conversation, and it will not, unless a human
+   asks. TAKEOVER below is armed only inside the Take-over button's handler and
+   disarmed the moment the socket is opened — so an automatic reconnect (iOS
+   restoring this app from the background, the tunnel healing, the service worker
+   reviving us) can never carry it. That is the entire safety property: the server
+   cannot tell "Robin walked to the sofa" from "the phone woke up in his pocket",
+   so the phone has to say which one it is, and only a finger can say it.
+   ─────────────────────────────────────────────────────────────────────────── */
+
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
 
@@ -109,6 +123,8 @@ if (!SESSION) {
 let ws = null, ctx = null, micStream = null, capture = null, player = null, sink = null;
 let micRate = 0, outputRate = 0, frameSamples = 0, configured = false;
 let playResampler = null, running = false;
+// Armed by the Take-over button only, and cleared as soon as it is spent.
+let TAKEOVER = false;
 
 /* ── worklets ─────────────────────────────────────────────────────────────── */
 
@@ -292,8 +308,11 @@ function connect(){
   const token = ($("token").value || localStorage.getItem("voiceToken") || "").trim();
   if (!token) { sys("no access token — save one first", true); return stop(); }
   const proto = location.protocol === "https:" ? "wss" : "ws";
+  // Spend the takeover flag here, not at the button: one connection, one decision.
+  const takeover = TAKEOVER; TAKEOVER = false;
   const url = `${proto}://${location.host}/live?token=${encodeURIComponent(token)}` +
-              `&session=${encodeURIComponent(SESSION)}`;
+              `&session=${encodeURIComponent(SESSION)}` +
+              (takeover ? "&takeover=1" : "");
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
 
@@ -328,6 +347,10 @@ function connect(){
       sys(m.text);
     } else if (m.type === "ended") {
       sys("session ended (" + (m.reason || "") + ")");
+    } else if (m.type === "busy") {
+      // One brain, and it is busy elsewhere. Nothing at the desk was touched.
+      sys(m.text || "Pam is in a conversation somewhere else.");
+      $("takeover").style.display = "block";
     } else if (m.type === "error") {
       sys(m.text || "server error", true);
     }
@@ -342,6 +365,7 @@ function connect(){
 
 async function start(){
   running = true;
+  $("takeover").style.display = "none";
   $("talk").textContent = "End conversation";
   $("talk").classList.add("live");
   setState("connecting");
@@ -367,6 +391,15 @@ function stop(){
 }
 
 $("talk").onclick = () => running ? stop() : start();
+
+// The one place TAKEOVER is ever set. A finger, on this button, and nothing else —
+// see the comment at the top of this script for why that matters.
+$("takeover").onclick = () => {
+  TAKEOVER = true;
+  $("takeover").style.display = "none";
+  sys("taking over — ending the conversation at the desk");
+  start();
+};
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});

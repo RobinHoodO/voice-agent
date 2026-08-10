@@ -35,6 +35,19 @@ class AudioCoreMixin:
     _audio_stop: threading.Event
     _audio_dirty: bool = False
 
+    # Which transport owns THIS session's microphone and speaker. None = whatever the
+    # process registered in `core.caps`.
+    #
+    # It has to be per-session now, and that is a consequence of Robin's 2026-08-10
+    # ruling rather than a nicety: ONE process on his Mac holds both surfaces — the
+    # menubar conversation on PortAudio and a phone conversation on a WebSocket. A
+    # process-wide `caps.set_audio_transport` cannot describe that, and a surface that
+    # swapped it at startup would silently reroute the OTHER surface's audio. So the
+    # registration in `core.caps` is the DEFAULT (what a machine has when nobody says
+    # otherwise) and a session class that brings its own says so here — exactly the
+    # shape `PROFILE` already uses for capabilities.
+    AUDIO_TRANSPORT = None
+
     async def _pump_mic(self) -> None:
         n = 0
         while self._running:
@@ -134,11 +147,19 @@ class AudioCoreMixin:
 
     # --- transport hooks ----------------------------------------------------
     # The surface owns devices and streams; see core.caps.AudioTransport.
+    def _transport(self):
+        """This session's transport: its own if it pinned one, else the machine's.
+
+        Resolved per call rather than snapshotted, for the same reason `profile_name` is:
+        a session can be constructed before the surface has finished installing.
+        """
+        return self.AUDIO_TRANSPORT or caps.audio_transport()
+
     def _start_audio(self) -> None:
-        caps.audio_transport().start(self)
+        self._transport().start(self)
 
     def _player(self) -> None:
-        caps.audio_transport().player(self)
+        self._transport().player(self)
 
     def _teardown_audio(self) -> None:
-        caps.audio_transport().teardown(self)
+        self._transport().teardown(self)

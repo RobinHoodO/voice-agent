@@ -134,6 +134,24 @@ DEFAULTS = {
     },
     "ui": {"show_terminal": False},        # open a Terminal tailing the log during live mode
     "system": {"open_at_login": False},
+    # The phone surface (server/ + mac/phone_surface.py): Robin's iPhone as a remote
+    # microphone and speaker for THIS process. Off until he turns it on from the menu —
+    # it is a listener, and a listener nobody asked for is not a feature.
+    "phone_surface": {
+        "enabled": False,
+        # The HTTP listener. Loopback only by default; `tailscale serve` reaches it from
+        # there. `mac.tailnet.resolve_bind_host` refuses anything that is not loopback or
+        # a tailnet address this Mac holds — 0.0.0.0 is not a value this accepts.
+        "bind": "127.0.0.1",
+        "port": 8767,
+        # Where TLS is terminated on the tailnet. NOT 443: this Mac already serves 443
+        # to trustmux on 127.0.0.1:7432, and serving there would replace it.
+        "tls_port": 8443,
+        # Concurrent phone tabs. The floor (core/floor.py) means only one CONVERSATION
+        # runs at a time anyway; this is the cap on sockets, so a phone that reconnects
+        # in a tunnel cannot pile up.
+        "max_sessions": 2,
+    },
     # The reverse channel: phone-Pam acting ON this Mac (mac/reverse_channel.py).
     # OFF, and it stays off until Robin turns it on — this is the widest attack
     # surface in the build, and a default-on remote executor on a laptop is not a

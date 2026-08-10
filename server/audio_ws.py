@@ -1,9 +1,16 @@
-"""Browser audio transport — the Linux mirror of `mac/audio.py`.
+"""Browser audio transport — `mac/audio.py`'s sibling, in the same process.
 
-`mac.audio.MacAudioTransport` owns PortAudio devices; this owns one browser tab's
-WebSocket. Both are `core.caps.AudioTransport`, and both leave the turn-boundary
+`mac.audio.MacAudioTransport` owns this Mac's PortAudio devices; this owns one browser
+tab's WebSocket. Both are `core.caps.AudioTransport`, and both leave the turn-boundary
 logic where it belongs: `core.audio_core.AudioCoreMixin`. Nothing in here decides
 where a turn starts or ends — the browser is a microphone and a speaker, nothing more.
+
+This is NOT registered process-wide, and that is the one thing that changed when the
+brain moved onto the Mac (Robin, 2026-08-10). Both transports live in one process now,
+so `caps.set_audio_transport` — which takes exactly one implementation — cannot describe
+the machine any more. `BrowserLiveSession` pins this one on itself
+(`AudioCoreMixin.AUDIO_TRANSPORT`), the menubar keeps PortAudio as the machine default,
+and neither surface can reroute the other's audio by starting up.
 
 The two rules that shape this file, both inherited from the mic pump:
 
@@ -120,11 +127,12 @@ class BrowserAudioBridge:
 
 
 class BrowserAudioTransport(caps.AudioTransport):
-    """Process-wide transport; the per-tab pipe hangs off the session as `_bridge`.
+    """One stateless transport for every tab; the per-tab pipe hangs off the session as
+    `_bridge`.
 
-    `caps.set_audio_transport` takes exactly one implementation for the process, but a
-    server holds several conversations at once — so the transport is stateless and every
-    method reads the bridge from the session it was handed.
+    Stateless on purpose: one object serves every browser session (and coexists with the
+    Mac's PortAudio transport in the same process), so every method reads the bridge from
+    the session it was handed rather than holding one of its own.
     """
 
     def start(self, s) -> None:
@@ -198,8 +206,6 @@ _TRANSPORT = BrowserAudioTransport()
 
 
 def transport() -> BrowserAudioTransport:
+    """The browser transport. Pinned onto `BrowserLiveSession`, never installed into
+    `core.caps` — see the module docstring: the Mac's own transport lives there."""
     return _TRANSPORT
-
-
-def install() -> None:
-    caps.set_audio_transport(_TRANSPORT)
