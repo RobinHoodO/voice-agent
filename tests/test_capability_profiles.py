@@ -239,6 +239,182 @@ def test_the_schema_actually_sent_to_the_model_is_the_filtered_one(monkeypatch):
     assert "Robin's Mac" in captured["instructions"]
 
 
+# ── the screen: the other half of the same guarantee ─────────────────────────────────
+# `run_shell` has the test above and `test_surface_tool_dispatch.py` behind it. Screen
+# context had neither, and that is precisely how the two diverged: `has_screen_context`
+# was read in ONE place — `surface_note`, which appends prompt prose — so the phone's
+# prompt said "no screenshot reaches you here: never claim to see what he is looking at"
+# while the same turn attached Robin's focused window and a JPEG of it. A promise with
+# no test under it is a comment.
+#
+# The grabbers below return REAL-looking screen content on purpose. A test that stubs
+# them to "" proves nothing: it would pass with the gate deleted.
+SCREEN_TEXT = ("App: Google Chrome\n\nPage URL: https://mail.google.com/\n\n"
+               "Content under the mouse cursor:\nRe: contract, final numbers")
+SCREENSHOT_B64 = "/9j/4AAQSkZJRgABAQ" + "A" * 200
+
+
+class _RecordingBackend:
+    """Records exactly what left for the model provider."""
+
+    mic_rate = 16000
+    manual_vad = True
+
+    def __init__(self):
+        self.contexts: list[tuple[str, str | None]] = []
+        self.instructions = ""
+        self.responses = 0
+        self.tool_results: list[tuple[str, str]] = []
+
+    async def send_setup(self, instructions, tools, voice):
+        self.instructions = instructions
+
+    async def send_text_context(self, text, image_b64=None):
+        self.contexts.append((text, image_b64))
+
+    async def send_tool_result(self, call_id, output):
+        self.tool_results.append((call_id, output))
+
+    async def trigger_response(self):
+        self.responses += 1
+
+
+def _screen_is_readable(monkeypatch, grabbed):
+    """A Mac with a screen worth grabbing, and a tripwire on every grab of it."""
+    from core import config, kernel_tools, live_session
+
+    monkeypatch.setattr(live_session, "_grab_context",
+                        lambda: grabbed.append("context") or SCREEN_TEXT)
+    monkeypatch.setattr(live_session, "_grab_screenshot",
+                        lambda: grabbed.append("screenshot") or SCREENSHOT_B64)
+    monkeypatch.setattr(kernel_tools, "kernel_high_stakes", lambda: [])
+    monkeypatch.setattr(live_session, "_build_live_instructions",
+                        lambda ctx, cfg=None, profile=None: f"[ctx:{ctx}]")
+    monkeypatch.setattr(config, "activity", lambda _message: None)
+
+
+def _one_turn(session):
+    """Session setup + one complete turn, on a throwaway loop."""
+    import asyncio
+
+    async def scenario():
+        session._loop = asyncio.get_running_loop()
+        await session._configure()
+        await session._inject_context_and_respond()
+
+    asyncio.run(scenario())
+
+
+def _phone_session(backend):
+    """The REAL phone class — the one `server/app.py` instantiates — not a stand-in with
+    PROFILE set by hand, so the test cannot pass while the shipped class drifts."""
+    from server.session import BrowserLiveSession
+
+    class _Bridge:
+        session_key = "test"
+        mic_rate = 0
+        audio_config = None
+
+        def send_json(self, obj):
+            pass
+
+    session = BrowserLiveSession(bridge=_Bridge())
+    session._backend = backend
+    session._cfg = {"live": {}}
+    return session
+
+
+def test_the_phone_session_is_never_shown_the_mac_s_screen(monkeypatch, tmp_app):
+    """The gate the blind critic found missing, at the layer it was missing from.
+
+    Not "the prompt says so" — the prompt already said so. What is asserted here is that
+    the focused-window text and the JPEG never leave the machine on a surface whose
+    profile declares `has_screen_context: False`, and that they are never even GRABBED
+    (that grab is also 0.6–1.8 s of silence in front of every reply).
+    """
+    grabbed: list[str] = []
+    _screen_is_readable(monkeypatch, grabbed)
+    backend = _RecordingBackend()
+    _one_turn(_phone_session(backend))
+
+    assert grabbed == [], f"the phone session read the Mac's screen: {grabbed}"
+    assert backend.responses == 1, "the turn still has to happen — just without a screen"
+    sent = json.dumps(backend.contexts)
+    assert "mail.google.com" not in sent and "final numbers" not in sent, sent[:400]
+    assert SCREENSHOT_B64 not in sent
+    assert all(image is None for _text, image in backend.contexts), backend.contexts
+    assert "What I'm looking at right now" not in sent, (
+        "an empty screen frame is still a claim that there is a screen")
+    assert SCREEN_TEXT not in backend.instructions
+
+
+def test_the_desk_session_still_gets_the_screen(monkeypatch, tmp_app):
+    """The other side of the gate, and the reason the test above is not vacuous: on the
+    Mac profile the very same code path sends the very same content."""
+    from core import live_session
+
+    grabbed: list[str] = []
+    _screen_is_readable(monkeypatch, grabbed)
+
+    class Session(live_session.LiveSession):
+        PROFILE = "mac"
+
+    backend = _RecordingBackend()
+    session = Session()
+    session._backend = backend
+    session._cfg = {"live": {}}
+    _one_turn(session)
+
+    assert grabbed == ["context", "context", "screenshot"], grabbed
+    sent = json.dumps(backend.contexts)
+    assert "final numbers" in sent
+    assert backend.contexts[0][1] == SCREENSHOT_B64
+    assert SCREEN_TEXT in backend.instructions
+
+
+def test_a_phone_turn_never_reaches_the_clipboard_either(monkeypatch, tmp_app):
+    """`has_clipboard` is False for the phone, and unlike the screen it never had a
+    runtime hole — the only route to `caps.clipboard()` is the `put_text` tool, which the
+    profile removes from the schema AND `_do_tool` refuses by name. This pins that: a
+    tripwire clipboard installed in `core.caps`, a full turn, and a `put_text` call
+    forced past the schema, with nothing touching it.
+    """
+    import asyncio
+
+    from core import caps, live_session
+
+    touched: list[str] = []
+
+    class _Tripwire(caps.Clipboard):
+        def put_text(self, text, paste=True):
+            touched.append(text)
+            return "pasted"
+
+    monkeypatch.setattr(caps, "_clipboard", _Tripwire(), raising=False)
+    _screen_is_readable(monkeypatch, [])
+    backend = _RecordingBackend()
+    session = _phone_session(backend)
+
+    class _Ws:
+        async def send(self, message):
+            pass
+
+    session._ws = _Ws()
+    _one_turn(session)
+
+    async def forced_call():
+        session._loop = asyncio.get_running_loop()
+        await session._do_tool({"call_id": "c1", "name": "put_text",
+                                "arguments": json.dumps({"text": "secret"})})
+
+    asyncio.run(forced_call())
+    assert touched == [], f"a phone turn reached the Mac clipboard: {touched}"
+    assert "no put_text tool on this surface" in backend.tool_results[0][1]
+    assert "put_text" not in {t["name"] for t in
+                              capabilities.tools_for("phone", TOOLS)}
+    assert live_session._put_text is not None   # the module route exists; nothing used it
+
+
 def test_the_shared_base_prompt_is_contradicted_where_it_is_wrong():
     """LIVE_SYSTEM opens by describing a persistent shell and offers the clipboard. It
     cannot say otherwise without becoming a second prompt, so the surface block has to

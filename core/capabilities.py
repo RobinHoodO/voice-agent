@@ -230,6 +230,21 @@ def has_shell(name: str | None) -> bool:
     return SHELL_TOOL not in excluded_tools(name)
 
 
+def has_screen_context(name: str | None) -> bool:
+    """Whether this surface may be shown the Mac's screen — focused-window text, the
+    text under the cursor, and the window screenshot.
+
+    A RUNTIME gate, read by `core.live_session` before it grabs anything, not only the
+    prose in `surface_note`. That distinction cost a privacy contract on 2026-08-10: the
+    profile said `has_screen_context: False`, the prompt told the model "never claim to
+    see what he is looking at", and the session sent it the screen anyway — because the
+    grab was gated on the process-wide `privacy.*` toggles, which described the MACHINE
+    and were perfectly true. What changed is that the machine now carries two seats. A
+    process-wide answer to "is there a screen the user can see" is no longer an answer.
+    """
+    return bool(get(name)["has_screen_context"])
+
+
 def confirm_strictness(tool: str | None) -> str:
     """Which affirmation bar a staged `tool` has to clear. Surface-independent: the
     cost of a wrong action does not depend on who is asking."""

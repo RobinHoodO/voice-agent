@@ -698,8 +698,32 @@ class LiveSession(AudioCoreMixin):
             self._resume_handle = self._backend.resume_handle
             await self._backend.close()
 
+    # ----- screen context: a PER-SESSION gate -----
+    # `_grab_context` / `_grab_screenshot` are module-level and read the process-wide
+    # `privacy.*` toggles. That was a complete answer while a process held one seat: the
+    # only session in it was the one sitting at the screen, so "may I read the screen"
+    # and "is screen-reading switched on" were the same question. Since 2026-08-10 this
+    # process holds two — Robin's desk conversation and a phone conversation whose
+    # profile declares `has_screen_context: False` — and a module-level function reading
+    # process-wide state cannot tell them apart. So the profile of THIS session decides,
+    # here, before either grabber is called. Prompt prose is not a gate; this is.
+    def _may_read_the_screen(self) -> bool:
+        return capabilities.has_screen_context(self.profile_name)
+
+    async def _grab_screen(self, *, screenshot: bool) -> tuple[str, str]:
+        """(text context, screenshot b64) for this surface — ('', '') where there is no
+        screen the user can see. Both grabs run concurrently: they sit in the silent gap
+        before the reply, so they are also the latency this gate stops paying for."""
+        if not self._may_read_the_screen():
+            return "", ""
+        jobs = [self._loop.run_in_executor(None, _grab_context)]
+        if screenshot:
+            jobs.append(self._loop.run_in_executor(None, _grab_screenshot))
+        got = await asyncio.gather(*jobs)
+        return got[0], (got[1] if screenshot else "")
+
     async def _configure(self) -> None:
-        ctx = await self._loop.run_in_executor(None, _grab_context)
+        ctx, _ = await self._grab_screen(screenshot=False)
         # Narrow the fail-closed gate set to what the kernel actually flags. None means
         # the manifest was unreadable — keep the conservative set from __init__.
         declared = await self._loop.run_in_executor(None, kernel_tools.kernel_high_stakes)
@@ -892,20 +916,27 @@ class LiveSession(AudioCoreMixin):
         # reply stays as short as possible (each toggle may no-op and return fast).
         # Cap the grab: it sits in the silent gap between "you stopped talking" and the
         # reply, so a slow AppleScript/screenshot must not stall the turn.
+        # `_grab_screen` returns ('', '') outright on a surface with no screen — the
+        # profile gate, not the privacy toggles (see `_may_read_the_screen`).
         try:
-            ctx, shot = await asyncio.wait_for(asyncio.gather(
-                self._loop.run_in_executor(None, _grab_context),
-                self._loop.run_in_executor(None, _grab_screenshot),
-            ), timeout=2.0)
+            ctx, shot = await asyncio.wait_for(
+                self._grab_screen(screenshot=True), timeout=2.0)
         except asyncio.TimeoutError:
             _log("context grab timed out (>2s) — replying without screen context")
             ctx, shot = "", ""
-        _log(f"context injected ({len(ctx)} chars, screenshot={'yes' if shot else 'no'})")
-        await self._backend.send_text_context(
-            f"[What I'm looking at right now:\n{ctx}\n"
-            + ("(A screenshot of my screen is attached above.)\n" if shot else "")
-            + "]",
-            image_b64=shot or None)
+        if ctx or shot:
+            _log(f"context injected ({len(ctx)} chars, screenshot={'yes' if shot else 'no'})")
+            await self._backend.send_text_context(
+                f"[What I'm looking at right now:\n{ctx}\n"
+                + ("(A screenshot of my screen is attached above.)\n" if shot else "")
+                + "]",
+                image_b64=shot or None)
+        else:
+            # Nothing to say about a screen — and on the phone that is the POINT, so
+            # don't send an empty "[What I'm looking at right now:]" either. An empty
+            # frame is still a claim that there is a screen, and the same turn's prompt
+            # says there is not.
+            _log("no screen context on this surface — replying from speech alone")
         finished = self._drain_offered_tasks()
         try:
             if finished:
