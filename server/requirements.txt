@@ -1,6 +1,12 @@
-# The server surface only. Deliberately does NOT include the Mac stack
-# (rumps / pynput / py2app / pyobjc / sounddevice) — core imports clean without it,
-# and tests/test_headless_core.py is what keeps that true.
+# What the phone surface adds on top of core. It runs on the Mac now, inside the menubar
+# app, so these end up in the same venv as the Mac stack — and in setup.py's `packages`,
+# or the built .app ships a surface that cannot start (tests/test_bundle_deps.py).
+#
+# The list still deliberately omits rumps / pynput / pyobjc / sounddevice: `server/` must
+# keep importing without the Mac stack so the bare `uvicorn server.app:app` dev run
+# works, and tests/test_headless_core.py is what keeps that true. The one place this
+# package reaches for macOS — `ensure_capabilities()` — imports it inside the function
+# and degrades if it is absent.
 fastapi>=0.115
 uvicorn[standard]>=0.30
 websockets>=13

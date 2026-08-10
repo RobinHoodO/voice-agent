@@ -257,12 +257,14 @@ class VoiceAgent(rumps.App):
     def _toggle_phone(self):
         """Menu action: switch the phone surface on or off. Requirement: Robin can see
         that it is on, and turn it off, without a terminal."""
+        # `.get`, not `[...]`: this runs on the AppKit main thread from a menu click, and
+        # a KeyError here is a traceback in the log and a menu that appears to do nothing.
         status = self._phone().toggle()
         self._reconcile_phone_menu()
-        if status["on"] and status["url"]:
+        if status.get("on") and status.get("url"):
             rumps.notification("Thrivbe Voice", "Phone surface on",
                                f"{status['url']} — 'Copy phone link + token' for the token")
-        elif not status["on"] and not status["error"]:
+        elif not status.get("on") and not status.get("error"):
             rumps.notification("Thrivbe Voice", "Phone surface off", "")
 
     def _copy_phone_link(self):
