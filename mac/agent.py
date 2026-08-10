@@ -599,41 +599,54 @@ class VoiceAgent(rumps.App):
             txt = ""
         return txt or "(the task finished but produced no output)"
 
+    def _notify_live_start_failed(self, detail, task_text=None):
+        """Surface a live-start failure when there is no session available to speak it."""
+        try:
+            body = f"Task result (not spoken): {task_text}" if task_text else str(detail)
+            rumps.notification("Thrivbe Voice", "Live session failed to start", body[:200])
+        except Exception as notify_err:
+            LOG(f"live-start-failed notification also failed: {notify_err!r}")
+
     def _wake_and_speak(self, text, announce_tid=None):
         """Open a live session that speaks `text` first, then stays listening so the
-        user can follow up and close it manually. Mirrors toggle_live's start path."""
+        user can follow up and close it manually. Mirrors toggle_live's start path, but
+        retries one generic start failure before notifying Robin."""
         if config.get("ui.show_terminal", False):
             config.reset_activity()
             self._open_activity_window()
-        try:
-            from core import live_session as realtime
-            self.live = realtime.LiveSession(on_state=self._on_live_state, announce=text,
-                                             on_auto_stop=self._auto_stopped,
-                                             on_task_spoken=self._task_spoken,
-                                             announce_tid=announce_tid)
-            # `claim`, NOT `take`: nobody asked for this. An auto-wake is the agent's
-            # own idea, and the floor's rule is that only Robin ends a conversation.
-            # Refused means the caller leaves the item un-announced and retries on a
-            # later tick, exactly as it already does during quiet hours.
-            floor.claim(floor.DESK, self.FLOOR_KEY, session=self.live,
-                        on_evict=self._evicted_from_floor)
-            self.live_on = True
-            self.status = "listening"
-            self.live.start()
-            return True
-        except floor.Busy as busy:
-            LOG(f"wake-and-speak deferred — {busy.holder.surface} has the floor")
-            self.live = None
-            self.live_on = False
-            self.status = "idle"
-            self._close_activity_window()
-            return False
-        except Exception as e:
-            LOG(f"wake-and-speak failed: {e!r}")
-            floor.release(self.FLOOR_KEY)
-            self.live_on = False
-            self.status = "idle"
-            return False
+        for attempt in range(2):
+            try:
+                from core import live_session as realtime
+                self.live = realtime.LiveSession(on_state=self._on_live_state, announce=text,
+                                                 on_auto_stop=self._auto_stopped,
+                                                 on_task_spoken=self._task_spoken,
+                                                 announce_tid=announce_tid)
+                # `claim`, NOT `take`: nobody asked for this. An auto-wake is the agent's
+                # own idea, and the floor's rule is that only Robin ends a conversation.
+                # Refused means the caller leaves the item un-announced and retries on a
+                # later tick, exactly as it already does during quiet hours.
+                floor.claim(floor.DESK, self.FLOOR_KEY, session=self.live,
+                            on_evict=self._evicted_from_floor)
+                self.live_on = True
+                self.status = "listening"
+                self.live.start()
+                return True
+            except floor.Busy as busy:
+                LOG(f"wake-and-speak deferred — {busy.holder.surface} has the floor")
+                self.live = None
+                self.live_on = False
+                self.status = "idle"
+                self._close_activity_window()
+                return False
+            except Exception as e:
+                LOG(f"wake-and-speak failed: {e!r}")
+                floor.release(self.FLOOR_KEY)
+                self.live_on = False
+                self.status = "idle"
+                if attempt == 0:
+                    continue
+                self._notify_live_start_failed(e, task_text=text)
+                return False
 
     # --- audio device list (consumed by the Settings window) ----------------
     def _list_audio(self):
@@ -770,6 +783,7 @@ class VoiceAgent(rumps.App):
             self.live.start()
         except Exception as e:
             LOG(f"LIVE start failed: {e!r}")
+            self._notify_live_start_failed(e)
             floor.release(self.FLOOR_KEY)
             self.live_on = False
             self.status = "idle"

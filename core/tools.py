@@ -432,6 +432,50 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "os_map_search",
+        "description": "Search the inventory of actual things Robin owns — projects, servers, services, skills, agents, plugins, goals, and tasks — and return a short ranked list of named things. Use it for 'do I have anything for X', 'which skill or agent handles X', 'is X already built', or 'what have I got about X'. This is the only tool that returns the THINGS themselves; semsearch_query, hybrid_rag_search, and cognee_ask return text or knowledge ABOUT them instead.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "q": {"type": "string", "description": "What to look for, in plain words."},
+                           "type": {"type": "string",
+                                    "enum": ["agent", "skill", "wiki", "wiki_page", "mcp", "plugin",
+                                             "project", "lab", "goal", "objective", "key_result", "context",
+                                             "task", "ai_os", "source", "external"],
+                                    "description": "Narrow to one kind of thing. Omit unless the question names a kind."},
+                           "source": {"type": "string",
+                                      "description": "Narrow to one origin, such as 'Wiki' or 'own-skill'. Rarely needed."},
+                           "limit": {"type": "integer",
+                                     "description": "How many results to speak; keep it small."}},
+                       "required": ["q"]},
+    },
+    {
+        "type": "function",
+        "name": "os_map_overview",
+        "description": "Describe the SHAPE and SCALE of Robin's system: how many things it holds, their kinds, sources, connections, and what is running. Use it for 'what have I got', 'how big is my system', or 'what kinds of things are in there'. This is a census, never a lookup of one thing; use os_map_search to find a specific thing.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "council_list_advisors",
+        "description": "List Robin's persona council: simulations of people he studies, built from his own wiki notes, and the situation where each is useful. Use it for 'who can I ask', 'who is on my council', 'who would have a view on X', or to resolve a name before council_ask_advisor. These are simulations, not the real people, and not a way to contact them.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "council_ask_advisor",
+        "description": "Put a real situation to one named advisor on Robin's council and get that advisor's simulated view in their frameworks. SLOW (up to 90 seconds): say you are asking them before calling. The answer is an opinion from a simulation built from Robin's notes, never fact or your own view; name the advisor and say it is a simulation when relaying it. Use council_list_advisors first if the name is uncertain.",
+        # Deliberately not an enum: the roster is whatever people/ folders in Robin's
+        # wiki have a SOUL.md, so a fixed list would go stale when he adds one. The
+        # kernel resolves spoken names and its 400 names the real roster.
+        "parameters": {"type": "object",
+                       "properties": {"persona": {"type": "string",
+                                                  "description": "Advisor name as Robin said it, e.g. 'Alex Hormozi' or 'Hormozi'."},
+                                      "question": {"type": "string",
+                                                   "description": "Robin's actual situation and question, with its specifics."}},
+                       "required": ["persona", "question"]},
+    },
+    {
+        "type": "function",
         "name": "graph_get_node",
         "description": "Inspect a node and its nearby relationships in the system graph.",
         "parameters": {"type": "object",

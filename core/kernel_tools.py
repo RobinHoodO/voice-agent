@@ -649,6 +649,146 @@ def hermes_fleet(args: dict) -> str:
     return "\n".join(lines) or "No fleet status available."
 
 
+def os_map_search(args: dict) -> str:
+    q = (args.get("q") or "").strip()
+    if not q:
+        return "I need something to search for."
+    params = {"q": q}
+    for key in ("type", "source", "limit"):
+        if args.get(key) is not None:
+            params[key] = args[key]
+    try:
+        data = _kernel_call("GET", "/os-map", params=params)
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"OS map search failed: {e.code}."
+    if not isinstance(data, dict):
+        return f"No OS map results found for {q}."
+    results = _items(data, "results")
+    if not results:
+        spoken = data.get("spoken")
+        return _short(spoken, 500) if spoken else f"No OS map results found for {q}."
+    lines = []
+    spoken = data.get("spoken")
+    if spoken:
+        lines.append(_short(spoken, 240))
+    else:
+        lines.append(f"I found {len(results)} matching thing{'s' if len(results) != 1 else ''}:")
+    for result in results[:5]:
+        if not isinstance(result, dict):
+            continue
+        name = result.get("name") or result.get("title") or "Match"
+        kind = result.get("kind") or result.get("type")
+        snippet = result.get("snippet")
+        if isinstance(snippet, dict):
+            snippet = snippet.get("text") or snippet.get("description")
+        snippet = snippet or result.get("description") or result.get("summary") or result.get("text") or ""
+        line = _short(name, 100) + (f" ({kind})" if kind else "")
+        if snippet:
+            line += f": {_short(snippet)}"
+        lines.append(line)
+    return "\n".join(lines) or f"No OS map results found for {q}."
+
+
+def os_map_overview(args: dict) -> str:
+    try:
+        data = _kernel_call("GET", "/os-overview")
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"OS map overview failed: {e.code}."
+    if not isinstance(data, dict):
+        return "No OS map overview is available."
+    spoken = data.get("spoken")
+    if spoken:
+        return str(spoken)
+    nodes = data.get("nodes")
+    counts = data.get("counts") or data.get("kindCounts") or data.get("byKind")
+    if isinstance(nodes, dict):
+        counts = counts or nodes.get("byKind")
+    if isinstance(counts, dict):
+        parts = [f"{value} {kind}" for kind, value in list(counts.items())[:5]]
+        if parts:
+            return "OS map overview: " + ", ".join(parts) + "."
+    if isinstance(counts, list):
+        parts = []
+        for item in counts[:5]:
+            if isinstance(item, dict) and item.get("kind") is not None and item.get("count") is not None:
+                parts.append(f"{item['count']} {item['kind']}")
+        if parts:
+            return "OS map overview: " + ", ".join(parts) + "."
+    total = (data.get("total") or data.get("totalItems") or data.get("count")
+             or (nodes.get("total") if isinstance(nodes, dict) else None))
+    if total is not None:
+        return f"The OS map holds {total} things."
+    return "No OS map overview is available."
+
+
+def council_list_advisors(args: dict) -> str:
+    try:
+        data = _kernel_call("GET", "/council-personas")
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        return f"Council advisor list failed: {e.code}."
+    if not isinstance(data, dict):
+        return "No council advisors are available."
+    spoken = data.get("spoken")
+    if spoken:
+        return str(spoken)
+    personas = _items(data, "personas")
+    if not personas:
+        return "No council advisors are available."
+    lines = [f"I found {len(personas)} council advisor{'s' if len(personas) != 1 else ''}:"]
+    for persona in personas[:5]:
+        if not isinstance(persona, dict):
+            continue
+        name = persona.get("name") or persona.get("persona") or "Advisor"
+        when = (persona.get("tagline") or persona.get("whenToConsult") or persona.get("when_to_consult")
+                or persona.get("description") or persona.get("summary") or "")
+        lines.append(f"{_short(name, 100)}: {_short(when)}" if when else _short(name, 100))
+    return "\n".join(lines) or "No council advisors are available."
+
+
+def council_ask_advisor(args: dict) -> str:
+    persona = (args.get("persona") or "").strip()
+    question = (args.get("question") or "").strip()
+    if not persona or not question:
+        return "I need which advisor and the actual question."
+    try:
+        # Can call its own tools against the wiki internally — genuinely slow (~60-90s).
+        data = _kernel_call("POST", "/council-ask", {"persona": persona, "question": question}, timeout=120)
+    except KernelUnavailable:
+        return UNREACHABLE
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode("utf-8"))
+            personas = _items(detail, "personas", "validPersonas", "valid_personas", "available")
+            names = []
+            for item in personas[:5]:
+                name = item.get("name") if isinstance(item, dict) else item
+                if name:
+                    names.append(_short(name, 80))
+            if e.code == 400 and names:
+                return "That advisor isn't on the council. Available advisors: " + ", ".join(names) + "."
+        except Exception:
+            pass
+        return f"Council advisor query failed: {e.code}."
+    if not isinstance(data, dict):
+        return "The council returned no usable answer."
+    spoken = data.get("spoken")
+    if spoken:
+        return str(spoken)
+    answer = data.get("answer")
+    if not answer:
+        return "The council returned no usable answer."
+    persona_name = data.get("persona") or persona
+    if isinstance(persona_name, dict):
+        persona_name = persona_name.get("name") or persona
+    return f"{persona_name}'s view — a simulation, not the real person — is: {_short(answer, 900)}"
+
+
 # Every tool this module proxies to the kernel. Used as the fail-closed gate set: if
 # the manifest can't be read we can't learn which tools are high-stakes, so we treat
 # ALL of these as high-stakes rather than silently ungating something like
@@ -659,7 +799,8 @@ KERNEL_TOOL_NAMES = frozenset({
     "os_delegate", "bloom_create_task", "bloom_update_task", "bloom_comment_task",
     "bloom_list_projects", "bloom_list_tasks", "twenty_search_contacts", "semsearch_query",
     "hybrid_rag_search", "graph_get_node", "graph_get_document", "list_inbox_items",
-    "cognee_ask", "hermes_fleet",
+    "cognee_ask", "hermes_fleet", "os_map_search", "os_map_overview",
+    "council_list_advisors", "council_ask_advisor",
 })
 
 

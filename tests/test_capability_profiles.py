@@ -120,6 +120,18 @@ def test_the_mac_surface_keeps_every_tool():
     assert capabilities.has_shell("mac")
 
 
+def test_the_mac_surface_keeps_os_map_and_council_tools():
+    served = {t["name"] for t in capabilities.tools_for("mac", TOOLS)}
+    assert {"os_map_search", "os_map_overview", "council_list_advisors",
+            "council_ask_advisor"} <= served
+
+
+def test_the_phone_surface_keeps_os_map_and_council_tools():
+    served = {t["name"] for t in capabilities.tools_for("phone", TOOLS)}
+    assert {"os_map_search", "os_map_overview", "council_list_advisors",
+            "council_ask_advisor"} <= served
+
+
 def test_the_escalation_paths_survive_on_both_surfaces():
     """The phone has no shell, so the ways OUT of "I can't do that here" had better
     both be there. Losing them would leave it with no way to act on the filesystem at

@@ -1245,6 +1245,22 @@ class LiveSession(AudioCoreMixin):
             out = await self._loop.run_in_executor(None, kernel_tools.hermes_fleet, args)
             _log(f"hermes_fleet({args}): {out[:120]}")
             config.activity(f"🐝  hermes fleet: {args.get('pod') or 'all pods'}")
+        elif name == "os_map_search":
+            out = await self._loop.run_in_executor(None, kernel_tools.os_map_search, args)
+            _log(f"os_map_search: {args.get('q', '')!r}")
+            config.activity(f"🧠  os map: {args.get('q', '')}")
+        elif name == "os_map_overview":
+            out = await self._loop.run_in_executor(None, kernel_tools.os_map_overview, args)
+            _log("os_map_overview")
+            config.activity("🧠  os map overview")
+        elif name == "council_list_advisors":
+            out = await self._loop.run_in_executor(None, kernel_tools.council_list_advisors, args)
+            _log("council_list_advisors")
+            config.activity("🧠  listed council advisors")
+        elif name == "council_ask_advisor":
+            out = await self._loop.run_in_executor(None, kernel_tools.council_ask_advisor, args)
+            _log(f"council_ask_advisor: {args.get('persona', '')!r}")
+            config.activity(f"🧠  asked {args.get('persona', 'the council')}: {args.get('question', '')[:60]}")
         elif name == "list_inbox_items":
             out = await self._loop.run_in_executor(None, kernel_tools.list_inbox_items, args)
             _log(f"list_inbox_items: {args!r}")
