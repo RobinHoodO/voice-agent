@@ -59,7 +59,8 @@ PROMPT_CFG = {"live": {"workspace": "/tmp",
                        "memory": {"recall_count": 0}}}
 
 
-def test_the_phone_prompt_never_tells_it_to_use_run_shell(monkeypatch, tmp_app):
+def test_the_phone_blocks_this_function_assembles_never_tell_it_to_use_run_shell(
+        monkeypatch, tmp_app):
     """LIVE_SYSTEM is excluded from this scan on purpose, and that is not a loophole:
     it is ONE shared text across every surface (check_tool_drift.py refuses a
     per-surface base prompt, because two base prompts is two agents), so it cannot be
