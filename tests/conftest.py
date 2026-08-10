@@ -26,6 +26,22 @@ def isolated_action_journal(monkeypatch, tmp_path_factory):
     return target
 
 
+@pytest.fixture(autouse=True)
+def clean_conversation_floor():
+    """No test starts holding the conversation floor, and none leaks it to the next.
+
+    `core.floor` is a process global on purpose — there is one brain in this process —
+    which makes it exactly the kind of state that turns one failing test into five.
+    Reaching at `_holder` rather than adding a `reset()` is deliberate: a production
+    API whose only caller is a fixture is a worse thing to own than this line.
+    """
+    from core import floor
+
+    floor.floor()._holder = None
+    yield
+    floor.floor()._holder = None
+
+
 @pytest.fixture
 def tmp_app(monkeypatch, tmp_path):
     """Point config + memory storage at an isolated tmp dir. Yields the dir."""

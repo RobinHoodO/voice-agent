@@ -341,26 +341,15 @@ async def live(websocket: WebSocket):
 
     await websocket.accept()
 
-    # Same tab reconnecting (dropped mobile network): retire the old one first, so two
-    # sessions never share a key — and never share a confirmation. This also releases
-    # the old connection's floor key, so the reconnect can claim below.
-    old = SESSIONS.pop(session_key, None)
-    if old is not None:
-        caps.log(f"session {session_key[:8]} reconnected — retiring the previous one")
-        await _shutdown(old)
-
-    loop = asyncio.get_running_loop()
-    bridge = BrowserAudioBridge(websocket, loop, session_key=session_key)
-    session = SESSION_FACTORY(bridge=bridge, on_auto_stop=lambda: bridge.send_json(
-        {"type": "ended", "reason": "auto-stop"}))
-    conn = Conn(session_key, bridge, session)
-
-    # ── the floor ────────────────────────────────────────────────────────────
-    # Claimed BEFORE `session.start()`, which is what opens the paid realtime socket:
-    # a refusal must cost nothing. Nothing has been started yet if this loses.
+    # ── the floor, before anything is built ──────────────────────────────────
+    # A refusal has to cost nothing: no bridge, no LiveSession, and above all no call
+    # to `session.start()`, which is what opens the paid realtime socket. So the claim
+    # comes first and carries no session yet; the session is attached below with a
+    # second claim on the same key, which the floor treats as the same seat arriving
+    # again rather than as a rival.
     claim = floor.take if _wants_takeover(websocket) else floor.claim
     try:
-        claim(floor.PHONE, PHONE_FLOOR_KEY, session=session, on_evict=_evict_phone)
+        claim(floor.PHONE, PHONE_FLOOR_KEY, on_evict=_evict_phone)
     except floor.Busy as busy:
         # Robin is mid-conversation somewhere else. His conversation is NOT touched.
         caps.log(f"session {session_key[:8]} refused — {busy.holder.surface} has the floor")
@@ -373,16 +362,33 @@ async def live(websocket: WebSocket):
         await websocket.close(code=FLOOR_BUSY_CLOSE)
         return
 
+    # Same tab reconnecting (dropped mobile network): retire the old one first, so two
+    # sessions never share a key — and never share a confirmation.
+    old = SESSIONS.pop(session_key, None)
+    if old is not None:
+        caps.log(f"session {session_key[:8]} reconnected — retiring the previous one")
+        await _shutdown(old)
+
+    loop = asyncio.get_running_loop()
+    bridge = BrowserAudioBridge(websocket, loop, session_key=session_key)
+    session = SESSION_FACTORY(bridge=bridge, on_auto_stop=lambda: bridge.send_json(
+        {"type": "ended", "reason": "auto-stop"}))
+    conn = Conn(session_key, bridge, session)
     SESSIONS[session_key] = conn
+    # Attach the session to the claim we already hold, so a finished background task
+    # can be offered to whoever Robin is actually talking to (`floor.session()`).
+    floor.claim(floor.PHONE, PHONE_FLOOR_KEY, session=session, on_evict=_evict_phone)
 
-    await websocket.send_json({"type": "hello", "session": session_key,
-                               "release": _release()})
-    session.start()
-    caps.log(f"session {session_key[:8]} open ({len(SESSIONS)} live)")
-
-    recv = asyncio.ensure_future(_pump_browser(websocket, conn))
-    watch = asyncio.ensure_future(_watch_session(conn))
+    # Everything from here is inside the try, so a failure in `start()` cannot leave
+    # this connection in SESSIONS or leave the surface holding the floor.
     try:
+        await websocket.send_json({"type": "hello", "session": session_key,
+                                   "release": _release()})
+        session.start()
+        caps.log(f"session {session_key[:8]} open ({len(SESSIONS)} live)")
+
+        recv = asyncio.ensure_future(_pump_browser(websocket, conn))
+        watch = asyncio.ensure_future(_watch_session(conn))
         done, pending = await asyncio.wait([recv, watch],
                                            return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
