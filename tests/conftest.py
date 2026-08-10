@@ -8,6 +8,7 @@ Tests must never touch the real ones, so `tmp_app` redirects every config path
 `server.app:app`, real LiveSessions, a fake provider socket.
 """
 import importlib
+import sys
 
 import pytest
 
@@ -23,6 +24,29 @@ def isolated_action_journal(monkeypatch, tmp_path_factory):
     """
     target = tmp_path_factory.mktemp("audit") / "actions.jsonl"
     monkeypatch.setenv("VOICE_AGENT_ACTIONS_LOG", str(target))
+    return target
+
+
+@pytest.fixture(autouse=True)
+def isolated_agent_log(monkeypatch, tmp_path_factory):
+    """No test ever appends to Robin's real `agent.log`.
+
+    Same argument as the action journal above, and it bit for real on 2026-08-10: a suite
+    run left `live $ rm -rf /tmp/whatever`, `env rm -rf /opt` and
+    `gmail_send ... -> sent` (with plausible-looking addresses) in the live log while Robin
+    was reading it to diagnose why Pam had gone mute. Nothing had been deleted and no mail
+    was sent — but a diagnostic log you have to mentally filter is worse than no log.
+
+    `mac.agent` copies LOG_PATH into a module global at import, so patching `core.config`
+    alone is not enough; both are redirected, and `mac.agent` is only touched if it is
+    already imported (it needs PyObjC, which not every test environment has).
+    """
+    target = tmp_path_factory.mktemp("logs")
+    monkeypatch.setattr("core.config.LOG_PATH", str(target / "agent.log"), raising=False)
+    monkeypatch.setattr("core.config.ACTIVITY_PATH", str(target / "activity.log"), raising=False)
+    agent_mod = sys.modules.get("mac.agent")
+    if agent_mod is not None:
+        monkeypatch.setattr(agent_mod, "LOG_PATH", str(target / "agent.log"), raising=False)
     return target
 
 

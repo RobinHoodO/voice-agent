@@ -1,3 +1,45 @@
+# Pam — one brain, two surfaces
+
+Restructured 2026-08-10. **`core/` is the brain and is surface-independent** — it imports
+cleanly on headless Linux, so nothing in it may reach AppKit, sounddevice, Quartz, osascript
+or the Keychain directly. Those live behind capability interfaces (`core/caps.py`,
+`core/secrets.py`) with implementations in `mac/`.
+
+| dir | what |
+|---|---|
+| `core/` | LiveSession, tools, services, backends, memory, VAD/turn-boundary (`audio_core.py`) |
+| `mac/` | menubar app, sounddevice audio, screen/AX context, clipboard, herdr lanes |
+| `server/` | FastAPI + WebSocket + PWA — **runs on the Mac**, a remote mic+speaker for the same LiveSession |
+
+The phone talks to the **Mac**, over `tailscale serve` (HTTPS is mandatory — `getUserMedia`
+refuses a plain-http origin). Thrivbe-1 hosts no voice instance; voice-bridge was deleted
+2026-08-10 (`docs/BRIDGE-DECOMMISSION.md`). `mac/reverse_channel.py` exists for a possible
+future T1-hosted brain and is **OFF by default** — don't build on it.
+
+## Rules that bite
+
+- **Rebuild ⇒ relaunch, always.** py2app replaces `Contents/Resources/lib/python312.zip`
+  wholesale; a process still running against the old one dies on every session start with
+  `ZipImportError: bad local file header` and says nothing. Use `reload_app.sh` (refuses
+  during a live session, gates on tool-drift, rebuilds AND relaunches). Never split the
+  build from the relaunch.
+- **The pre-commit hook is at `core.hooksPath=.githooks`**, not `.git/hooks/`. It runs the
+  full suite on every commit. Don't conclude "no gate exists" from an empty `.git/hooks/`.
+- **Capability profiles are data** (`core/capabilities.py`). An excluded tool is REMOVED
+  from the schema sent to the model — never present-and-erroring. Adding a tool means
+  `core/tools.py` (schema) **and** `core/live_session.py::_do_tool` (dispatch); miss the
+  dispatch and the call silently falls through. Kernel tool names must match
+  `thrivbe-os/src/tool-manifest.ts` exactly.
+- **The phone has no `run_shell`, by design.** Three adversarial rounds broke every
+  "these commands are read-only" allowlist (`env rm -rf`, `git ls-remote --upload-pack=`,
+  `uniq a b` writing via its second operand); `core/destructive.py` was deleted rather than
+  patched. Don't reintroduce one.
+- `check_tool_drift.py` must exit 0 before deploying — it proves both surfaces agree with
+  each other and with the kernel manifest.
+- Known flakes, not regressions: `test_phone_meets_desk.py::test_a_second_tab_takes_the_
+  conversation_over_only_when_asked` (~1 in 3 full-suite runs, async teardown race) and
+  `test_memory_store.py::test_concurrent_records_not_dropped`.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
