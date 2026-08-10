@@ -106,6 +106,22 @@ def voice_server(tmp_app, monkeypatch):
 
     from server_harness import LiveServer, make_recording_factory
 
+    # Setting the env var is NOT enough: `secrets.secret` consults the registered store
+    # (the macOS Keychain) FIRST and only falls back to env. The moment Robin turned the
+    # phone surface on, `mac/phone_surface.ensure_token()` minted a real token into the
+    # Keychain — which then beat this one and made every server test fail on a 401 that
+    # looked like "the session never said hello". The suite must not depend on whether a
+    # feature is switched on, so resolve this one key here and let everything else through.
+    from core import secrets as _secrets
+
+    _real_secret = _secrets.secret
+
+    def _test_secret(name, env_fallback=()):
+        if name == "voice_agent_token":
+            return VOICE_TEST_TOKEN
+        return _real_secret(name, env_fallback)
+
+    monkeypatch.setattr(_secrets, "secret", _test_secret)
     monkeypatch.setenv("VOICE_AGENT_TOKEN", VOICE_TEST_TOKEN)
 
     # No network: the high-stakes manifest, the cost log, and the prompt builder all

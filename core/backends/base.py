@@ -39,6 +39,14 @@ class Backend(ABC):
     ws = None
     mic_rate: int = 24000
     manual_vad: bool = False
+    # Does `send_activity_end()` ALREADY make the provider start replying?
+    # Gemini: yes — end-of-activity IS the end-of-turn signal, so an explicit
+    # trigger_response() afterwards is a SECOND reply to the same utterance (verified
+    # against the live API 2026-08-10: activityEnd alone returned a full greeting with
+    # turnComplete never sent — which is why Robin heard "hi" answered twice, differently).
+    # OpenAI: no — its turn_detection carries `create_response: false` precisely so the
+    # app can inject cursor context first and trigger the reply itself.
+    ends_turn_on_activity_end: bool = False
     resume_handle: str | None = None   # providers that can resume a dropped session
 
     @abstractmethod

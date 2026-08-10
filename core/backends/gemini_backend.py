@@ -31,6 +31,9 @@ _VOICE_MAP = {
 class GeminiBackend(Backend):
     mic_rate = 16000
     manual_vad = True
+    # activityEnd IS Gemini's end-of-turn signal — it starts generating on its own.
+    # See Backend.ends_turn_on_activity_end for the measurement that established this.
+    ends_turn_on_activity_end = True
 
     def __init__(self):
         self.ws = None

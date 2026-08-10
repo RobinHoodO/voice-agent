@@ -817,7 +817,12 @@ class LiveSession(AudioCoreMixin):
 
     async def _on_speech_stopped(self) -> None:
         self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
-        await self._inject_context_and_respond()
+        # The provider may already be replying: for a backend whose activityEnd doubles as
+        # the end-of-turn signal, `_pump_mic` sent it a moment ago and generation is
+        # underway. Asking for a response on top of that is what made her answer the same
+        # "hi" twice, in two different ways.
+        await self._inject_context_and_respond(
+            already_replying=self._backend.ends_turn_on_activity_end)
 
     async def _resolve_pending_action(self, transcript: str) -> None:
         """Execute (or drop) the one staged high-stakes action, per the deterministic
@@ -910,7 +915,14 @@ class LiveSession(AudioCoreMixin):
             except queue.Empty:
                 return tasks
 
-    async def _inject_context_and_respond(self) -> None:
+    async def _inject_context_and_respond(self, *, already_replying: bool = False) -> None:
+        """Hand the model whatever context this turn has, then make sure a reply happens.
+
+        `already_replying` says the provider started generating the moment the turn ended
+        (see Backend.ends_turn_on_activity_end) — then this must NOT trigger, or the same
+        utterance is answered twice. Every other caller (announce, stall nudge, reconnect,
+        tool result) had no such signal and still needs the explicit trigger.
+        """
         self.on_state("thinking")
         # Grab text context and the screenshot concurrently so the silent gap before the
         # reply stays as short as possible (each toggle may no-op and return fast).
@@ -946,8 +958,10 @@ class LiveSession(AudioCoreMixin):
                 await self._backend.send_text_context(
                     f"[{preamble} Work their results naturally into "
                     f"your next spoken reply:\n{results}\n]")
-            await self._backend.trigger_response()
-            self._awaiting_reply_since = self._loop.time()   # arm the stall watchdog
+            if not already_replying:
+                await self._backend.trigger_response()
+            # Armed either way: the watchdog cares that a reply is OWED, not who asked.
+            self._awaiting_reply_since = self._loop.time()
         except Exception:
             for task in finished:
                 self._offered_tasks.put(task)
