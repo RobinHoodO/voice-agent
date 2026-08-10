@@ -77,6 +77,7 @@ def test_the_two_transports_reach_different_sessions_side_by_side(mac_owns_caps)
     class Bridge:
         session_key = "abcdef12"
         mic_rate = 0
+        audio_config = None      # the format this tab was last told, per BrowserAudioBridge
 
         def __init__(self):
             self.sent = []

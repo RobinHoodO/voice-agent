@@ -239,6 +239,7 @@ def test_transport_sends_the_real_backends_rate(module, cls, mic_rate, manual):
     class _Bridge:
         session_key = "0" * 8
         mic_rate = 0
+        audio_config = None      # the format this tab was last told, per BrowserAudioBridge
 
         def __init__(self):
             self.sent = []

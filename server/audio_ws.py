@@ -61,6 +61,11 @@ class BrowserAudioBridge:
         self._loop = loop
         self.session_key = session_key
         self.mic_rate: int = 0          # set by the transport once the backend is known
+        # The last `audio` frame this tab was sent, so it is sent ONCE per format. The
+        # browser reconfigures its capture worklet on every one it receives, which resets
+        # the resampler's carry and costs a partial frame of speech — cheap, but not
+        # while Robin is mid-sentence.
+        self.audio_config: dict | None = None
         self._closed = threading.Event()
         self.audio_frames_out = 0       # counters, for /health and tests
         self.mic_frames_in = 0
@@ -135,25 +140,50 @@ class BrowserAudioTransport(caps.AudioTransport):
     the session it was handed rather than holding one of its own.
     """
 
-    def start(self, s) -> None:
+    def announce(self, s) -> bool:
+        """Tell the tab what audio format to capture in. True if a frame was sent.
+
+        Split out of `start` so it can be sent EARLY. The tab drops every captured frame
+        until this arrives (it does not know the sample rate to resample to), and `start`
+        runs after `LiveSession._configure`, which builds the prompt: kernel persona,
+        memory recall, the high-stakes manifest. That measured 2.3 s on the tailnet, and
+        a tap-and-talk user's first sentence went into it. The rates are known the moment
+        the backend object exists — `mic_rate` is a class attribute of the backend, set
+        long before its socket opens — so there is nothing to wait for.
+
+        Idempotent per format: `start` still calls it, and on a reconnect that keeps the
+        same backend it sends nothing rather than making the tab rebuild its worklet
+        mid-conversation.
+        """
         bridge: BrowserAudioBridge | None = getattr(s, "_bridge", None)
         if bridge is None:
             raise RuntimeError("no browser bridge attached to this session")
-        s._audio_stop.clear()
         # The ACTIVE backend decides the mic rate. Gemini wants 16k, OpenAI 24k; the
         # browser is told which, and configures its capture worklet from this frame.
         # 100 ms frames, matching mac.audio's `mic_block = mic_rate // 10`.
         mic_rate = int(s._backend.mic_rate)
-        bridge.mic_rate = mic_rate
-        bridge.send_json({
+        frame = {
             "type": "audio",
             "mic_rate": mic_rate,
             "output_rate": OUTPUT_RATE,
             "frame_samples": mic_rate // 10,
             "manual_vad": bool(s._backend.manual_vad),
-        })
+        }
+        if bridge.audio_config == frame:
+            return False
+        bridge.mic_rate = mic_rate
+        bridge.audio_config = frame
+        bridge.send_json(frame)
         _log(f"browser audio: mic {mic_rate} Hz, playback {OUTPUT_RATE} Hz, "
              f"manual_vad={s._backend.manual_vad}")
+        return True
+
+    def start(self, s) -> None:
+        bridge: BrowserAudioBridge | None = getattr(s, "_bridge", None)
+        if bridge is None:
+            raise RuntimeError("no browser bridge attached to this session")
+        s._audio_stop.clear()
+        self.announce(s)
         s._player_thread = threading.Thread(
             target=functools.partial(self.player, s), daemon=True,
             name=f"browser-player-{bridge.session_key[:8]}")

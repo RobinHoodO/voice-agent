@@ -35,11 +35,32 @@ class BrowserLiveSession(LiveSession):
     # Structural, not a check: there is no way to get a browser session that is not on
     # the phone profile, because this is the class the browser surface instantiates.
     #
-    # It is now the ONLY thing that makes a session the phone, and that is deliberate.
-    # The surface used to also call `caps.set_profile("phone")` at startup, which was
-    # right when this package was the only thing in its process on Thrivbe-1 and is
-    # actively wrong now: it runs inside the menubar app, where the process-wide profile
-    # is `mac` and has to stay `mac` for Robin's own desk conversation and for
+    # THREE things are per-session here, and the list is the whole contract for adding a
+    # fourth surface to this process. Anything that used to be "what this process is"
+    # and is now "which seat is asking" has to appear here, or in something this pins:
+    #
+    #   1. PROFILE          — which tools exist, and (via `capabilities`) which of the
+    #                         machine's senses this seat may use.
+    #   2. AUDIO_TRANSPORT  — whose microphone and speaker (below).
+    #   3. SCREEN CONTEXT   — whether the Mac's focused window, cursor text and
+    #                         screenshot reach the model. Not pinned here, because it is
+    #                         DERIVED from PROFILE at the point of use
+    #                         (`LiveSession._may_read_the_screen` →
+    #                         `capabilities.has_screen_context`) — but it is a third
+    #                         thing that has to be per-session, and it was the one that
+    #                         got missed. Until 2026-08-10 the grab was gated only on the
+    #                         process-wide `privacy.*` toggles, which described the
+    #                         MACHINE; on Thrivbe-1 there was no Mac screen to grab, so
+    #                         the impossibility was structural. Moving the brain into the
+    #                         menubar process turned it into an unenforced promise, and
+    #                         the phone was handed Robin's screen on every turn while its
+    #                         own prompt said it could not see one.
+    #
+    # PROFILE is also the ONLY thing that makes a session the phone, and that is
+    # deliberate. The surface used to also call `caps.set_profile("phone")` at startup,
+    # which was right when this package was the only thing in its process on Thrivbe-1
+    # and is actively wrong now: it runs inside the menubar app, where the process-wide
+    # profile is `mac` and has to stay `mac` for Robin's own desk conversation and for
     # `core.shell`. Per-session, or it is a bug.
     PROFILE = SURFACE_PROFILE
 
@@ -56,6 +77,26 @@ class BrowserLiveSession(LiveSession):
         super().__init__(**kwargs)
 
     # --- surface hooks ------------------------------------------------------
+    async def _configure(self) -> None:
+        """Hand the tab its audio format BEFORE core builds the prompt.
+
+        Core's order is connect → `_configure` → `_start_audio`, and `_start_audio` is
+        where the transport normally announces the format. On the Mac that is invisible:
+        PortAudio is already open. In a browser it is the gate on the microphone — the
+        tab cannot resample without knowing the rate, so it drops every frame until the
+        `audio` frame lands — and `_configure` is the slow step (kernel persona, memory
+        recall, the high-stakes manifest: 2.3 s measured over the tailnet). That was the
+        first sentence of every conversation, gone.
+
+        Nothing downstream moves: the frames the tab now sends during `_configure` land
+        in the session's mic queue (`_mic_cb` gates on `_audio_stop`, which is clear on a
+        fresh attempt) and are pumped the moment `_pump_mic` starts — so the words are
+        queued rather than dropped, and the backend has been set up before any of them
+        reach it.
+        """
+        self._transport().announce(self)
+        await super()._configure()
+
     def _push_state(self, state: str) -> None:
         """idle / listening / speaking / thinking / acting / reconnecting."""
         self._bridge.send_json({"type": "state", "state": state})
