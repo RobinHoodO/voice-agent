@@ -73,29 +73,33 @@ class PhoneSurface:
         self.last_error: str | None = None
 
     # --- reading ------------------------------------------------------------
+    # The readers below deliberately take NO lock. `_reconcile_phone_menu` calls
+    # `status()` from the AppKit main thread every 0.3 s, and `stop()` holds the lock
+    # while it joins uvicorn's thread — which is normally instant and is allowed to take
+    # seconds. A menu repaint that can block on that is a beachball. Every field here is
+    # a single attribute read, so the worst case is one tick showing a title that is
+    # 300 ms stale, which is not a thing anyone can see.
     @property
     def is_on(self) -> bool:
-        with self._lock:
-            return self._thread is not None and self._thread.is_alive()
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     @property
     def url(self) -> str | None:
-        with self._lock:
-            return self._url
+        return self._url
 
     def status(self) -> dict:
         """Everything the menu needs to render itself in one read."""
-        with self._lock:
-            held = floor.holder()
-            return {
-                "on": self.is_on,
-                "url": self._url,
-                "bind": self._bind,
-                "port": self._port,
-                "tls_port": self._tls_port,
-                "error": self.last_error,
-                "in_conversation": held is not None and held.surface == floor.PHONE,
-            }
+        held = floor.holder()
+        return {
+            "on": self.is_on,
+            "url": self._url,
+            "bind": self._bind,
+            "port": self._port,
+            "tls_port": self._tls_port,
+            "error": self.last_error,
+            "in_conversation": held is not None and held.surface == floor.PHONE,
+        }
 
     # --- switching on -------------------------------------------------------
     def start(self) -> str:

@@ -141,7 +141,9 @@ flowchart TB
 ## 3. The files
 
 The tree is split by **surface**, not by layer. `core/` is the brain and knows nothing
-about macOS; `mac/` is this machine; `server/` is where the headless surface lands.
+about macOS; `mac/` is this machine; `server/` is the phone's microphone and speaker —
+which, since Robin's 2026-08-10 ruling, runs INSIDE `mac/`'s process rather than on a
+second machine. A surface is a seat, not a host. `server/README.md` has the wiring.
 
 **`core/` — the brain. Imports cleanly on a headless Linux box with no PyObjC, no
 PortAudio, no Keychain.** Enforced by `tests/test_headless_core.py`, which blocks those
@@ -268,7 +270,13 @@ unreachable · bounded playback queue (drop oldest, not unbounded latency) · `r
 - **Known `core` → Mac leaks — runtime, not import time.** `core/` *imports* clean on
   Linux; two capabilities inside it still assume this Mac when actually called. They are
   faithful moves of pre-split code, deliberately left alone rather than fixed blind.
-  **Owner: whoever builds `server/`** — decide there, do not discover them there.
+  **Owner as of 2026-08-10: nobody, and that is now correct.** These were filed for
+  "whoever builds `server/`", on the assumption that `server/` would run on Thrivbe-1.
+  It does not — it runs in this Mac's process, so both capabilities are simply RIGHT
+  where they stand, and the phone session reaches the same zsh and the same herdr lanes
+  the desk does. They stop being facts about a bug and become facts about the machine.
+  Re-open them the day a Thrivbe-1-hosted brain is actually built; until then, changing
+  either one is a change with no beneficiary.
   1. `core/shell.py` — hard-codes `/bin/zsh`, `source ~/.zshrc`, and a zsh-only sentinel
      `print -r -- "<mark>$?"`. On Linux `Shell()` raises `FileNotFoundError: /bin/zsh`
      at construction, so `run_shell` (a live tool, not dead code) cannot start, and
