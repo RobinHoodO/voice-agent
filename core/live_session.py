@@ -74,6 +74,13 @@ _pending_confirmation_outcome = confirm_gate.pending_confirmation_outcome
 # identical calls can be legitimate (a retry); the third in a short window is a loop.
 TOOL_REPEAT_WINDOW_S = 45.0
 TOOL_REPEAT_LIMIT = 3
+# The exact-args guard above is blind to a tool that loops on VARYING args. Real case
+# (2026-08-10): "what are my active tasks?" spun notion_list_tasks 49 times in 31s,
+# cycling status filters (Focus, Waiting, none, …) so no single key ever hit 3, and she
+# never spoke. So there is also a ceiling on how often ONE tool NAME may fire in the
+# window, whatever the args. Higher than the exact limit because a couple of genuine
+# follow-ups ("open tasks, then just the Focus ones") is normal; six is a spiral.
+TOOL_NAME_LIMIT = 6
 # Writes to the SAME record with different values. 3 allows an honest change of mind
 # ("Backlog — actually, Next Up") and catches the guessing spiral on the third.
 TOOL_TARGET_LIMIT = 3
@@ -103,6 +110,14 @@ def _tool_repeat_count(recent: list, name: str, args: dict, now: float) -> int:
     n = sum(1 for (_t, k) in recent if k == key)
     recent.append((now, key))
     return n
+
+
+def _tool_name_count(recent: list, name: str) -> int:
+    """How many entries in the (already window-trimmed) list are this tool NAME, any args.
+    Reads only — `_tool_repeat_count` owns trimming and appending this call, so run this
+    AFTER it and the count includes the current call."""
+    prefix = f"{name}:"
+    return sum(1 for (_t, k) in recent if k.startswith(prefix))
 
 
 # Tools whose identity is a single field. Rewriting the SAME target with DIFFERENT
@@ -1061,6 +1076,20 @@ class LiveSession(AudioCoreMixin):
                 f"{repeats} times and it did not get you anywhere. It was NOT run again. "
                 "Do not call it again. Answer out loud with what you already have, or ask "
                 "Robin a specific question about what you're missing.")
+            return
+        # Same tool NAME, spun on varying args — the loop the exact-args guard can't see.
+        name_calls = _tool_name_count(self._recent_tools, name)
+        if name_calls >= TOOL_NAME_LIMIT:
+            _log(f"loop guard: refused {name} — {name_calls} calls (any args) in "
+                 f"{int(TOOL_REPEAT_WINDOW_S)}s")
+            config.activity(f"⛔  loop guard: {name.replace('_', ' ')} called {name_calls}x — refused")
+            self._journal("refused_loop_guard_name", name, args, f"{name_calls} calls, varying args")
+            await self._refuse_guarded_call(
+                call_id,
+                f"LOOP GUARD: you have called {name} {name_calls} times in a row with "
+                "different arguments and are going in circles. It was NOT run again. STOP "
+                "calling it. Answer Robin out loud right now with what you already have — "
+                "even a partial answer — or ask him one specific question.")
             return
         # Same target, different values — thrashing one record because the request was
         # misheard, incomplete, or impossible with this tool. Stop and make it speak.
