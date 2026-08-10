@@ -14,6 +14,8 @@ this module to test, because there is no surface with a shell that Robin is not 
 at. `tests/test_shell_gate.py` holds the other half: that the desk shell still runs free
 and that the confirm gate `gmail_send` uses is untouched.
 """
+import json
+
 import pytest
 
 from core import capabilities
@@ -58,6 +60,56 @@ def test_the_phone_keeps_the_herdr_lanes():
     served = {t["name"] for t in capabilities.tools_for("phone", TOOLS)}
     for lane_tool in ("delegate", "continue_task", "close_finished_tasks", "fleet"):
         assert lane_tool in served, f"{lane_tool} is a local call — it works from the phone"
+
+
+def test_no_absent_tool_is_NAMED_anywhere_in_the_phone_schema():
+    """The assertion that was missing, and the one that caught a real leak.
+
+    Dropping `run_shell` from the tool list is not the whole boundary: a tool that
+    SURVIVES the cut carries a description, and a description is prompt text the model
+    reads before it decides. `focus` shipped "Once focused, keep using run_shell to read
+    deeper files in that folder" inside the phone's own schema — the tool was absent and
+    advertised in the same payload. So the assertion is over the JSON actually sent, not
+    over the names in it."""
+    gone = capabilities.excluded_tools("phone")
+    for tool in capabilities.tools_for("phone", TOOLS):
+        blob = json.dumps(tool, ensure_ascii=False)
+        for absent in gone:
+            assert absent not in blob, (
+                f"{tool['name']}'s schema names {absent}, which is not on this surface: "
+                f"{blob[:400]}")
+        assert (tool.get("description") or "").strip(), f"{tool['name']} lost its description"
+
+
+def test_a_scrubbed_description_still_says_what_to_do_instead():
+    """A wall with no door is where a model starts inventing. Removing the sentence that
+    said "keep using run_shell" leaves "and then what?" unanswered, so the profile names
+    the shell-less alternative and `tools_for` puts it there."""
+    served = {t["name"]: t for t in capabilities.tools_for("phone", TOOLS)}
+    description = served["focus"]["description"]
+    assert "os_delegate" in description
+    assert "semsearch_query" in description
+    # the rest of the description is untouched — this is a sentence swap, not a rewrite
+    assert "Point yourself at ONE client or project folder" in description
+
+
+def test_a_tool_that_is_only_about_an_absent_tool_is_dropped_entirely():
+    """The end of the same rule. If scrubbing leaves a tool with no description at all,
+    the tool WAS the promise — ship it and the model reads a nameless entry and guesses
+    at it. Synthetic input on purpose: core ships no such tool today, and this test is
+    what keeps the branch honest if one ever arrives."""
+    fake = [{"name": "shell_helper", "description": "Runs run_shell for you."},
+            {"name": "keeper", "description": "Unrelated. Also unrelated."}]
+    assert [t["name"] for t in capabilities.tools_for("phone", fake)] == ["keeper"]
+
+
+def test_the_desk_schema_is_core_s_own_list_object_for_object():
+    """The other direction, and the one Robin was explicit about: the desk is unchanged.
+    Not "equal after a rewrite" — the same objects, so a scrub can never touch it."""
+    served = capabilities.tools_for("mac", TOOLS)
+    assert len(served) == len(TOOLS)
+    assert all(a is b for a, b in zip(served, TOOLS))
+    assert "run_shell" in json.dumps(served, ensure_ascii=False)
 
 
 def test_the_mac_surface_keeps_every_tool():

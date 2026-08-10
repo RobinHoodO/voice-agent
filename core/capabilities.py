@@ -47,6 +47,8 @@ missing tool rather than an unwatched `rm -rf`.
 """
 from __future__ import annotations
 
+import re
+
 # --- the tools the phone does not get ------------------------------------------------
 # Grouped by the fact that makes each one wrong when Robin is holding a phone, never as
 # one flat list — the grouping is the review: you can check "is that still true?" per
@@ -75,6 +77,27 @@ _DESK_CONTEXT_TOOLS = ("put_text",)
 # delegating from the sofa is the whole point of the phone surface.
 
 PHONE_EXCLUDED_TOOLS = frozenset(_SHELL_TOOLS + _DESK_CONTEXT_TOOLS)
+
+# --- what a REMAINING tool's description may still promise ---------------------------
+# Removing `run_shell` from the schema is not the whole job. A tool DESCRIPTION is prompt
+# text — the model reads it before it decides — so a tool that survives the cut and ends
+# with "keep using run_shell to read deeper files" (which `focus` did, shipped, until
+# 2026-08-10) makes the exact promise the exclusion exists to prevent, one level down.
+#
+# `tools_for` therefore rewrites descriptions as well as dropping tools, and the rewrite
+# is MECHANICAL rather than a table of known-bad sentences: any sentence naming a tool
+# this surface does not have is dropped, so a description edited next year cannot
+# reintroduce the promise without the phone-schema test failing.
+#
+# What IS a table is the sentence that goes in its place. The dropped sentence usually
+# answered "and then what?", and an unanswered question is where a model starts
+# inventing — so a tool whose guidance is surface-dependent names its shell-less
+# alternative here, once, next to the exclusions that trigger it.
+ABSENT_TOOL_GUIDANCE = {
+    "focus": ("Once focused, what it loaded IS what you have on this surface: use "
+              "semsearch_query or hybrid_rag_search for what is not in it, and hand "
+              "anything that has to be read off disk to a delegate lane or os_delegate."),
+}
 
 # --- how explicit the spoken "yes" has to be, per staged tool ------------------------
 # The gate is one mechanism, but not every staged action costs the same to get wrong.
@@ -213,14 +236,84 @@ def confirm_strictness(tool: str | None) -> str:
     return CONFIRM_STRICTNESS.get(tool or "", DEFAULT_CONFIRM_STRICTNESS)
 
 
+_SENTENCES = re.compile(r"(?<=[.!?])\s+")
+
+
+def _names_absent_tool(sentence: str, gone: frozenset) -> bool:
+    return any(re.search(rf"\b{re.escape(tool)}\b", sentence) for tool in gone)
+
+
+def _keep_sentences(text: str, gone: frozenset) -> str:
+    """`text` without any sentence that names a tool this surface does not have.
+
+    Returns the original object untouched when nothing is dropped — the desk surface
+    excludes nothing, and its schema has to stay byte-identical to what core declares.
+    """
+    parts = _SENTENCES.split(text)
+    kept = [part for part in parts if not _names_absent_tool(part, gone)]
+    if len(kept) == len(parts):
+        return text
+    return " ".join(part.strip() for part in kept if part.strip())
+
+
+def _without_absent_tools(tool: dict, gone: frozenset) -> dict | None:
+    """`tool` with every description scrubbed of the tools this surface lacks.
+
+    Returns the SAME dict when nothing changed, a NEW one when it did (never a mutation
+    of core's canonical TOOLS — every surface reads that list), and None when the tool's
+    own description was entirely about something absent, which makes the tool itself a
+    promise this surface cannot keep.
+    """
+    changed = False
+
+    def walk(node, top):
+        nonlocal changed
+        if isinstance(node, dict):
+            out = {}
+            for key, value in node.items():
+                if key == "description" and isinstance(value, str):
+                    kept = _keep_sentences(value, gone)
+                    if kept != value:
+                        changed = True
+                        guidance = ABSENT_TOOL_GUIDANCE.get(tool.get("name")) if top else None
+                        if guidance:
+                            kept = (kept + " " + guidance).strip()
+                    out[key] = kept
+                else:
+                    out[key] = walk(value, False)
+            return out
+        if isinstance(node, list):
+            return [walk(item, False) for item in node]
+        return node
+
+    rewritten = walk(tool, True)
+    if not changed:
+        return tool
+    if not (rewritten.get("description") or "").strip():
+        return None
+    return rewritten
+
+
 def tools_for(name: str | None, tools) -> list:
-    """`tools` minus everything this surface's profile excludes.
+    """`tools` minus everything this surface's profile excludes — including the mentions.
 
     The one place a tool list is narrowed. Callers pass core's canonical TOOLS; what
-    comes back is what the model is allowed to know exists.
+    comes back is what the model is allowed to know exists. Two things are removed:
+    the excluded tools themselves, and any sentence in a SURVIVING tool's description
+    that names one of them (see ABSENT_TOOL_GUIDANCE). A surface that excludes nothing
+    gets core's list back object for object, unchanged.
     """
     gone = excluded_tools(name)
-    return [t for t in tools if t.get("name") not in gone]
+    if not gone:
+        return list(tools)
+    out = []
+    for tool in tools:
+        if tool.get("name") in gone:
+            continue
+        scrubbed = _without_absent_tools(tool, gone)
+        if scrubbed is not None:
+            out.append(scrubbed)
+    return out
 
 
 def surface_note(name: str | None, tools=None) -> str:
