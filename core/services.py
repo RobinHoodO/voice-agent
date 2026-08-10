@@ -8,6 +8,7 @@ Every handler returns one terse, speakable string (kernel_tools.py convention).
 import datetime
 import json
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.request
@@ -200,6 +201,178 @@ def notion_search(args: dict) -> str:
     if not names:
         return f"Nothing in Notion for {query}."
     return f"Top Notion hits: {'; '.join(names)}."
+
+
+def _rich(parts) -> str:
+    """Notion's rich_text arrays -> plain text."""
+    return "".join(t.get("plain_text", "") for t in (parts or []))
+
+
+# How a block reads when spoken. Notion has ~30 block types; these are the ones that
+# carry prose. Anything absent is skipped rather than guessed at — an unlabelled
+# "Untitled" in the middle of a read-aloud is worse than a gap.
+_BLOCK_PREFIX = {
+    "heading_1": "\n", "heading_2": "\n", "heading_3": "\n",
+    "bulleted_list_item": "• ", "numbered_list_item": "• ",
+    "quote": "> ", "callout": "! ",
+}
+_PLAIN_BLOCKS = ("paragraph", "toggle", "code", "child_page", "child_database")
+
+
+def _blocks_to_text(blocks: list, depth: int = 0) -> list:
+    lines = []
+    for b in blocks:
+        kind = b.get("type") or ""
+        body = b.get(kind) or {}
+        if kind == "child_page":
+            text = f"[sub-page: {body.get('title', '')}]"
+        elif kind == "child_database":
+            text = f"[database: {body.get('title', '')}]"
+        elif kind == "to_do":
+            text = ("[x] " if body.get("checked") else "[ ] ") + _rich(body.get("rich_text"))
+        elif kind in _BLOCK_PREFIX or kind in _PLAIN_BLOCKS:
+            text = _BLOCK_PREFIX.get(kind, "") + _rich(body.get("rich_text"))
+        else:
+            continue                       # tables, embeds, images: nothing to say
+        text = text.strip()
+        if text:
+            lines.append(("  " * depth) + text)
+    return lines
+
+
+def notion_read_page(args: dict) -> str:
+    """The CONTENT of a Notion page, not just its title.
+
+    Resolution is by search, because Robin says "the Borderland budget page", never a
+    UUID. A bare id or a notion.so URL is accepted too — pasting one is the other way
+    this gets called.
+    """
+    query = (args.get("query") or args.get("page") or "").strip()
+    if not query:
+        return "Which Notion page?"
+
+    page_id, title = None, query
+    m = re.search(r"([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+                  query.replace("-", "") if "notion.so" not in query else query)
+    if m and ("notion.so" in query or len(query.strip()) <= 40):
+        page_id = m.group(1)
+    if not page_id:
+        try:
+            data = _notion("POST", "/search",
+                           {"query": query, "page_size": 5,
+                            "filter": {"property": "object", "value": "page"}})
+        except Exception as e:
+            _log(f"notion read: search failed: {e!r}")
+            return "I couldn't reach Notion."
+        results = data.get("results") or []
+        if not results:
+            return f"I couldn't find a Notion page for {query}."
+
+        # Notion's /search ranking is weak — asking for "Borderland 2025 Packing Prep"
+        # put an unrelated Toniic task first. Reading the WRONG page confidently is the
+        # worst outcome here, so re-rank by how much of what Robin said is in the title.
+        def _title_of(row) -> str:
+            for p in (row.get("properties") or {}).values():
+                if p.get("type") == "title" and p.get("title"):
+                    return _rich(p["title"])
+            return _rich(row.get("title"))
+
+        # Only DISTINCTIVE words may decide which page gets read aloud. Scoring on every
+        # token ≥3 chars matched "not" against "MCP Is Not Good Yet" and "2025" against a
+        # conference talk — both scored, so both were read out as if they were the page
+        # Robin asked for. A bare year or a filler word is not evidence of anything.
+        _STOP = {"the", "and", "for", "with", "that", "this", "from", "not", "does", "was",
+                 "are", "you", "your", "our", "his", "her", "its", "但", "page", "notion",
+                 "about", "into", "onto", "what", "when", "where", "which", "some", "any",
+                 "all", "can", "could", "would", "should", "have", "has", "had", "get",
+                 "got", "there", "their", "then", "than", "them", "they"}
+        wanted = [w for w in re.findall(r"\w+", query.lower())
+                  if len(w) >= 4 and w not in _STOP and not w.isdigit()]
+
+        def _rank(rows):
+            out = []
+            for i, row in enumerate(rows):
+                t = _title_of(row)
+                tl = t.lower()
+                # Word boundaries, not substrings: "prep" matched "Prepare" and handed
+                # Robin an unrelated Toniic task as if it were the page he asked for.
+                hits = sum(1 for w in wanted if re.search(rf"\b{re.escape(w)}\b", tl))
+                exact = 2 if tl.strip() == query.lower().strip() else 0
+                out.append((exact + hits, -i, row, t))   # -i keeps Notion's order as tie-break
+            out.sort(reverse=True)
+            return out
+
+        # ONE distinctive word in common is not identification — it is a coincidence.
+        # "prep" hit "Send prep-meeting invite", "something" hit "go build something that
+        # isn't", and each was read aloud as though it were the page Robin named. So a
+        # page is only read when MOST of what he said is in its title; anything less and
+        # she asks. Reading the wrong document confidently is the failure that matters —
+        # a question costs him three seconds.
+        def _good(rank_row) -> bool:
+            score = rank_row[0]
+            return bool(wanted) and (score >= 2 or score >= max(1, (len(wanted) + 1) // 2))
+
+        ranked = _rank(results)
+        # Notion's /search also gets WORSE as you add words — "Borderland 2025 Packing
+        # Prep" returned five unrelated rows while plain "Borderland" found the page.
+        if wanted and not _good(ranked[0]):
+            broad = max(wanted, key=len)
+            _log(f"notion read: weak title match for {query!r}, broadening to {broad!r}")
+            try:
+                data = _notion("POST", "/search",
+                               {"query": broad, "page_size": 5,
+                                "filter": {"property": "object", "value": "page"}})
+                if data.get("results"):
+                    wider = _rank(data["results"])
+                    if _good(wider[0]):
+                        ranked = wider
+            except Exception as e:
+                _log(f"notion read: broadened search failed: {e!r}")
+        if wanted and not _good(ranked[0]):
+            others = "; ".join(t for _s, _i, _r, t in ranked[:4] if t)
+            return (f"I'm not sure which page you mean by “{query}”. Closest titles I "
+                    f"found: {others}. Which one?")
+        score, _, top, best_title = ranked[0]
+        page_id = top.get("id")
+        title = best_title or title
+        if len(results) > 1:
+            _log(f"notion read: {len(results)} matches for {query!r}, took {title!r} (score {score})")
+
+    lines, cursor, pages = [], None, 0
+    try:
+        # Paginate, but stop well before a 500-block page turns into a monologue.
+        while pages < 3:
+            path = f"/blocks/{page_id}/children?page_size=100"
+            if cursor:
+                path += f"&start_cursor={cursor}"
+            data = _notion("GET", path)
+            blocks = data.get("results") or []
+            lines += _blocks_to_text(blocks)
+            # One level of nesting: toggles and list items hold most of the real content.
+            for b in blocks:
+                if b.get("has_children") and b.get("type") in ("toggle", "bulleted_list_item",
+                                                               "numbered_list_item", "callout"):
+                    try:
+                        kid = _notion("GET", f"/blocks/{b['id']}/children?page_size=50")
+                        lines += _blocks_to_text(kid.get("results") or [], depth=1)
+                    except Exception:
+                        pass               # a nested read failing must not lose the page
+            cursor = data.get("next_cursor")
+            pages += 1
+            if not data.get("has_more"):
+                break
+    except Exception as e:
+        _log(f"notion read: blocks failed: {e!r}")
+        return f"I found {title} but couldn't read its content."
+
+    if not lines:
+        return f"{title} has no readable text content — it may be a database or only images."
+    body = "\n".join(lines)
+    # Spoken budget. The model summarises; handing it 40k chars of meeting notes wastes
+    # the window and it will paraphrase the top anyway.
+    if len(body) > 6000:
+        body = body[:6000].rsplit("\n", 1)[0] + "\n[…truncated — ask for a specific section]"
+    return f"Notion page “{title}”:\n{body}"
 
 
 # --- Front + Google (shell out to the workspace's production scripts) --------

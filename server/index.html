@@ -73,6 +73,9 @@
            autocapitalize="off" autocorrect="off" spellcheck="false">
     <button id="save">Save</button>
   </div>
+  <!-- Shown INSTEAD of the field once a token is stored: the field is setup, and setup
+       that never goes away reads as something still to do. -->
+  <button id="changetoken" hidden>Change access token</button>
   <small id="foot">not connected</small>
 </footer>
 
@@ -248,10 +251,30 @@ function setState(s){
 }
 function setLevel(v){ $("meterbar").style.width = Math.min(100, v * 100).toFixed(0) + "%"; }
 
+/* The token field is SETUP, not a control: once there is a token it goes away, and what
+   remains is the one thing Robin might still want — a way to replace it. Without that
+   escape hatch, hiding the field would mean a rotated token could never be entered on a
+   phone that already had the old one. */
+function showTokenField(show){
+  $("setup").hidden = !show;
+  $("changetoken").hidden = show;
+  if (show) $("token").focus();
+}
+function haveToken(){ return !!(localStorage.getItem("voiceToken") || "").trim(); }
+
 $("token").value = localStorage.getItem("voiceToken") || "";
+showTokenField(!haveToken());
+
 $("save").onclick = () => {
-  localStorage.setItem("voiceToken", $("token").value.trim());
+  const v = $("token").value.trim();
+  if (!v) { $("foot").textContent = "enter a token first"; return; }
+  localStorage.setItem("voiceToken", v);
   $("foot").textContent = "token saved";
+  showTokenField(false);
+};
+$("changetoken").onclick = () => {
+  $("token").value = localStorage.getItem("voiceToken") || "";
+  showTokenField(true);
 };
 
 /* ── audio graph ──────────────────────────────────────────────────────────── */

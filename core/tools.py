@@ -105,6 +105,18 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "read_pane",
+        "description": "Read what a herdr pane actually SAYS — its recent terminal output, verbatim (interface chrome stripped). Use when Robin asks what a pane said, what an agent is doing in detail, to catch up on a lane, or to answer a question about work happening in a terminal. `fleet` only summarises one line per pane and often reports 'nothing in its recent output' — this is the tool that reads the text. Panes have no names: say which one by the folder it's working in ('the jomoguide one'), its agent, or leave it empty for the pane on screen.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "pane": {"type": "string",
+                                    "description": "Folder, agent, or pane id. Empty/'focused' = the pane currently on screen."},
+                           "lines": {"type": "integer",
+                                     "description": "How many recent lines to read (default 120, max 400)."}},
+                       "required": []},
+    },
+    {
+        "type": "function",
         "name": "continue_task",
         "description": "Send follow-up feedback into the SAME pane that already worked on this — use this, not delegate, whenever Robin says continue, keep going, implement that fix, or otherwise means to keep going on existing work rather than start something new. If the pane is not already Pam's lane, it is adopted first; never target the protected orchestrator pane.",
         "parameters": {"type": "object",
@@ -145,9 +157,19 @@ TOOLS = [
     {
         "type": "function",
         "name": "notion_search",
-        "description": "Search Robin's Notion workspace (pages and databases) by keyword; speaks the top hits.",
+        "description": "Search Robin's Notion workspace (pages and databases) by keyword; speaks the top hits. This finds WHICH pages exist — to actually read what one SAYS, use notion_read_page.",
         "parameters": {"type": "object",
                        "properties": {"query": {"type": "string"}},
+                       "required": ["query"]},
+    },
+    {
+        "type": "function",
+        "name": "notion_read_page",
+        "description": "Read the CONTENT of one Notion page out loud — its actual text, headings, bullets and checkboxes, not just its title. Use whenever Robin asks what a page says, to summarise a page, or to answer a question from a document in Notion. Name the page the way he says it ('the Borderland budget page'); a notion.so URL or page id also works. notion_search only lists titles — this is the one that reads.",
+        "parameters": {"type": "object",
+                       "properties": {"query": {
+                           "type": "string",
+                           "description": "Page title, or a notion.so URL / page id."}},
                        "required": ["query"]},
     },
     {
@@ -1209,6 +1231,98 @@ def _pane_gist(pane, max_chars: int = 200) -> str:
     read = (_herdr("agent", "read", pane["pane_id"], "--source", "recent",
                    timeout=5) or {}).get("read") or {}
     return _gist_from_text((read or {}).get("text") or "", max_chars)
+
+
+def _match_pane(selector: str, records: list):
+    """Resolve what Robin SAID into one pane record, or None.
+
+    herdr panes carry no label — which is why she kept answering "unnamed pane, unnamed
+    pane, unnamed pane". So match on what a person actually has to go on: the workspace,
+    the folder the pane is working in, its agent, or "the one on screen".
+    """
+    sel = (selector or "").strip().lower()
+    if not sel or sel in ("focused", "current", "this one", "the current one",
+                          "on screen", "the one on screen"):
+        return next((r for r in records if r.get("focused")), None)
+    for r in records:                                   # exact pane id wins
+        if sel == str(r.get("pane_id", "")).lower():
+            return r
+    scored = []
+    for r in records:
+        hay = " ".join(str(r.get(k) or "") for k in
+                       ("label", "name", "workspace", "workspace_label", "foreground_cwd",
+                        "cwd", "agent", "task")).lower()
+        hits = sum(1 for word in sel.split() if word and word in hay)
+        if hits:
+            scored.append((hits, r))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: -t[0])
+    return scored[0][1]
+
+
+def _pane_choices(records: list) -> str:
+    """How to describe the panes back to him when a selector missed."""
+    out = []
+    for r in records:
+        where = os.path.basename(str(r.get("foreground_cwd") or r.get("cwd") or "")) or "?"
+        bits = [f"{r.get('agent') or 'shell'} in {where}"]
+        if r.get("focused"):
+            bits.append("on screen now")
+        if r.get("agent_status"):
+            bits.append(str(r["agent_status"]))
+        out.append(" — ".join(bits))
+    return "; ".join(out)
+
+
+def read_pane(args: dict) -> str:
+    """What a herdr pane actually SAYS. Read-only, and deliberately NOT ownership-gated.
+
+    `_own_pane` guards every MUTATING call so Pam can never steer Robin's or Hermes'
+    lanes. Reading is a different act: Robin asks "what's that one doing?" about panes he
+    owns, and refusing would make the tool useless for its whole purpose. Nothing here
+    writes, sends keys, or adopts.
+    """
+    if not _herdr_up():
+        return "herdr isn't running, so there are no panes to read."
+    records = _speakable_labels()
+    if not records:
+        return "There are no herdr panes open."
+    selector = (args.get("pane") or args.get("name") or "").strip()
+    pane = _match_pane(selector, records)
+    if pane is None:
+        if selector:
+            return (f"I don't see a pane matching “{selector}”. Open panes: "
+                    f"{_pane_choices(records)}.")
+        return f"Nothing is focused right now. Open panes: {_pane_choices(records)}."
+
+    try:
+        lines_arg = max(20, min(400, int(args.get("lines") or 120)))
+    except (TypeError, ValueError):
+        lines_arg = 120
+    # `agent read`, NOT `pane read`: the pane form prints RAW TEXT, so `_herdr`'s
+    # json.loads returns None and the read silently reads as "no output". The agent form
+    # is the JSON one, it takes any pane id, and `_pane_gist` already relies on it.
+    read = (_herdr("agent", "read", pane["pane_id"], "--source", "recent",
+                   "--lines", str(lines_arg), timeout=8) or {}).get("read") or {}
+    text = read.get("text") or ""
+    if not text.strip():
+        return "That pane has produced no recent output."
+
+    # Same cleanup the gist uses: strip ANSI, drop TUI chrome, keep the prose.
+    kept = []
+    for ln in _ANSI_RE.sub("", text).splitlines():
+        ln = ln.replace(" ", " ").rstrip()
+        if ln.strip() and not _CHROME_RE.search(ln):
+            kept.append(ln)
+    if not kept:
+        return "That pane's recent output is all interface chrome — nothing worth reading out."
+    body = "\n".join(kept)
+    if len(body) > 5000:            # spoken budget; the model summarises the rest
+        body = "[…earlier output trimmed]\n" + body[-5000:]
+    where = os.path.basename(str(pane.get("foreground_cwd") or pane.get("cwd") or "")) or "?"
+    return (f"Pane {pane.get('pane_id')} ({pane.get('agent') or 'shell'} in {where}"
+            f"{', on screen' if pane.get('focused') else ''}):\n{body}")
 
 
 def _fleet_topics(panes, sidecars, cap: int = 12) -> str:

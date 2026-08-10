@@ -29,7 +29,8 @@ from core.realtime_client import VOICE, _selftest
 from core.shell import Shell
 from core import services
 from core.tools import (TOOLS, LOCAL_HIGH_STAKES, _extract_json, _put_text,
-                   delegate_task, fleet, continue_task, close_finished_tasks, close_gate)
+                   delegate_task, fleet, continue_task, close_finished_tasks, close_gate,
+                   read_pane)
 
 
 # Rough all-in OpenAI Realtime audio estimate; tune without code changes if billing shifts.
@@ -1132,6 +1133,10 @@ class LiveSession(AudioCoreMixin):
             out = await self._loop.run_in_executor(None, fleet, args)
             _log(f"fleet: {out}")
             config.activity("🛤  checked herdr fleet")
+        elif name == "read_pane":
+            out = await self._loop.run_in_executor(None, read_pane, args)
+            _log(f"read_pane: {args.get('pane', 'focused')!r} -> {len(out)} chars")
+            config.activity(f"🛤  read pane: {args.get('pane') or 'the one on screen'}")
         elif name == "continue_task":
             out = await self._loop.run_in_executor(None, continue_task, args)
             _log(f"continue_task: {out}")
@@ -1158,8 +1163,9 @@ class LiveSession(AudioCoreMixin):
                 f"CONFIRMATION REQUIRED: {_confirmation_preview(name, args)}. "
                 "Ask the user to confirm out loud.")
         elif name in ("notion_create_task", "notion_search", "notion_list_tasks",
-                      "notion_update_task", "front_search", "front_draft",
-                      "gmail_search", "calendar_add", "calendar_list", "drive_search"):
+                      "notion_update_task", "notion_read_page", "front_search",
+                      "front_draft", "gmail_search", "calendar_add", "calendar_list",
+                      "drive_search"):
             handler = getattr(services, name)
             out = await self._loop.run_in_executor(None, handler, args)
             _log(f"{name}: {out[:120]}")
