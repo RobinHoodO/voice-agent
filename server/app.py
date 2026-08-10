@@ -192,9 +192,13 @@ class Conn:
 
     `owns_conversation` is the per-surface half of "one brain, one conversation": true
     for the ONE tab whose `LiveSession` was started, false for every other tab holding a
-    socket. It is set and cleared only from the server's event loop thread, which is why
-    it needs no lock — and only inside stretches of `/live` that contain no `await`,
-    which is what makes the check-then-claim atomic.
+    socket.
+
+    It is only ever GRANTED on the server's event loop thread, inside a stretch of
+    `/live` that contains no `await` — that is what makes check-then-claim atomic, and
+    why no lock is needed. It may be CLEARED from another thread (`_evict_phone` runs on
+    whichever thread took the floor, e.g. the AppKit thread on a desk double-tap); that
+    direction is a plain bool store and can only ever make the invariant more true.
     """
 
     def __init__(self, key: str, bridge: BrowserAudioBridge, session):
