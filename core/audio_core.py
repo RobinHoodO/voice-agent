@@ -133,6 +133,17 @@ class AudioCoreMixin:
                 rms = float(np.sqrt(np.mean(s.astype(np.float32) ** 2)))
                 lvl = min(1.0, rms / 4000.0)
                 # fast attack, slow decay — feels like it's catching your words
+                #
+                # MEASURED COST, left as it is on purpose (2026-08-10, phone surface
+                # review): `_pump_mic` ends a turn off this SMOOTHED level, so after loud
+                # speech it has to decay from 1.0 to the 0.10 bar — ~1.4 s at 0.85/frame
+                # — BEFORE the `silence_sec` timer starts. End-of-turn therefore takes
+                # ~3.0 s against a configured 1.5 s. Both surfaces pay it equally, which
+                # is why the phone still matches the desk; measuring silence off the raw
+                # frame RMS would halve it, but the same `level > bar` comparison also
+                # drives barge-in, where the decay is what bridges the gaps BETWEEN words
+                # inside the 0.25 s hold. Changing it is a change to how interrupting her
+                # feels, and belongs in a round that can verify it on Robin's actual mic.
                 self.level = lvl if lvl > self.level else self.level * 0.85 + lvl * 0.15
         except Exception:
             pass
