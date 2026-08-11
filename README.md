@@ -1,243 +1,306 @@
-# Thrivbe Voice (macOS menubar)
+# Pam — Thrivbe Voice
 
-A standalone macOS **menubar app** you talk to — one hands-free, agentic voice
-conversation. **Double-tap Control** to start/stop it; a small glowing glass **orb**
-appears at the bottom-center of your screen while it's live. It speaks back in an
-OpenAI voice (speech-to-speech, low latency — no separate TTS), reads what's under
-your cursor, can run an agentic shell, and remembers across sessions.
+Pam is a full-duplex, agentic voice assistant that runs as a macOS menubar app.
+Double-tap **Control** and speak naturally: she can answer with live screen context,
+use connected business systems, delegate longer work to background agents, remember
+across conversations, and speak the result when that work finishes.
 
-- **Engine:** OpenAI **Realtime API** (`gpt-realtime`), speech-to-speech.
-- **The only key you need:** an OpenAI API key (stored in your macOS Keychain).
+Pam has **one brain on the Mac and two seats**:
 
-## Live conversation (the whole app)
+- **Desk:** the menubar app, Mac microphone and speaker, screen context, clipboard,
+  and—when enabled—a persistent shell.
+- **Phone PWA:** the iPhone is a remote microphone and speaker over the tailnet. It
+  drives the same Pam process, memory, tools, and conversations; it is not a second
+  agent.
 
-Double-tap **Control** to start/stop a hands-free, barge-in-able conversation.
-Server-side VAD handles turn-taking; talk over it to interrupt. A frosted-glass
-**orb** shows state by colour + a slow breathing glow — mint = listening,
-periwinkle = thinking, amber = speaking (bottom-center, no text).
+The live provider is selectable in Settings:
 
-The agent is a **proactive, system-wide agentic terminal**:
+- **Gemini Live** — the current production path, using `gemini-3.1-flash-live-preview`.
+- **OpenAI Realtime** — the alternate realtime speech-to-speech backend.
 
-- **Persistent shell** — one zsh stays alive for the session; `cd`, env vars, and
-  activated venvs persist. Starts in your home folder, acts anywhere on the Mac.
-  Self-healing: a command over ~20s is killed and the shell resets (steered to
-  Spotlight `mdfind`, never `find ~`). **Off by default** — enable via the
-  **Agentic shell** menu toggle.
-- **Skill / agent activation** — shells out to `pi -p --model deepseek-v4-flash "..."`
-  (a headless AI agent with file/bash tools + your skills); long jobs backgrounded.
-- **Cross-session memory** — a `remember` tool appends notes to a memory log; the
-  recent tail is reloaded each session start, so it remembers across restarts.
-- **Cursor-aware** — each turn it sees the UI element + selected text under your mouse.
+Both providers are normalized behind the same session, tool, memory, and safety
+layers. Model keys are stored in the macOS Keychain.
 
-## How it works (architecture)
+## What Pam can do today
 
-The "agentic" part is live mode: instead of a request→reply turn, the agent holds
-an open voice session in which it can **act on your Mac** — run shell commands,
-delegate to other AI agents, and remember things — and narrate what it's doing, all
-hands-free. Here's the full picture.
+- Hold a continuous, barge-in-able voice conversation with streamed audio in both
+  directions.
+- Read text under the cursor, focused-window Accessibility text, and an optional
+  window screenshot on every desktop turn.
+- Use **49 declared tools** spanning the Mac, Notion, email, calendar, Drive, CRM,
+  Bloom, knowledge search, memory, advisor simulations, and agent fleets.
+- Hand long coding or research work to named `herdr` lanes and return immediately;
+  finished work is announced aloud later.
+- Continue an existing lane, inspect terminal output, list all running work, and close
+  finished Pam-owned lanes.
+- Store searchable local conversations and durable learnings, with crash-safe turn
+  journaling.
+- Use the same assistant from the phone without exposing the desktop shell, screen, or
+  paste controls to that surface.
+- Stage high-stakes actions, read the preview aloud, and wait for an explicit spoken
+  confirmation.
+- Detect repeated or runaway tool use, stalled model responses, dead sockets, and
+  abandoned sessions.
 
-### Threading model
+## System map
 
-Three things run at once and must not block each other:
+```mermaid
+flowchart LR
+    Desk["Desk seat<br/>menubar · mic · speaker · screen"]
+    Phone["Phone PWA<br/>remote mic + speaker"]
+    Floor["Conversation floor<br/>one active seat"]
+    Core["Pam core<br/>LiveSession"]
+    Model["Gemini Live<br/>or OpenAI Realtime"]
+    Local["This Mac<br/>shell · clipboard · herdr"]
+    Direct["Direct services<br/>Notion · Front · Gmail<br/>Calendar · Drive · web"]
+    Kernel["Thrivbe OS kernel<br/>memory · Bloom · CRM<br/>search · graph · fleets"]
+    State["Local state<br/>SQLite · journal · config · logs"]
 
-- **Main thread (rumps):** owns the menu bar and the floating pill. AppKit is not
-  thread-safe, so the pill is only ever touched here, reconciled every 0.3s from a
-  plain `self.status` string the other threads write.
-- **Hotkey thread (pynput):** a global key listener — a double-tap of Control toggles
-  the live session. Every callback is wrapped in try/except, since an exception in a
-  key callback would kill the whole listener (no more hotkey).
-- **Live-session thread (`realtime.py`):** when live mode starts, a daemon thread
-  spins up its own asyncio event loop and opens the Realtime WebSocket. All the
-  socket I/O, audio, and tool calls live here. Audio in/out each get their own
-  helper thread/stream on top.
-
-Cross-thread hand-offs are deliberate: the mic (a PortAudio callback thread) pushes
-bytes to the asyncio loop via `call_soon_threadsafe`; blocking shell calls run in a
-thread-pool executor so they never stall the socket loop.
-
-### A live turn, start to finish
-
-1. **You speak.** The mic stream (24 kHz PCM16) streams to the Realtime socket as
-   `input_audio_buffer.append` frames. The server's **VAD** decides when you've
-   stopped (`speech_started` / `speech_stopped`).
-2. **Barge-in.** If you start talking while it's speaking, on `speech_started` we
-   flush the audio output queue and send `response.cancel` — it shuts up immediately.
-3. **Context injection.** On `speech_stopped`, before asking for a reply, the agent
-   grabs **what's under your mouse cursor right now** (the focused UI element + any
-   selected text, read via the macOS Accessibility API — no clipboard) and injects it
-   as a conversation item, then sends `response.create`. So every turn knows what
-   you're pointing at. (VAD is configured `create_response: false` precisely so we can
-   slip this context in before each response.)
-4. **It thinks / talks / acts.** The model streams audio back (`output_audio.delta` →
-   speaker) and/or calls a **tool**. The pill cycles listening → thinking → speaking.
-
-### Tools — how it acts
-
-The model is given two function tools (OpenAI Realtime "flat" tool schema):
-
-- **`run_shell(command)`** — runs the command in the session's **persistent shell**
-  (see below) and feeds stdout/stderr back as a `function_call_output`, then triggers
-  another response so it can speak about the result. This is the whole "agentic
-  terminal": ask it to do something, it issues real commands as you.
-- **`remember(note)`** — appends a timestamped line to `.voice-memory.log`.
-
-Beyond those two, `core/tools.py` declares a longer list of function tools — herdr task
-delegation, kernel/Bloom/CRM calls, and a set of direct service tools in
-`core/services.py` (Notion, Front, Gmail, Calendar, Drive) that `core/live_session.py`
-dispatches generically by name. The Notion ones cover the full task lifecycle:
-`notion_create_task` (capture, with Robin's defaults), `notion_list_tasks` (read —
-filter by status and/or a title keyword), and `notion_update_task` (change status —
-e.g. Focus → Backlog — and/or push a due date, resolved by title; an ambiguous
-title match is surfaced for Robin to disambiguate rather than guessed at). All three
-talk to Notion's REST API directly with the key from `config.secret("notion")`
-(Keychain, `NOTION_KEY` env fallback in dev) — no MCP layer in the hot path.
-
-When a tool result comes back, the agent loops (`response.create` again), so it can
-chain commands — run something, read the output, decide the next command, then
-finally speak — without you saying anything in between.
-
-### The persistent shell
-
-`run_shell` does **not** spawn a fresh subprocess per command. Each live session
-holds one long-lived `zsh` (`Shell` in `realtime.py`):
-
-- **One process, whole session.** `cd`, exported env vars, and activated venvs persist
-  between commands — it behaves like a real terminal you're dictating to. Starts in
-  your home folder, so it's system-wide, not boxed to the workspace.
-- **Sourced, non-interactive.** It's a non-interactive `zsh` (so no prompt characters
-  pollute the output) that `source ~/.zshrc` at startup — that loads your full `PATH`
-  and shell functions, including the `claude` wrapper.
-- **Output capture.** After each command it prints a random sentinel marker plus the
-  exit code (`print -r -- "{MARK}$?"`); the reader collects everything up to that
-  marker via `select()` with a deadline, strips ANSI, and returns it. That's how it
-  knows exactly where one command's output ends.
-- **Self-healing.** The shell runs in its own process group (`start_new_session`). A
-  command that runs longer than ~20s would otherwise wedge the shell (zsh runs piped
-  input serially, so retries queue behind it) — so on timeout the whole group is
-  `SIGKILL`ed and the shell respawns clean (cwd/env reset to home). The prompt steers
-  the model to fast tools (Spotlight `mdfind`, known project dirs) and away from
-  disk-wide scans like `find ~`.
-
-### Activating skills and other agents
-
-Because the persistent shell has your real `PATH` and shell functions, the agent can
-run **`pi -p --model deepseek-v4-flash "<instruction>"`** — a headless `pi` agent
-(read/bash/edit/write tools + your `~/.claude/skills`) running on DeepSeek V4 Flash.
-That's how a quick voice request can fan out into real work ("run the front skill to
-draft a reply"). Since a delegation can take a while and a blocking shell call would
-freeze the conversation, the system prompt tells it to background long jobs
-(`pi -p --model deepseek-v4-flash "..." > /tmp/voice-task.txt 2>&1 &`) and read the
-file back when you ask how it went.
-
-### Cross-session memory
-
-The agent is told to call `remember(note)` whenever you state a durable fact,
-preference, or task. Those lines accumulate in `.voice-memory.log` (in the project
-folder, git-ignored). On **every** session start, the recent tail of that log is
-folded into the session instructions under "What you remember from before" — so if you
-talk to it, close it, and reopen it tomorrow, it still knows. The same startup blob
-also lists the available skill categories and points it at `~/Thrivbe-AI/CLAUDE.md`.
-
-### Audio devices
-
-Pick your mic and speaker from the menu (**🎙 Microphone** / **🔊 Speaker**) — it lists
-every device, checkmarks the current choice, and applies on the next live session.
-Tip: don't use a Bluetooth headset as the *mic* — macOS drops it into low-quality
-"call mode" and playback gets quiet. The smart default captures from the built-in mic
-and plays to a headset if one is present.
-
-## Build it
-
-The app is packaged as a self-contained macOS bundle so Accessibility/Input
-Monitoring permissions attach to **Thrivbe Voice.app**, not to a changing
-Homebrew Python binary.
-
+    Desk --> Floor
+    Phone --> Floor
+    Floor --> Core
+    Core <--> Model
+    Core --> Local
+    Core --> Direct
+    Core --> Kernel
+    Core --> State
 ```
-cd /Users/robinsverd/Thrivbe-AI/projects/voice-agent
+
+The architectural boundary is deliberate:
+
+- `core/` is the surface-independent brain. It imports without AppKit, PortAudio,
+  Keychain, or other Mac-only dependencies.
+- `mac/` provides the menubar, audio devices, hotkey, screen, clipboard, settings,
+  phone host, and Mac capability adapters.
+- `server/` is the browser/PWA transport running inside the Mac app process.
+- `core/backends/` contains only provider wire behavior; the rest of Pam consumes one
+  normalized event vocabulary.
+
+For the deeper structural map, see [ARCHITECTURE.md](ARCHITECTURE.md). For the phone
+transport and threat boundary, see [server/README.md](server/README.md).
+
+## One voice turn
+
+1. The active surface streams PCM16 microphone audio into `LiveSession`.
+2. Turn detection decides when speech starts and ends. Gemini uses local VAD; OpenAI
+   uses its configured Realtime turn detection.
+3. On the desk, screen text and the optional screenshot are captured concurrently.
+4. For Gemini, that context is sent as realtime text/video **before one
+   `activityEnd`**. Screen capture is prefetched while the user speaks, so context does
+   not add a second model turn or a long serial wait.
+5. The provider streams spoken audio, requests tools, or both.
+6. Tool results return through the provider-native continuation path. Gemini continues
+   directly from `toolResponse`; OpenAI receives `response.create` where required.
+7. User and agent transcripts are journaled during the session and persisted to SQLite
+   when it closes. Durable learnings are extracted in the background.
+
+The Gemini ordering in step 4 is important. Sending incomplete screen context after
+the response boundary previously left most turns waiting for a 15-second watchdog.
+The current path restores roughly two-second response starts in the deployed desktop
+trial while keeping text and screenshot context.
+
+## Connected tools
+
+`core/tools.py` currently declares **49 tools**. Settings → **Tools** shows the live
+schema, descriptions, arguments, disabled state, and confirmation badges for the next
+conversation.
+
+| Area | Connected tools | What they reach |
+|---|---|---|
+| Mac and session | `run_shell`, `put_text`, `focus`, `set_prompt`, `end_conversation` | Persistent zsh, clipboard/paste, project context, standing instructions, and session control. |
+| Local and shared memory | `remember`, `recall`, `kernel_remember`, `kernel_recall`, `kernel_memo` | Local learnings/conversations plus Thrivbe OS ONE memory and unified inbox. |
+| Background work and fleets | `delegate`, `continue_task`, `fleet`, `read_pane`, `close_finished_tasks`, `os_delegate`, `hermes_fleet` | Local `herdr` lanes, Thrivbe OS workers, and Hermes fleet status. |
+| Notion | `notion_create_task`, `notion_search`, `notion_read_page`, `notion_list_tasks`, `notion_update_task` | Direct Notion task and page APIs. Task updates are intentionally limited to status and due date; broader edits are delegated. |
+| Mail, calendar, and files | `front_search`, `front_draft`, `gmail_search`, `gmail_send`, `calendar_add`, `calendar_list`, `drive_search` | Front, Gmail, Google Calendar, and Google Drive. Front creates drafts; Gmail send is confirmation-gated. |
+| Kernel control | `kernel_status`, `kernel_decide` | Pending approvals, attention items, recent runs, and explicit approval decisions. |
+| Bloom | `bloom_create_task`, `bloom_update_task`, `bloom_comment_task`, `bloom_list_projects`, `bloom_list_tasks` | Bloom projects and task boards through the Thrivbe OS kernel. Mutations follow kernel approval policy. |
+| Search, graph, and advice | `web_search`, `read_url`, `semsearch_query`, `hybrid_rag_search`, `cognee_ask`, `os_map_search`, `os_map_overview`, `council_list_advisors`, `council_ask_advisor`, `graph_get_node`, `graph_get_document` | Live web, Notion/wiki/skills/code search, community knowledge, the OS inventory, advisor simulations, and the system graph. |
+| CRM and inbox | `twenty_search_contacts`, `list_inbox_items` | Twenty CRM and the combined email/SMS/Beeper/LinkedIn inbox. |
+
+### How tool availability is decided
+
+The 49-tool inventory is the superset, not a promise that every seat always receives
+every tool:
+
+- **Agentic shell off:** `run_shell` and `delegate` are removed from the provider
+  schema. This is fail-closed; the model cannot merely decide to ignore the toggle.
+- **Phone seat:** `run_shell` and `put_text` are absent. The phone cannot run an
+  unwatched shell or paste into a Mac window the user cannot see. Delegation and the
+  connected services remain available because the actual work still runs on the Mac.
+- **Unknown surface:** receives the strict phone exclusions rather than desktop powers.
+- The dispatcher repeats the profile check even if a provider requests a stale or
+  hallucinated tool name.
+
+### Direct, local, and kernel-backed paths
+
+- **Local:** shell, clipboard, focus, memory, conversation control, and `herdr` pane
+  operations execute on the Mac process.
+- **Direct service clients:** Notion, Front, Gmail, Calendar, Drive, and web access use
+  the handlers in `core/services.py` and `core/web.py` without an MCP layer in the
+  realtime hot path.
+- **Kernel-backed:** Bloom, Twenty CRM, shared memory, semantic/RAG/graph searches,
+  advisor council, OS inventory, inbox, Hermes, approvals, and business delegation go
+  through the Thrivbe OS kernel.
+
+### Confirmation and loop protection
+
+At session setup, Pam combines the kernel's live `highStakes` manifest with local
+high-stakes tools such as `gmail_send`. A gated call is staged, summarized aloud, and
+executed only after a valid spoken confirmation. If the kernel manifest cannot be
+read, all kernel tools are treated as high-stakes rather than silently ungated.
+
+Tool work is bounded independently of the model:
+
+- After three identical calls inside 45 seconds, the next repeat is refused.
+- Six calls to the same tool name with changing arguments are refused.
+- Twelve tool calls for one genuine user utterance is the absolute ceiling.
+- Repeated writes to the same target are stopped before they can thrash a record.
+- A refusal breaker prevents the model from looping on the refusal response itself.
+
+## Desk experience
+
+1. Launch **Thrivbe Voice.app**.
+2. Double-tap **Control** to start Pam. Double-tap again to end the conversation.
+3. Speak normally. You can interrupt while she is talking; output is flushed and the
+   new turn takes the floor.
+4. Watch the menubar/pill state: listening, thinking/acting, or speaking.
+
+Settings controls the provider, model keys, voice, microphone, speaker, base folder,
+screen context layers, agentic shell, delegate backend, memory, quiet hours, urgent
+wake, activity window, and login behavior. Changes apply to the next conversation
+unless the panel says otherwise.
+
+## Phone PWA
+
+The phone surface is off by default because it opens a listener. To use it:
+
+1. Choose **📱 Phone surface: off** from the menubar to start it.
+2. Choose **Copy phone link + token**.
+3. Open the HTTPS URL on the iPhone, enter the token, and optionally add the page to the
+   Home Screen.
+4. Start talking. The browser sends microphone PCM over WebSocket and plays Pam's
+   returned audio through an `AudioWorklet`.
+
+The PWA is reached through `tailscale serve` on port `8443`, which proxies to the
+loopback-only FastAPI listener on `127.0.0.1:8767`. The access token is not displayed in
+the menubar, and the listener refuses broad `0.0.0.0` binding.
+
+Only one conversation can own Pam at a time. The shared conversation floor reports
+whether the desk or phone holds it and supports an explicit phone takeover that ends
+and persists the desk session through the normal path.
+
+## Memory and background work
+
+Pam's local state lives under `~/Library/Application Support/ThrivbeVoice/`:
+
+- `conversations.db` stores transcripts, FTS search data, and durable learnings.
+- `live-turns.journal` is fsynced during a conversation so a crash or power loss does
+  not erase the unsaved transcript.
+- `config.json` stores non-secret settings with owner-only permissions.
+- Background task sidecars/results let the menubar poller announce finished work.
+
+The prompt is seeded with relevant recall and recent learnings. On clean close, a
+background learning pass extracts durable facts and supersedes contradicted ones.
+Optional external recall providers can also be configured in Settings.
+
+Delegated jobs survive the voice conversation. Pam creates or adopts a named `herdr`
+lane, passes the user's verbatim transcribed request, and watches for its completion
+sentinel. Results are spoken automatically unless quiet hours defer the announcement.
+
+## Reliability and privacy boundaries
+
+- Stall watchdog: working tone at 6 seconds, spoken nudge at 15 seconds, reconnect at
+  35 seconds by default.
+- Gemini session-resumption handles preserve server-side conversation state across a
+  reconnect when the provider allows it.
+- Idle and maximum-session watchdogs stop forgotten conversations.
+- Audio playback is bounded; stale audio is dropped instead of building latency.
+- Desktop context can be enabled independently for cursor text, window text, and a
+  screenshot. All three off means speech-only turns.
+- Screen capture fails closed for excluded apps or when the frontmost window cannot be
+  identified.
+- Third-party PII tools are marked so future routed fallback models must pin one named,
+  no-train subprocess rather than fan out through an unnamed router.
+- Secrets are removed from subprocess environments before model-authored shell commands
+  run.
+- The optional reverse channel is disabled by default, workspace-scoped, tailnet-bound,
+  and separately confirmation-gated. It is not part of the normal phone conversation
+  path.
+
+## Build, run, and deploy
+
+Requirements: macOS, Homebrew Python 3.12 at `/opt/homebrew/bin/python3.12`, and the
+permissions listed below.
+
+Build the self-contained app bundle:
+
+```bash
 ./build_app.sh
 ```
 
-`build_app.sh` uses `/opt/homebrew/bin/python3.12`, installs the requirements,
-builds with `py2app`, copies the result to `./Thrivbe Voice.app`, and signs it
-ad-hoc with bundle id `com.thrivbe.voice-agent`.
+The script creates/refreshes `.venv`, installs dependencies, builds with `py2app`,
+copies `Thrivbe Voice.app` to the repository root, signs it, and verifies the signature.
+Run `./make_signing_cert.sh` once to create the stable **Thrivbe Voice Dev** identity;
+otherwise ad-hoc signing can invalidate macOS privacy grants after a rebuild.
 
-## Run it
-```
-cd /Users/robinsverd/Thrivbe-AI/projects/voice-agent
-./run.sh
-```
-A 🎙 appears in your menu bar. The icon shows state: 🎙 idle · 🔴 listening ·
-💭 thinking · 🗣 speaking. Menu has: live-conversation toggle, agentic-shell toggle,
-🎙 Microphone / 🔊 Speaker pickers, Set OpenAI key, Run setup again, Quit.
+Launch the bundle:
 
-### Deploying code changes without a rebuild
-A rebuild changes the bundle's signature and **resets all TCC permissions**. For
-pure code edits copy the file into the bundle and relaunch instead — grants are
-preserved. `core/` and `mac/` are copied verbatim into `Contents/Resources/lib/python3.12/`:
-
-```
-cp core/live_session.py "Thrivbe Voice.app/Contents/Resources/lib/python3.12/core/live_session.py"
-osascript -e 'quit app "Thrivbe Voice"'; open "Thrivbe Voice.app"
-```
-
-Only rebuild (`./build_app.sh`) when dependencies or `setup.py` change.
-
-### First run permissions
-The app runs as `Thrivbe Voice.app`, so grant permissions to **Thrivbe Voice**:
-
-1. **Microphone** — allow when macOS prompts on first recording.
-2. **Accessibility** — System Settings → Privacy & Security → Accessibility → add **Thrivbe Voice**.
-3. **Input Monitoring** — System Settings → Privacy & Security → Input Monitoring → add **Thrivbe Voice**.
-4. **Automation** — allow when macOS prompts for frontmost app/window/selection context.
-
-After changing Accessibility or Input Monitoring, quit and relaunch the app:
-
-```
-osascript -e 'quit app "Thrivbe Voice"'
+```bash
 ./run.sh
 ```
 
-### Test
+Deploy through the gated workflow:
 
-1. Confirm the 🎙 menu bar icon is visible.
-2. **Double-tap Control.** The glass orb should appear at the bottom-center (mint).
-3. Say a short question, then pause → orb goes periwinkle (thinking), then amber while
-   it speaks back out loud.
-4. Double-tap Control again to end; the orb fades out.
-5. If nothing happens, re-check Input Monitoring + Accessibility for **Thrivbe Voice**.
-
-## Always-on (auto-start at login, self-healing)
+```bash
+./deploy.sh --dry-run   # inspect gates and commands
+./deploy.sh mac         # rebuild/relaunch and verify every shipped Python file
+./deploy.sh server      # push and deploy the exact Git SHA to Thrivbe-1
+./deploy.sh             # both surfaces
 ```
-cp projects/voice-agent/com.thrivbe.voice-agent.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.thrivbe.voice-agent.plist
+
+Deployment refuses tool/prompt/high-stakes drift, an active conversation, and—for the
+server leg—an uncommitted tree. The server is deployed from Git, never by copying an
+ad-hoc list of files.
+
+## Permissions and secrets
+
+Grant permissions to **Thrivbe Voice.app**, not to a Homebrew Python executable:
+
+1. **Microphone** — live audio input.
+2. **Accessibility** — cursor and focused-window text.
+3. **Input Monitoring** — the global double-Control hotkey.
+4. **Screen Recording** — only required for screenshot/vision context.
+5. **Automation** — frontmost application/window queries when macOS prompts.
+
+After changing Accessibility, Input Monitoring, or Screen Recording, quit and relaunch
+the app.
+
+OpenAI and Gemini keys can be entered in Settings and are stored in the macOS Keychain
+under the `ThrivbeVoice` service. Development may fall back to environment variables;
+systemd deployments may use `$CREDENTIALS_DIRECTORY`. Config files never store model
+API keys.
+
+## Testing
+
+```bash
+.venv/bin/python -m pytest -q
+./drift_gate.sh
+./deploy.sh --dry-run
 ```
-Logs → `projects/voice-agent/agent.log`. Unload: `launchctl unload ...plist`.
-The launch agent opens `Thrivbe Voice.app`; do not launch `thrivbe_voice.py` directly
-for normal menu-bar use.
 
-## Knobs (top of `realtime.py`)
-- `MODEL` — `gpt-realtime` (GA Realtime model)
-- `VOICE` — default OpenAI voice id (`alloy`); overridable via `config live.voice`
-- `MIC_NAME` / `OUT_NAME` — default device name-substrings when none is picked
-- `MEMORY` — path of the cross-session memory log
+The suite covers provider normalization, Gemini's ordered context boundary, tool
+continuation, screen/privacy gates, confirmations, loop/thrash breakers, crash recovery,
+headless `core` imports, bundle dependencies, phone authentication/audio/floor behavior,
+reverse-channel sandboxing, and deployment refusal paths.
 
-Per-session behaviour (mic/speaker, voice, delegation, shell timeout, agentic-shell)
-comes from config — see below — not from constants.
+## Logs and local files
 
-## Config / secrets
-Per-user settings live in `~/Library/Application Support/ThrivbeVoice/config.json`
-(`core/config.py`); the **OpenAI API key is stored in the macOS Keychain** (service
-`ThrivbeVoice`), not on disk. Enter it via the menu (**Set OpenAI key…**) or first-run
-setup. OpenAI is the only key needed. Dev fallback: the key is also read from
-`~/Thrivbe-AI/.env` if present, so the original workspace setup keeps working.
+- Agent log: `~/Library/Logs/ThrivbeVoice/agent.log`
+- Activity journal: `~/Library/Logs/ThrivbeVoice/activity.log`
+- Config and memory: `~/Library/Application Support/ThrivbeVoice/`
+- Source-level architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Product direction: [PRODUCT.md](PRODUCT.md)
 
-First launch runs **onboarding** (paste OpenAI key → deep-links the Microphone /
-Accessibility / Input Monitoring panes). Re-run any time via **Run setup again…**.
-
-> Productizing this (App Store reality, distribution, licensing, monetization) is
-> planned in **[PRODUCT.md](PRODUCT.md)**; tester install steps in **[INSTALL.md](INSTALL.md)**.
-
-## Notes
-- `run_shell` runs arbitrary commands as you via the system-wide persistent shell.
-  It's **off by default** (the Agentic shell toggle gates it) — a real safety boundary
-  for a tool you might hand to other people.
+Pam can run commands and change external systems when the relevant capabilities are
+enabled. Treat the Agentic shell toggle, phone listener, provider keys, and
+confirmation gates as real security boundaries—not convenience settings.
