@@ -81,6 +81,9 @@ TOOL_REPEAT_LIMIT = 3
 # window, whatever the args. Higher than the exact limit because a couple of genuine
 # follow-ups ("open tasks, then just the Focus ones") is normal; six is a spiral.
 TOOL_NAME_LIMIT = 6
+# Absolute work ceiling for one genuine user utterance. Per-name and exact-args guards
+# can both be evaded by rotating tools; a user turn must never execute without bound.
+TOOL_TURN_LIMIT = 12
 # Writes to the SAME record with different values. 3 allows an honest change of mind
 # ("Backlog — actually, Next Up") and catches the guessing spiral on the third.
 TOOL_TARGET_LIMIT = 3
@@ -226,6 +229,7 @@ class LiveSession(AudioCoreMixin):
         self._turns: list = []                        # ["you: …", "agent: …"] for this conversation
         self._delegated_upto: int = 0                 # cursor into _turns: what's already been handed off
         self._recent_tools: list = []                 # [(ts, "tool:args")] — loop guard window
+        self._turn_tool_calls: int = 0                # hard ceiling, reset only by real speech
         # Thrash history is DELIBERATELY separate: _recent_tools is cleared on every new
         # spoken turn, which is right for "re-run that search" but catastrophic for writes.
         # On 2026-08-08 the agent wrote the same 3 Notion rows ~40 times in 45s and neither
@@ -233,6 +237,8 @@ class LiveSession(AudioCoreMixin):
         # window, so the more he objected the longer it ran. Writes expire by time only.
         self._recent_targets: list = []               # [(ts, "target:tool:id")] — survives turns
         self._guard_refused_at: float = 0.0           # monotonic ts of last guard refusal (breaker)
+        self._screen_context_task: asyncio.Task | None = None  # capture hidden under speech time
+        self._last_screen_context: tuple | None = None  # (monotonic ts, text, jpeg), short fallback
         self._awaiting_reply_since: float | None = None  # loop.time() a turn went silent
         self._resume_handle: str | None = None        # provider handle, survives a reconnect
         self._reconnected = False                     # next session must say it dropped out
@@ -787,6 +793,12 @@ class LiveSession(AudioCoreMixin):
             await self._on_speech_started()
         elif k == events.SPEECH_STOPPED:
             await self._on_speech_stopped()
+        elif k == events.RESPONSE_INTERRUPTED:
+            # Gemini local VAD has already handled a genuine barge-in. This event only
+            # describes the model response lifecycle; it must not reset user-turn state.
+            self._flush_out()
+            self._speaking = False
+            self.on_state("listening")
         elif k == events.AUDIO_DELTA:
             self._awaiting_reply_since = None   # she's talking — stall watchdog stands down
             self._enqueue_audio(ne.audio)
@@ -825,15 +837,33 @@ class LiveSession(AudioCoreMixin):
         # whether or not Robin spoke in between, and speaking is exactly what he does
         # while trying to stop one.
         self._recent_tools.clear()
+        self._turn_tool_calls = 0
         self._awaiting_reply_since = None
         self._flush_out()                       # barge-in: stop talking
         if self._speaking:
             await self._backend.cancel_response()
             self._speaking = False
         self.on_state("listening")
+        # Start immediately and do not await: the utterance plus the silence window now
+        # pays the AppleScript/screenshot cost instead of the response-start path.
+        prior = getattr(self, "_screen_context_task", None)
+        if prior and not prior.done():
+            prior.cancel()
+        self._screen_context_task = asyncio.create_task(self._capture_screen_context())
+
+    async def _before_activity_end(self) -> None:
+        """Put Gemini 3.1 realtime context inside the one explicit user activity."""
+        if getattr(self._backend, "context_before_activity_end", False):
+            await self._inject_context_and_respond(already_replying=True)
+            _log("turn context prepared before activityEnd")
 
     async def _on_speech_stopped(self) -> None:
         self._last_speech = self._loop.time()   # reset the idle watchdog on any turn
+        if getattr(self._backend, "context_before_activity_end", False):
+            # `_pump_mic` already injected everything before activityEnd. That one signal
+            # now starts the reply; sending context or another trigger here recreates the
+            # interrupt/duplicate race this branch exists to remove.
+            return
         # The provider may already be replying: for a backend whose activityEnd doubles as
         # the end-of-turn signal, `_pump_mic` sent it a moment ago and generation is
         # underway. Asking for a response on top of that is what made her answer the same
@@ -869,6 +899,9 @@ class LiveSession(AudioCoreMixin):
         if self._ws:
             await self._backend.send_text_context(
                 f"[System context: the confirmed {tool} has executed. Result: {out}]")
+            if getattr(self._backend, "context_before_activity_end", False):
+                await self._backend.trigger_response()
+                self._awaiting_reply_since = self._loop.time()
 
     async def _speak_reconnect(self) -> None:
         """The previous socket died mid-conversation. Say so out loud — a silent
@@ -932,6 +965,39 @@ class LiveSession(AudioCoreMixin):
             except queue.Empty:
                 return tasks
 
+    async def _capture_screen_context(self) -> tuple[str, str]:
+        started = self._loop.time()
+        result = await self._grab_screen(screenshot=True)
+        self._last_screen_context = (self._loop.time(), result[0], result[1])
+        _log(f"screen prefetch ready in {int((self._loop.time() - started) * 1000)}ms")
+        return result
+
+    async def _get_turn_screen_context(self) -> tuple[str, str]:
+        task = getattr(self, "_screen_context_task", None)
+        if task is not None:
+            self._screen_context_task = None
+            try:
+                # Capture normally had the full utterance + 1.5s silence already. This
+                # small tail bound prevents a pathological screen API from delaying speech.
+                return await asyncio.wait_for(asyncio.shield(task), timeout=0.30)
+            except asyncio.TimeoutError:
+                cached = getattr(self, "_last_screen_context", None)
+                if cached and self._loop.time() - cached[0] <= 5.0:
+                    _log("screen prefetch still busy — using context cached <5s ago")
+                    return cached[1], cached[2]
+                _log("screen prefetch still busy after turn — replying without late context")
+                return "", ""
+            except asyncio.CancelledError:
+                return "", ""
+            except Exception as e:
+                _log(f"screen prefetch failed: {e!r}")
+                return "", ""
+        try:
+            return await asyncio.wait_for(self._capture_screen_context(), timeout=2.0)
+        except asyncio.TimeoutError:
+            _log("context grab timed out (>2s) — replying without screen context")
+            return "", ""
+
     async def _inject_context_and_respond(self, *, already_replying: bool = False) -> None:
         """Hand the model whatever context this turn has, then make sure a reply happens.
 
@@ -941,18 +1007,11 @@ class LiveSession(AudioCoreMixin):
         tool result) had no such signal and still needs the explicit trigger.
         """
         self.on_state("thinking")
-        # Grab text context and the screenshot concurrently so the silent gap before the
-        # reply stays as short as possible (each toggle may no-op and return fast).
-        # Cap the grab: it sits in the silent gap between "you stopped talking" and the
-        # reply, so a slow AppleScript/screenshot must not stall the turn.
+        # Text + screenshot were prefetched concurrently while the user was speaking.
+        # Direct/non-speech callers retain the old bounded on-demand capture fallback.
         # `_grab_screen` returns ('', '') outright on a surface with no screen — the
         # profile gate, not the privacy toggles (see `_may_read_the_screen`).
-        try:
-            ctx, shot = await asyncio.wait_for(
-                self._grab_screen(screenshot=True), timeout=2.0)
-        except asyncio.TimeoutError:
-            _log("context grab timed out (>2s) — replying without screen context")
-            ctx, shot = "", ""
+        ctx, shot = await self._get_turn_screen_context()
         if ctx or shot:
             _log(f"context injected ({len(ctx)} chars, screenshot={'yes' if shot else 'no'})")
             await self._backend.send_text_context(
@@ -1027,7 +1086,12 @@ class LiveSession(AudioCoreMixin):
         retrigger = now - self._guard_refused_at > GUARD_RETRIGGER_COOLDOWN_S
         self._guard_refused_at = now
         await self._backend.send_tool_result(call_id, message)
-        if retrigger:
+        if getattr(self._backend, "tool_response_starts_continuation", False):
+            # Gemini's sequential function-calling turn resumes from toolResponse itself.
+            # Sending clientContent here both interrupts that continuation and used to
+            # reset the loop guard through a fabricated SPEECH_STARTED event.
+            self._awaiting_reply_since = now
+        elif retrigger:
             await self._backend.trigger_response()
             self._awaiting_reply_since = now
         else:
@@ -1062,6 +1126,19 @@ class LiveSession(AudioCoreMixin):
                 "again or describe it to the user — use os_delegate if the work has to "
                 "happen somewhere else, or say plainly that you cannot do it here.")
             return
+        turn_calls = getattr(self, "_turn_tool_calls", 0)
+        if turn_calls >= TOOL_TURN_LIMIT:
+            _log(f"turn tool limit: refused {name} — {turn_calls} calls this user turn")
+            config.activity(f"⛔  turn tool limit: {turn_calls} calls — refused")
+            self._journal("refused_turn_tool_limit", name, args,
+                          f"{turn_calls} calls this user turn")
+            await self._refuse_guarded_call(
+                call_id,
+                f"TURN TOOL LIMIT: you have already made {turn_calls} tool calls for this "
+                "one user request. This call was NOT run. Stop using tools and answer "
+                "Robin out loud now with the best result you have, including any limits.")
+            return
+        self._turn_tool_calls = turn_calls + 1
         # Loop guard, before ANY dispatch: refuse the Nth identical call and say why, so
         # the model breaks out with an answer or a question instead of spinning silently.
         repeats = _tool_repeat_count(self._recent_tools, name, args, time.time())
@@ -1344,7 +1421,8 @@ class LiveSession(AudioCoreMixin):
         if privacy.touches_pii(name):
             self._pii_touched = True
         await self._backend.send_tool_result(call_id, out)
-        await self._backend.trigger_response()
+        if not getattr(self._backend, "tool_response_starts_continuation", False):
+            await self._backend.trigger_response()
         self._awaiting_reply_since = self._loop.time()   # arm the stall watchdog
 
     def _enqueue_audio(self, chunk: bytes) -> None:

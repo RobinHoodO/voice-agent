@@ -18,6 +18,7 @@ AGENT_TRANSCRIPT = "agent_transcript"
 TOOL_CALL = "tool_call"
 RESPONSE_CREATED = "response_created"
 RESPONSE_DONE = "response_done"
+RESPONSE_INTERRUPTED = "response_interrupted"
 ERROR = "error"
 OTHER = "other"   # anything not mapped above — ignored, never crashes the session
 
@@ -47,6 +48,13 @@ class Backend(ABC):
     # OpenAI: no — its turn_detection carries `create_response: false` precisely so the
     # app can inject cursor context first and trigger the reply itself.
     ends_turn_on_activity_end: bool = False
+    # Gemini 3.1 consumes ongoing text/video through realtimeInput, so screen context
+    # must be placed inside the explicit activity window, before activityEnd. Providers
+    # whose context is an independent conversation item keep the post-stop path.
+    context_before_activity_end: bool = False
+    # Gemini resumes a sequential function-calling turn as soon as toolResponse arrives.
+    # OpenAI needs response.create after its function_call_output item.
+    tool_response_starts_continuation: bool = False
     resume_handle: str | None = None   # providers that can resume a dropped session
 
     @abstractmethod
@@ -86,7 +94,7 @@ class Backend(ABC):
 
     @abstractmethod
     async def trigger_response(self) -> None:
-        """Ask the model to respond now (we drive turns ourselves, not the server)."""
+        """Close/trigger a synthetic response turn when no provider turn already did."""
 
     @abstractmethod
     async def cancel_response(self) -> None:

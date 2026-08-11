@@ -12,7 +12,7 @@ if __package__ in (None, ""):
 
 from core import caps, config
 from core.backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, OTHER,
-                           SPEECH_STARTED, TOOL_CALL, USER_TRANSCRIPT, Backend,
+                           RESPONSE_INTERRUPTED, TOOL_CALL, USER_TRANSCRIPT, Backend,
                            NormalizedEvent)
 from core.gemini_client import MODEL, HOST, _url
 from core.tools import to_gemini_schema
@@ -34,12 +34,15 @@ class GeminiBackend(Backend):
     # activityEnd IS Gemini's end-of-turn signal — it starts generating on its own.
     # See Backend.ends_turn_on_activity_end for the measurement that established this.
     ends_turn_on_activity_end = True
+    context_before_activity_end = True
+    tool_response_starts_continuation = True
 
     def __init__(self):
         self.ws = None
         self._pending_extra: list[NormalizedEvent] = []
         self._out_transcript_buf = ""
         self._in_transcript_buf = ""
+        self._activity_open = False
         self.resume_handle: str | None = None   # carried across reconnects by LiveSession
 
     async def connect(self):
@@ -103,23 +106,27 @@ class GeminiBackend(Backend):
 
     async def send_activity_start(self) -> None:
         await self.ws.send(json.dumps({"realtimeInput": {"activityStart": {}}}))
+        self._activity_open = True
 
     async def send_activity_end(self) -> None:
         # No transcript flush here: Gemini's ASR of the utterance streams in AFTER this
         # point, so flushing now would strand it (see parse_event's flush rule).
         await self.ws.send(json.dumps({"realtimeInput": {"activityEnd": {}}}))
+        self._activity_open = False
+        _log("gemini activityEnd sent — response boundary closed")
 
     async def send_text_context(self, text: str, image_b64: str | None = None) -> None:
+        # Gemini 3.1 only supports clientContent for initial-history seeding. Per-turn
+        # screen state is realtime input and belongs inside activityStart/activityEnd.
+        # Synthetic turns (announcement/reconnect/watchdog) arrive with no open activity,
+        # so open one here and let trigger_response close it.
+        if not self._activity_open:
+            await self.send_activity_start()
         if image_b64:
-            await self.ws.send(json.dumps({"clientContent": {
-                "turns": [{"role": "user", "parts": [{"inlineData": {
-                    "mimeType": "image/jpeg", "data": image_b64}}]}],
-                "turnComplete": False,
-            }}))
-        await self.ws.send(json.dumps({"clientContent": {
-            "turns": [{"role": "user", "parts": [{"text": text}]}],
-            "turnComplete": False,
-        }}))
+            await self.ws.send(json.dumps({"realtimeInput": {"video": {
+                "mimeType": "image/jpeg", "data": image_b64,
+            }}}))
+        await self.ws.send(json.dumps({"realtimeInput": {"text": text}}))
 
     async def send_tool_result(self, call_id: str, output: str) -> None:
         await self.ws.send(json.dumps({"toolResponse": {"functionResponses": [{
@@ -127,9 +134,14 @@ class GeminiBackend(Backend):
         }]}}))
 
     async def trigger_response(self) -> None:
-        await self.ws.send(json.dumps({"clientContent": {
-            "turns": [], "turnComplete": True,
-        }}))
+        # Every production caller either queued realtime text above or is closing a real
+        # audio activity. Keep a defensive explicit prompt for a bare trigger so an
+        # announcement/recovery path can never close an empty activity and go silent.
+        if not self._activity_open:
+            await self.send_activity_start()
+            await self.ws.send(json.dumps({"realtimeInput": {
+                "text": "[Respond now in one concise spoken sentence.]"}}))
+        await self.send_activity_end()
 
     async def cancel_response(self) -> None:
         # activityStart carries Gemini's interruption control.
@@ -189,7 +201,11 @@ class GeminiBackend(Backend):
                 if heard:
                     out_events.append(NormalizedEvent(USER_TRANSCRIPT, text=heard))
             if interrupted:
-                out_events.append(NormalizedEvent(SPEECH_STARTED))
+                # Local VAD already called LiveSession._on_speech_started for genuine
+                # speech. `interrupted` is a response lifecycle event and can also be
+                # caused by a client message; treating it as fresh speech erased the
+                # per-turn tool guard after every Gemini continuation.
+                out_events.append(NormalizedEvent(RESPONSE_INTERRUPTED))
             else:
                 out_events.extend(audio)
                 if complete:
@@ -219,7 +235,7 @@ def _selftest() -> None:
             ["disabled"] is True)
     assert setup["setup"]["tools"][0]["functionDeclarations"][0]["name"] == "foo"
     assert backend.parse_event({"setupComplete": {}}).kind == OTHER
-    assert backend.parse_event({"serverContent": {"interrupted": True}}).kind == SPEECH_STARTED
+    assert backend.parse_event({"serverContent": {"interrupted": True}}).kind == RESPONSE_INTERRUPTED
     audio = backend.parse_event({"serverContent": {"modelTurn": {"parts": [{"inlineData": {
         "mimeType": "audio/pcm;rate=24000", "data": base64.b64encode(b"abc").decode(),
     }}]}}})

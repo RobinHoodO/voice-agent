@@ -35,17 +35,16 @@ async def _selftest() -> int:
             "generationConfig": {"responseModalities": ["AUDIO"]},
             "systemInstruction": {"parts": [{"text": "Reply in one short sentence."}]},
         }}))
-        # Gemini demands the setup handshake completes before any client content.
+        # Gemini demands the setup handshake completes before any realtime input.
         async for raw in ws:
             msg = json.loads(raw)
             if "error" in msg:
                 raise RuntimeError(msg["error"])
             if "setupComplete" in msg:
                 break
-        await ws.send(json.dumps({"clientContent": {
-            "turns": [{"role": "user", "parts": [{"text": "Say hello to Robin."}]}],
-            "turnComplete": True,
-        }}))
+        await ws.send(json.dumps({"realtimeInput": {"activityStart": {}}}))
+        await ws.send(json.dumps({"realtimeInput": {"text": "Say hello to Robin."}}))
+        await ws.send(json.dumps({"realtimeInput": {"activityEnd": {}}}))
         audio_bytes = 0
         async for raw in ws:
             msg = json.loads(raw)

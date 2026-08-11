@@ -3,7 +3,7 @@ import base64
 import json
 
 from core.backends.base import (AGENT_TRANSCRIPT, AUDIO_DELTA, AUDIO_DONE, OTHER,
-                           SPEECH_STARTED, TOOL_CALL, USER_TRANSCRIPT)
+                           RESPONSE_INTERRUPTED, TOOL_CALL, USER_TRANSCRIPT)
 from core.backends.gemini_backend import GeminiBackend
 from core.tools import to_gemini_schema
 
@@ -54,7 +54,10 @@ def test_go_away_is_survivable():
 
 
 def test_parse_interrupted_as_speech_started():
-    assert GeminiBackend().parse_event({"serverContent": {"interrupted": True}}).kind == SPEECH_STARTED
+    # Historical test name retained because the local GitNexus CLI has no rename command.
+    # The assertion is the corrected contract: provider interruption is not user speech.
+    assert GeminiBackend().parse_event(
+        {"serverContent": {"interrupted": True}}).kind == RESPONSE_INTERRUPTED
 
 
 def test_parse_audio_delta():

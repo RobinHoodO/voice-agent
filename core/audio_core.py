@@ -48,6 +48,9 @@ class AudioCoreMixin:
     # shape `PROFILE` already uses for capabilities.
     AUDIO_TRANSPORT = None
 
+    async def _before_activity_end(self) -> None:
+        """Provider-specific chance to finish realtime turn context before generation."""
+
     async def _pump_mic(self) -> None:
         n = 0
         while self._running:
@@ -106,6 +109,7 @@ class AudioCoreMixin:
                         elif self._loop.time() - self._local_silence_since >= silence:
                             self._local_speaking = False
                             self._local_silence_since = None
+                            await self._before_activity_end()
                             await self._backend.send_activity_end()
                             for extra in self._backend.drain_extra_events():
                                 await self._handle_normalized(extra)
