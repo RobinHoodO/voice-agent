@@ -70,7 +70,12 @@ def _delegation_line(cfg: dict) -> str:
     mode = live.get("delegate", "pi")
     if mode == "off":
         return ""
-    who = "claude" if mode == "claude" else f"pi ({live.get('pi_model', 'deepseek-v4-flash')})"
+    if mode == "claude":
+        who = "claude"
+    elif mode == "prime":
+        who = f"prime-agent ({live.get('prime_model', 'deepseek-v4-flash')})"
+    else:
+        who = f"pi ({live.get('pi_model', 'deepseek-v4-flash')})"
     return f"The delegate tool hands work to {who}, a headless AI agent with file/bash tools."
 
 

@@ -92,8 +92,9 @@ DEFAULTS = {
         "languages": ["en-US", "nb-NO"],
         "agentic_shell": False,           # off by default — running shell is opt-in (menu toggle)
         "shell_timeout": 20,
-        "delegate": "pi",                 # "pi" | "claude" | "off"
+        "delegate": "pi",                 # "pi" | "claude" | "prime" | "off"
         "pi_model": "deepseek-v4-flash",
+        "prime_model": "deepseek-v4-flash",
         "show_task_terminals": False,     # run delegated tasks as visible herdr lanes (False = headless)
         "workspace": None,                # optional context/home folder; None = $HOME
         "custom_prompt": "",              # user/agent-authored persona+context, reloaded every session

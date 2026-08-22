@@ -1002,6 +1002,26 @@ def _pi_cmd(pi_model: str, headless: bool = False) -> str:
     return f"pi {'-p ' if headless else ''}--model {pi_model}{mcp_flag}"
 
 
+def _prime_cmd(prime_model: str, headless: bool = False) -> str:
+    # ponytail: prime-agent has no --mcp-config flag — MCP servers are registered once,
+    # globally, with `prime-agent mcp add claude-mem -- <script>`. So nothing per-call to
+    # build here; if the memory tools go missing on a prime lane, re-run that add.
+    return f"prime-agent {'-p ' if headless else ''}--model {prime_model}"
+
+
+def _agent_cmd(live: dict, mode: str, headless: bool = False) -> str:
+    """The CLI that runs a delegated task, for the configured delegate mode.
+    One place, because the same choice is made on the headless, fresh-lane, and
+    reused-lane paths — they must never drift apart."""
+    if mode == "claude":
+        model = live.get("claude_model", "sonnet")
+        return (f"claude -p --model {model} --permission-mode acceptEdits" if headless
+                else f"claude --model {model}")
+    if mode == "prime":
+        return _prime_cmd(live.get("prime_model", "deepseek-v4-flash"), headless)
+    return _pi_cmd(live.get("pi_model", "deepseek-v4-flash"), headless)
+
+
 def _build_delegate_cmd(instruction: str, cfg: dict):
     """HEADLESS fallback: write the instruction to a prompt file and return
     (shell command, out_path) that runs the background agent DETACHED, capturing
@@ -1013,10 +1033,7 @@ def _build_delegate_cmd(instruction: str, cfg: dict):
     mode = live.get("delegate", "pi")
     if not instruction or mode == "off":
         return None
-    if mode == "claude":
-        agent_cmd = f"claude -p --model {live.get('claude_model', 'sonnet')} --permission-mode acceptEdits"
-    else:
-        agent_cmd = _pi_cmd(live.get('pi_model', 'deepseek-v4-flash'), headless=True)
+    agent_cmd = _agent_cmd(live, mode, headless=True)
     try:
         # Inside the try: a missing harness file must degrade to "couldn't start it",
         # never to an unharnessed delegate.
@@ -1098,10 +1115,7 @@ def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=No
             pane_id = ((started or {}).get("agent") or {}).get("pane_id")
             if not pane_id:
                 return _headless("I couldn't open a lane, so")
-            if mode == "claude":
-                run_cmd = f"claude --model {live.get('claude_model', 'sonnet')}"
-            else:
-                run_cmd = _pi_cmd(live.get('pi_model', 'deepseek-v4-flash'))
+            run_cmd = _agent_cmd(live, mode)
             # pane run = text + Enter atomically; the pane's shell expands $(cat …), so
             # the multi-KB prompt never gets typed and the Enter gotcha never applies.
             # THRIVBE_VOICE_TID tells the global voice-auto-task SessionStart hook this
@@ -1141,9 +1155,13 @@ def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=No
         process = set(_process_words(info))
         agent_type = (target.get("agent") or "").strip().lower()
         kind = "pi" if agent_type == "pi" or "pi" in process else (
-            "claude" if agent_type == "claude" or "claude" in process else "shell")
-        if kind == "pi":
-            return _spawn_fresh("I can't safely reuse a pi lane yet, so")
+            "prime" if agent_type == "prime-agent" or "prime-agent" in process else (
+                "claude" if agent_type == "claude" or "claude" in process else "shell"))
+        # ponytail: only Claude lanes can be cleared and handed a follow-up. pi and
+        # prime-agent get a fresh lane instead — upgrade path is their own `send`
+        # subcommand, once their session ids are mapped to herdr panes.
+        if kind in ("pi", "prime"):
+            return _spawn_fresh(f"I can't safely reuse a {kind} lane yet, so")
         try:
             if kind == "claude":
                 if not _lane_send(pane_id, "/clear"):
@@ -1158,9 +1176,7 @@ def delegate_task(instruction: str, cfg: dict, task_name: str = "", run_shell=No
             if kind == "claude":
                 _lane_send(pane_id, f"Read {pf} and execute it exactly")
             else:
-                run_cmd = (f"claude --model {live.get('claude_model', 'sonnet')}"
-                           if mode == "claude" else
-                           _pi_cmd(live.get('pi_model', 'deepseek-v4-flash')))
+                run_cmd = _agent_cmd(live, mode)
                 _herdr("pane", "run", pane_id,
                        f'THRIVBE_VOICE_TID={tid} {run_cmd} "$(cat {shlex.quote(pf)})"')
             spoken = adopted[len(LANE_PREFIX):].replace("-", " ")
@@ -1612,6 +1628,14 @@ if __name__ == "__main__":
         # same-second builds must NOT share a tid anymore
         c2cmd, c2out = _build_delegate_cmd("z2", {"live": {"delegate": "claude"}})
         assert cout != c2out, "tid de-collision failed"
+        # prime mode: its own binary, no --mcp-config (prime-agent has no such flag),
+        # and no orchestrator harness (it has no Agent/subagent tool to fan out to).
+        pcmd, pout = _build_delegate_cmd("z3", {"live": {"delegate": "prime"}})
+        assert "prime-agent -p --model deepseek-v4-flash" in pcmd, "prime mode built the wrong CLI"
+        assert "--mcp-config" not in pcmd, "prime-agent has no --mcp-config flag"
+        assert "ORCHESTRATOR" not in open(pout[:-4] + ".prompt", encoding="utf-8").read(), \
+            "prime mode must not get the orchestrator harness"
+        assert "claude" not in _agent_cmd({}, "prime"), "prime lane must not launch claude"
 
         # Fail LOUD, not silent: no harness file => refuse to launch. An unharnessed
         # delegate reports success it never verified, which is worse than not running.
