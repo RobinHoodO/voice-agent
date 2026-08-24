@@ -63,6 +63,24 @@ def test_write_survives_a_failed_wal_switch(tmp_app, monkeypatch):
         conn.close()
 
 
+def test_a_declined_wal_switch_is_logged_not_swallowed(tmp_app, monkeypatch):
+    """`PRAGMA journal_mode=WAL` can refuse without raising — that must not pass quietly.
+
+    The pragma returns the mode it kept instead of throwing: `'delete'` when a
+    transaction is already open, `'memory'` for an in-memory DB. Both verified against
+    sqlite directly. Nothing is lost, but `_schema_done` is marked either way, so the
+    process never retries and would otherwise believe it had WAL forever.
+    """
+    logged = []
+    monkeypatch.setattr(memory, "_log", logged.append)
+    monkeypatch.setattr(memory, "_enable_wal", lambda conn: "delete")
+
+    cid = memory.record("a conversation worth keeping", summary="s")
+
+    assert cid > 0, "a declined WAL switch must not cost the write"
+    assert any("delete" in m for m in logged), f"the downgrade went unlogged: {logged}"
+
+
 def test_concurrent_first_writers_all_land(tmp_app):
     """Five writers hitting a brand-new DB at once must all land.
 

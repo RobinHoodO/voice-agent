@@ -38,8 +38,12 @@ _schema_done = set()   # DB paths whose schema + WAL we've already set up (once 
 _schema_lock = threading.Lock()
 
 
-def _enable_wal(conn: sqlite3.Connection) -> None:
-    """Switch the DB to WAL. Best-effort: the caller must treat failure as survivable.
+def _enable_wal(conn: sqlite3.Connection) -> str:
+    """Switch the DB to WAL, returning the mode actually in effect afterwards.
+
+    Best-effort: the caller must treat failure as survivable, and must check the
+    returned mode. There are TWO ways this does not get you WAL, and only one of
+    them is loud.
 
     Converting a database from rollback-journal to WAL takes an EXCLUSIVE lock, and
     `busy_timeout` does NOT cover journal_mode changes — SQLite returns SQLITE_BUSY
@@ -49,10 +53,17 @@ def _enable_wal(conn: sqlite3.Connection) -> None:
     setup. It used to take the whole write down with it: `record()` caught the error and
     returned its 0 sentinel, and the conversation was gone with only a line in the log.
 
+    The quiet way: the pragma can simply DECLINE and return the mode it kept, with no
+    exception at all — `'delete'` when a transaction is already open, `'memory'` for an
+    in-memory DB. Both verified. A caller that ignores the return value believes it has
+    WAL when it does not, and since `_schema_done` is then marked the process never tries
+    again. Costs no data, but it is a silent downgrade, so it gets logged.
+
     WAL is a performance choice. The transcript is not. If the switch can't happen now
     it happens on the next launch, and meanwhile the write still lands.
     """
-    conn.execute("PRAGMA journal_mode=WAL")
+    row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    return (row[0] if row else "unknown")
 
 
 # --- app-owned conversation store -------------------------------------------
@@ -76,7 +87,11 @@ def _db() -> sqlite3.Connection:
         with _schema_lock:
             if DB_PATH not in _schema_done:
                 try:
-                    _enable_wal(conn)
+                    mode = _enable_wal(conn)
+                    if str(mode).lower() != "wal":
+                        # Declined rather than failed — see _enable_wal. Harmless to the
+                        # write, but never silent: this is the only place it shows up.
+                        _log(f"memory: journal_mode stayed {mode!r}, not WAL")
                 except sqlite3.OperationalError as e:
                     # Survivable by design — see _enable_wal. Losing WAL costs some
                     # read concurrency until the next launch; raising here would cost
