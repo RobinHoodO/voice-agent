@@ -195,9 +195,14 @@ def test_survives_a_login_launched_app(monkeypatch, tmp_path):
     """
     tools = tmp_path / "bin"
     tools.mkdir()
-    for name in ("firecrawl", "node"):
-        stub = tools / name
-        stub.write_text("#!/bin/sh\nexit 0\n")
+    # The firecrawl stub carries the SAME shebang as the real CLI. That is the whole
+    # point: `#!/bin/sh` would resolve via the kernel and prove nothing, because the
+    # second half of the original bug was `env` failing to find node on a minimal PATH.
+    firecrawl = tools / "firecrawl"
+    firecrawl.write_text("#!/usr/bin/env node\n")
+    node = tools / "node"
+    node.write_text("#!/bin/sh\nexit 0\n")
+    for stub in (firecrawl, node):
         stub.chmod(0o755)
     monkeypatch.setattr(web, "TOOL_DIRS", (str(tools),))
     monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -206,9 +211,18 @@ def test_survives_a_login_launched_app(monkeypatch, tmp_path):
     assert web.firecrawl_bin() == str(tools / "firecrawl"), "binary must resolve without PATH"
     assert os.access(web.firecrawl_bin(), os.X_OK)
     path = web._env()["PATH"].split(os.pathsep)
-    node = shutil.which("node", path=web._env()["PATH"])
-    assert node, "subprocess PATH must still be able to resolve the node interpreter"
     assert any(d in path for d in web.TOOL_DIRS)
+    # Specifically OUR node, not one that happens to be installed on the machine —
+    # otherwise this passes for the wrong reason on a developer laptop.
+    assert shutil.which("node", path=web._env()["PATH"]) == str(node)
+
+    # And the part no assertion above can reach: actually spawn it. `_run` passes
+    # `env=_env()`, so `/usr/bin/env node` inside the shebang is resolved against the
+    # widened PATH at execve time. If that widening ever regresses this raises
+    # FileNotFoundError and `_run` returns the "isn't installed" sentence instead.
+    out, err = web._run([web.firecrawl_bin(), "search", "q"], timeout=10)
+    assert err is None, f"the env-node shebang did not resolve: {err}"
+    assert out is not None
 
 
 def test_firecrawl_bin_falls_back_to_the_bare_name_when_absent(monkeypatch, tmp_path):

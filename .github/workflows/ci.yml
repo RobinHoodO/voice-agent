@@ -7,6 +7,12 @@ on:
 
 jobs:
   test:
+    # This job runs the pull request's own test suite, i.e. arbitrary code from whoever
+    # opened it. Least privilege matters more here than in a workflow that only reads.
+    # Without this block the token inherits the repository default, which can be
+    # read/write; nothing in this job needs to write anything.
+    permissions:
+      contents: read
     # macOS, not ubuntu: requirements.txt pulls rumps / pyobjc / py2app, which have no
     # Linux build. The suite also exercises the real macOS-facing config paths.
     runs-on: macos-latest
@@ -15,6 +21,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Don't leave the token in the runner's git config. The test suite runs after
+          # this step, so a credential parked there is reachable by anything the suite
+          # executes. Nothing in this job pushes, so there is nothing to persist for.
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
