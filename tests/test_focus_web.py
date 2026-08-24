@@ -181,14 +181,47 @@ def test_web_search_env_has_no_secrets():
     assert not {k for k in web._env() if k.endswith("_API_KEY")}
 
 
-def test_survives_a_login_launched_app(monkeypatch):
+def test_survives_a_login_launched_app(monkeypatch, tmp_path):
     """A .app opened from Finder/at login inherits launchd's minimal PATH. That broke
     the call twice — the bare binary didn't resolve, and firecrawl's `env node` shebang
-    couldn't find node. Both must survive without falling back to a shell."""
+    couldn't find node. Both must survive without falling back to a shell.
+
+    The tools here are stubs in a tmp dir, deliberately. This test used to assert
+    against whatever was actually installed on the machine, which meant it passed on
+    Robin's Mac and failed on any clean one — the first hosted CI run died right here.
+    A test that only holds on one laptop is not a regression test. What is being
+    checked is the resolution logic in `firecrawl_bin()` and the PATH widening in
+    `_env()`; neither needs a real firecrawl or a real node to be exercised.
+    """
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    for name in ("firecrawl", "node"):
+        stub = tools / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    monkeypatch.setattr(web, "TOOL_DIRS", (str(tools),))
     monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    assert os.path.isabs(web.firecrawl_bin()), "binary must resolve without PATH"
+
+    # Not on PATH, so this can only come from the TOOL_DIRS fallback.
+    assert web.firecrawl_bin() == str(tools / "firecrawl"), "binary must resolve without PATH"
     assert os.access(web.firecrawl_bin(), os.X_OK)
     path = web._env()["PATH"].split(os.pathsep)
     node = shutil.which("node", path=web._env()["PATH"])
     assert node, "subprocess PATH must still be able to resolve the node interpreter"
     assert any(d in path for d in web.TOOL_DIRS)
+
+
+def test_firecrawl_bin_falls_back_to_the_bare_name_when_absent(monkeypatch, tmp_path):
+    """Genuinely not installed → return the bare name so `_run` reports it missing.
+
+    This is the branch the clean CI runner was actually hitting, and nothing covered
+    it. `_run` turns the resulting FileNotFoundError into "The firecrawl CLI isn't
+    installed on this Mac", which is the correct behaviour — guessing a path would be
+    worse than saying so.
+    """
+    monkeypatch.setattr(web, "TOOL_DIRS", (str(tmp_path / "nothing-here"),))
+    monkeypatch.setenv("PATH", str(tmp_path / "also-empty"))
+
+    assert web.firecrawl_bin() == "firecrawl"
+    assert web._run([web.firecrawl_bin(), "search", "q"], timeout=5) == (
+        None, "The firecrawl CLI isn't installed on this Mac, so I can't search the web.")
