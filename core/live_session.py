@@ -529,14 +529,26 @@ class LiveSession(AudioCoreMixin):
                 self._teardown_audio()     # close this attempt's streams/shell before any retry
                 if not self._running:
                     break                  # user asked to stop — clean exit
-                # A RESUMED session that dies within seconds means the provider rejected
-                # the handle, not that the network blipped — and every retry re-sends the
-                # same dead handle, so the reconnect loop can never recover. Observed
-                # 2026-08-23: one drop mid-answer, then five straight 1007 'Precondition
-                # check failed' closes ~2s apart while the backoff climbed to 16s. Robin
-                # had been heard and transcribed; he just never got an answer. Drop the
-                # handle and let the next attempt open cold — losing the conversation's
-                # continuity beats losing the conversation.
+                # A RESUMED session that dies within seconds is TREATED as a rejected
+                # handle. That is a deliberate fail-safe heuristic, not a fact the code
+                # can check: the close code is not plumbed up to here, and a transient
+                # network death inside the window lands in this branch too.
+                #
+                # It is deliberate because the two mistakes cost wildly different things.
+                # Clearing a handle we did not have to clear costs CONTINUITY — the next
+                # session opens cold and the model has lost the thread, but the user is
+                # still heard, answered, and the transcript is still saved. Keeping a
+                # handle we should have dropped costs the CONVERSATION: every retry
+                # re-sends the same dead handle, so the loop can never recover. Observed
+                # 2026-08-23 — one drop mid-answer, then five straight 1007 'Precondition
+                # check failed' closes ~2s apart while the backoff climbed to 16s; Robin
+                # had been heard and transcribed and simply never got an answer.
+                #
+                # Keying this on close code 1007 instead would be more precise and was
+                # considered. Rejected: it makes the expensive failure the default for
+                # any rejection signalled some other way, to buy back continuity in a
+                # case that is already cheap. Revisit only with the close code plumbed
+                # through AND this fail-safe kept as the fallback.
                 if self._resume_handle and time.monotonic() - started < RESUME_POISON_S:
                     _log("resume handle rejected — reconnecting without it")
                     self._resume_handle = None

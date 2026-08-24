@@ -110,4 +110,10 @@ root_cause: Commit 2d96ae2 suppresses Gemini's explicit completion after activit
 fix: Keep Gemini and screen context. Prefetch the screen asynchronously at real user speech start; before activityEnd, send the ready text as realtimeInput.text and screenshot as realtimeInput.video, with a small bounded final wait and graceful context skip if capture is still late. Then send exactly one activityEnd and no clientContent generation trigger. For tools, send Gemini toolResponse alone and wait for continuation; retain response.create behavior only for providers that require it. Treat Gemini `interrupted` as response interruption, not a new user utterance, and keep a hard per-user-turn tool budget keyed to an application turn id. Add stage timing and exact wire/event lifecycle tests.
 verification: Commit 15c8b40 is deployed on the test branch. A real Gemini Live self-test produced audio, the full repository suite passes, and the real desktop trial answered the screen-grounded turn two seconds after activityEnd with the correct Google Maps context. The subsequent Notion request dispatched one tool call after two seconds with no stall or loop. The session was manually stopped three seconds after tool dispatch, so the automated lifecycle suite remains the evidence for post-tool spoken continuation in this particular trial.
 files_changed:
-  - .planning/debug/voice-agent-latency-regression.md
+  - core/audio_core.py
+  - core/backends/base.py
+  - core/backends/gemini_backend.py
+  - core/gemini_client.py
+  - core/live_session.py
+  - tests/test_gemini_backend.py
+  - tests/test_gemini_instant_turns.py
