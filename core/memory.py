@@ -89,7 +89,12 @@ def _db() -> sqlite3.Connection:
                     " status TEXT NOT NULL DEFAULT 'active')")
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(text)")
-                conn.commit()   # publish the schema before the path, never after
+                # Belt-and-braces, and worth being honest about: sqlite3 runs DDL in
+                # autocommit (only DML opens an implicit transaction), so this is a
+                # no-op today — `in_transaction` is already False here. It is one cheap
+                # line that keeps "schema durable before the path is published" true if
+                # isolation_level is ever set, instead of resting on that default.
+                conn.commit()
                 _schema_done.add(DB_PATH)
     return conn
 
