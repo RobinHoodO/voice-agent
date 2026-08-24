@@ -72,6 +72,11 @@ _pending_confirmation_outcome = confirm_gate.pending_confirmation_outcome
 # that the server aborted the connection (1008). Nothing upstream bounds this: every tool
 # result triggers another response, which can call the same tool again forever. Two
 # identical calls can be legitimate (a retry); the third in a short window is a loop.
+# A resumed session that dies faster than this was refused, not disconnected — the
+# provider rejected the resume handle. Well above a real handshake (~1s observed) and
+# well under any session short enough to be worth resuming. See _run().
+RESUME_POISON_S = 5.0
+
 TOOL_REPEAT_WINDOW_S = 45.0
 TOOL_REPEAT_LIMIT = 3
 # The exact-args guard above is blind to a tool that loops on VARYING args. Real case
@@ -515,6 +520,7 @@ class LiveSession(AudioCoreMixin):
         backoff = 1.0
         try:
             while self._running:
+                started = time.monotonic()
                 try:
                     self._loop.run_until_complete(self._session())
                     backoff = 1.0          # connected at least once → reset backoff
@@ -523,6 +529,17 @@ class LiveSession(AudioCoreMixin):
                 self._teardown_audio()     # close this attempt's streams/shell before any retry
                 if not self._running:
                     break                  # user asked to stop — clean exit
+                # A RESUMED session that dies within seconds means the provider rejected
+                # the handle, not that the network blipped — and every retry re-sends the
+                # same dead handle, so the reconnect loop can never recover. Observed
+                # 2026-08-23: one drop mid-answer, then five straight 1007 'Precondition
+                # check failed' closes ~2s apart while the backoff climbed to 16s. Robin
+                # had been heard and transcribed; he just never got an answer. Drop the
+                # handle and let the next attempt open cold — losing the conversation's
+                # continuity beats losing the conversation.
+                if self._resume_handle and time.monotonic() - started < RESUME_POISON_S:
+                    _log("resume handle rejected — reconnecting without it")
+                    self._resume_handle = None
                 # Unexpected drop while still live: back off and reconnect, so the daemon
                 # doesn't go silently deaf on a network blip / idle timeout / server close.
                 self.on_state("reconnecting")
@@ -1496,7 +1513,7 @@ def _grab_screenshot() -> str:
 def main() -> None:
     import sys
     # Load keys from the workspace .env without importing the GUI module.
-    _env = "/Users/robinsverd/Thrivbe-AI/.env"
+    _env = "/Users/robinsverd/Thrivbe-AI/Thrivbe-OS/.env"
     if os.path.exists(_env):
         for line in open(_env, encoding="utf-8"):
             line = line.strip()
