@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    # This job runs the pull request's own test suite, i.e. arbitrary code from whoever
+    # opened it. Least privilege matters more here than in a workflow that only reads.
+    # Without this block the token inherits the repository default, which can be
+    # read/write; nothing in this job needs to write anything.
+    permissions:
+      contents: read
+    # macOS, not ubuntu: requirements.txt pulls rumps / pyobjc / py2app, which have no
+    # Linux build. The suite also exercises the real macOS-facing config paths.
+    runs-on: macos-latest
+    # ponytail: macOS runner minutes bill at 10x, so cap a hung job rather than let it
+    # burn the full 6h default. Local full-suite time is ~90s; 20 is generous headroom.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Don't leave the token in the runner's git config. The test suite runs after
+          # this step, so a credential parked there is reachable by anything the suite
+          # executes. Nothing in this job pushes, so there is nothing to persist for.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            server/requirements.txt
+
+      # requirements-dev.txt already pulls in requirements.txt and server/requirements.txt.
+      - run: pip install -r requirements-dev.txt
+
+      # pytest.ini supplies testpaths + pythonpath; nothing to pass here.
+      - run: pytest
