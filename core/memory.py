@@ -24,6 +24,7 @@ import re
 import shlex
 import sqlite3
 import subprocess
+import threading
 import time
 
 from core import config
@@ -31,6 +32,13 @@ from core import config
 # DB_PATH is module-global so demo()/tests can point it at a tempfile.
 DB_PATH = os.path.join(config.SUPPORT_DIR, "conversations.db")
 _schema_done = set()   # DB paths whose schema + WAL we've already set up (once per path)
+# The check and the add MUST be atomic. They weren't, and it cost conversations: thread A
+# entered the setup block, ran some of the CREATEs, and added the path — while thread B,
+# now seeing a "done" path, skipped setup and INSERTed into a table that didn't exist yet.
+# `record()` swallows that into its 0 sentinel, so the loss was silent. Reproduced at
+# 2/20 with five threads released from a barrier onto a fresh DB. On a first launch the
+# background _learn thread and the main thread are exactly that pair.
+_schema_lock = threading.Lock()
 
 
 # --- app-owned conversation store -------------------------------------------
@@ -47,34 +55,42 @@ def _db() -> sqlite3.Connection:
     if DB_PATH not in _schema_done:
         # Schema + WAL set up once per path, not on every call (was a per-call cost
         # that taxed session-start latency). WAL lets reads proceed during a write.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS conversations ("
-            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " ts TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
-            " summary TEXT, transcript TEXT)")
-        # Plain (manually-managed) FTS5 so UPDATEs stay trivial: rowid == conversations.id.
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts "
-            "USING fts5(summary, transcript)")
-        # Durable learnings — the continuous-learning layer on top of raw conversations.
-        # strength*recency ranks them; corrections supersede instead of deleting.
-        # type is preference | fact | correction; status is active | superseded.
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS learnings ("
-            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " created_at TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
-            " type TEXT NOT NULL,"
-            " text TEXT NOT NULL,"
-            " source_conv_id INTEGER,"
-            " strength REAL NOT NULL DEFAULT 1.0,"
-            " uses INTEGER NOT NULL DEFAULT 0,"
-            " last_used_epoch INTEGER,"
-            " superseded_by INTEGER,"
-            " status TEXT NOT NULL DEFAULT 'active')")
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(text)")
-        _schema_done.add(DB_PATH)
+        # The unlocked check above is the fast path and stays unlocked for that reason;
+        # under the lock we check again, because the path may have been finished by
+        # another thread while we waited. Set membership and add are atomic under the
+        # GIL, and the path is only published after the CREATEs commit, so a reader
+        # that sees the path always sees a complete schema.
+        with _schema_lock:
+            if DB_PATH not in _schema_done:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS conversations ("
+                    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    " ts TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
+                    " summary TEXT, transcript TEXT)")
+                # Plain (manually-managed) FTS5 so UPDATEs stay trivial: rowid == conversations.id.
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts "
+                    "USING fts5(summary, transcript)")
+                # Durable learnings — the continuous-learning layer on top of raw conversations.
+                # strength*recency ranks them; corrections supersede instead of deleting.
+                # type is preference | fact | correction; status is active | superseded.
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS learnings ("
+                    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    " created_at TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
+                    " type TEXT NOT NULL,"
+                    " text TEXT NOT NULL,"
+                    " source_conv_id INTEGER,"
+                    " strength REAL NOT NULL DEFAULT 1.0,"
+                    " uses INTEGER NOT NULL DEFAULT 0,"
+                    " last_used_epoch INTEGER,"
+                    " superseded_by INTEGER,"
+                    " status TEXT NOT NULL DEFAULT 'active')")
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(text)")
+                conn.commit()   # publish the schema before the path, never after
+                _schema_done.add(DB_PATH)
     return conn
 
 
