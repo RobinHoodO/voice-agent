@@ -32,13 +32,27 @@ from core import config
 # DB_PATH is module-global so demo()/tests can point it at a tempfile.
 DB_PATH = os.path.join(config.SUPPORT_DIR, "conversations.db")
 _schema_done = set()   # DB paths whose schema + WAL we've already set up (once per path)
-# The check and the add MUST be atomic. They weren't, and it cost conversations: thread A
-# entered the setup block, ran some of the CREATEs, and added the path — while thread B,
-# now seeing a "done" path, skipped setup and INSERTed into a table that didn't exist yet.
-# `record()` swallows that into its 0 sentinel, so the loss was silent. Reproduced at
-# 2/20 with five threads released from a barrier onto a fresh DB. On a first launch the
-# background _learn thread and the main thread are exactly that pair.
+# Serialises first-launch setup so two threads don't run the CREATEs — and, more to the
+# point, the journal_mode switch below — against each other. The check and the add are
+# also made atomic here, which they weren't before.
 _schema_lock = threading.Lock()
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """Switch the DB to WAL. Best-effort: the caller must treat failure as survivable.
+
+    Converting a database from rollback-journal to WAL takes an EXCLUSIVE lock, and
+    `busy_timeout` does NOT cover journal_mode changes — SQLite returns SQLITE_BUSY
+    straight away instead of calling the busy handler. So this raises
+    `OperationalError('database is locked')` whenever anything else is holding the DB,
+    which on a fresh install is simply the other thread doing the same first-launch
+    setup. It used to take the whole write down with it: `record()` caught the error and
+    returned its 0 sentinel, and the conversation was gone with only a line in the log.
+
+    WAL is a performance choice. The transcript is not. If the switch can't happen now
+    it happens on the next launch, and meanwhile the write still lands.
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
 
 
 # --- app-owned conversation store -------------------------------------------
@@ -58,11 +72,16 @@ def _db() -> sqlite3.Connection:
         # The unlocked check above is the fast path and stays unlocked for that reason;
         # under the lock we check again, because the path may have been finished by
         # another thread while we waited. Set membership and add are atomic under the
-        # GIL, and the path is only published after the CREATEs commit, so a reader
-        # that sees the path always sees a complete schema.
+        # GIL, so a reader that sees the path always sees a complete schema.
         with _schema_lock:
             if DB_PATH not in _schema_done:
-                conn.execute("PRAGMA journal_mode=WAL")
+                try:
+                    _enable_wal(conn)
+                except sqlite3.OperationalError as e:
+                    # Survivable by design — see _enable_wal. Losing WAL costs some
+                    # read concurrency until the next launch; raising here would cost
+                    # the conversation.
+                    _log(f"memory: staying on the rollback journal for now ({e})")
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS conversations ("
                     " id INTEGER PRIMARY KEY AUTOINCREMENT,"
