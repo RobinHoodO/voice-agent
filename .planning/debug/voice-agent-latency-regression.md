@@ -8,9 +8,9 @@ updated: 2026-08-11T12:33:12+02:00
 ## Current Focus
 
 hypothesis: Verified. The ordered Gemini turn boundary restores the pre-regression response path while retaining screen context and preventing the post-tool interruption/reset loop.
-test: Deploy commit 15c8b40 from codex/gemini-instant-context, exercise a screen-grounded voice turn and a Notion tool turn in the real desktop app, then inspect the retained log, transcript, and action journal.
-expecting: First output within roughly 0-3 seconds of activityEnd, no stall nudges, correct screen grounding, and one Notion call rather than a repeated loop.
-next_action: Merge the test branch after the user is satisfied with normal use.
+test: Done. Commit 15c8b40 was deployed from codex/gemini-instant-context and exercised in the real desktop app; the screen-grounded voice turn and the Notion tool turn were both checked against the retained log, transcript, and action journal.
+expecting: Met. First output landed about two seconds after activityEnd with correct screen grounding, no stall nudges, and a single Notion call rather than a repeated loop.
+next_action: None outstanding for this investigation. The fix is on the branch and covered by the Gemini lifecycle suite; merge is tracked by the pull request, not by this record.
 
 ## Symptoms
 

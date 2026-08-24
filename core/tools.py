@@ -645,17 +645,25 @@ def _completion_signal(out: str, done: str) -> str:
     writes the final report (incl. the VERIFIED/… tag) to <out> and touches <done>, which
     the menubar poller already watches to auto-wake and speak. No duplicate run, no stream
     parsing — same wake path as headless."""
+    # Deliberately names the OUTCOME, not one tool. This used to say "use your shell
+    # tool", which silently excluded prime-agent: it ships an IPython tool and no shell
+    # (`prime-agent --help`: "AI coding assistant with an IPython tool"). `_mint_task`
+    # appends this to every watched task regardless of mode, so a watched prime lane
+    # could never write the sentinel and the user simply never heard the result.
     return ("\n\n--- SIGNAL COMPLETION (REQUIRED) ---\n"
             "You are running in a terminal the user is watching live, and your process will "
             "NOT exit on its own — so the voice agent only learns you're done if you tell it. "
-            "As your VERY LAST action, after you have finished AND verified, use your shell "
-            "tool exactly once to write your final report (a short summary plus the "
-            "VERIFIED/UNVERIFIED/FAILED tag line) to the result file and then create the done "
-            "marker:\n"
-            f"  cat > {shlex.quote(out)} <<'REPORT'\n"
-            "  <your final summary and the VERIFIED/UNVERIFIED/FAILED tag>\n"
-            "REPORT\n"
-            f"  touch {shlex.quote(done)}\n"
+            "As your VERY LAST action, after you have finished AND verified, write your final "
+            "report (a short summary plus the VERIFIED/UNVERIFIED/FAILED tag line) to the "
+            "result file and then create the done marker. Use whichever tool you have for "
+            "running commands or code — a shell tool and an IPython/Python tool are equally "
+            "fine, whatever you actually have.\n"
+            f"  shell:   cat > {shlex.quote(out)} <<'REPORT'\n"
+            "           <your final summary and the VERIFIED/UNVERIFIED/FAILED tag>\n"
+            "           REPORT\n"
+            f"           touch {shlex.quote(done)}\n"
+            f"  python:  open({out!r}, 'w').write(report)\n"
+            f"           open({done!r}, 'w').close()\n"
             "Without this, the user never hears your result.")
 
 
@@ -1006,6 +1014,10 @@ def _prime_cmd(prime_model: str, headless: bool = False) -> str:
     # ponytail: prime-agent has no --mcp-config flag — MCP servers are registered once,
     # globally, with `prime-agent mcp add claude-mem -- <script>`. So nothing per-call to
     # build here; if the memory tools go missing on a prime lane, re-run that add.
+    # That subcommand needs prime-agent >= 0.8.0 (verified present on 0.8.0, the version
+    # installed here). Nothing pins it: this repo pins no external CLI — not claude, not
+    # pi, not firecrawl — and they are all user-installed tools, so the honest record is
+    # the requirement written down, not a lockfile that cannot enforce it anyway.
     return f"prime-agent {'-p ' if headless else ''}--model {prime_model}"
 
 
