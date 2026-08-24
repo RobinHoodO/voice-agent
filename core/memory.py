@@ -24,6 +24,7 @@ import re
 import shlex
 import sqlite3
 import subprocess
+import threading
 import time
 
 from core import config
@@ -31,6 +32,38 @@ from core import config
 # DB_PATH is module-global so demo()/tests can point it at a tempfile.
 DB_PATH = os.path.join(config.SUPPORT_DIR, "conversations.db")
 _schema_done = set()   # DB paths whose schema + WAL we've already set up (once per path)
+# Serialises first-launch setup so two threads don't run the CREATEs — and, more to the
+# point, the journal_mode switch below — against each other. The check and the add are
+# also made atomic here, which they weren't before.
+_schema_lock = threading.Lock()
+
+
+def _enable_wal(conn: sqlite3.Connection) -> str:
+    """Switch the DB to WAL, returning the mode actually in effect afterwards.
+
+    Best-effort: the caller must treat failure as survivable, and must check the
+    returned mode. There are TWO ways this does not get you WAL, and only one of
+    them is loud.
+
+    Converting a database from rollback-journal to WAL takes an EXCLUSIVE lock, and
+    `busy_timeout` does NOT cover journal_mode changes — SQLite returns SQLITE_BUSY
+    straight away instead of calling the busy handler. So this raises
+    `OperationalError('database is locked')` whenever anything else is holding the DB,
+    which on a fresh install is simply the other thread doing the same first-launch
+    setup. It used to take the whole write down with it: `record()` caught the error and
+    returned its 0 sentinel, and the conversation was gone with only a line in the log.
+
+    The quiet way: the pragma can simply DECLINE and return the mode it kept, with no
+    exception at all — `'delete'` when a transaction is already open, `'memory'` for an
+    in-memory DB. Both verified. A caller that ignores the return value believes it has
+    WAL when it does not, and since `_schema_done` is then marked the process never tries
+    again. Costs no data, but it is a silent downgrade, so it gets logged.
+
+    WAL is a performance choice. The transcript is not. If the switch can't happen now
+    it happens on the next launch, and meanwhile the write still lands.
+    """
+    row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    return (row[0] if row else "unknown")
 
 
 # --- app-owned conversation store -------------------------------------------
@@ -47,34 +80,56 @@ def _db() -> sqlite3.Connection:
     if DB_PATH not in _schema_done:
         # Schema + WAL set up once per path, not on every call (was a per-call cost
         # that taxed session-start latency). WAL lets reads proceed during a write.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS conversations ("
-            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " ts TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
-            " summary TEXT, transcript TEXT)")
-        # Plain (manually-managed) FTS5 so UPDATEs stay trivial: rowid == conversations.id.
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts "
-            "USING fts5(summary, transcript)")
-        # Durable learnings — the continuous-learning layer on top of raw conversations.
-        # strength*recency ranks them; corrections supersede instead of deleting.
-        # type is preference | fact | correction; status is active | superseded.
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS learnings ("
-            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " created_at TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
-            " type TEXT NOT NULL,"
-            " text TEXT NOT NULL,"
-            " source_conv_id INTEGER,"
-            " strength REAL NOT NULL DEFAULT 1.0,"
-            " uses INTEGER NOT NULL DEFAULT 0,"
-            " last_used_epoch INTEGER,"
-            " superseded_by INTEGER,"
-            " status TEXT NOT NULL DEFAULT 'active')")
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(text)")
-        _schema_done.add(DB_PATH)
+        # The unlocked check above is the fast path and stays unlocked for that reason;
+        # under the lock we check again, because the path may have been finished by
+        # another thread while we waited. Set membership and add are atomic under the
+        # GIL, so a reader that sees the path always sees a complete schema.
+        with _schema_lock:
+            if DB_PATH not in _schema_done:
+                try:
+                    mode = _enable_wal(conn)
+                    if str(mode).lower() != "wal":
+                        # Declined rather than failed — see _enable_wal. Harmless to the
+                        # write, but never silent: this is the only place it shows up.
+                        _log(f"memory: journal_mode stayed {mode!r}, not WAL")
+                except sqlite3.OperationalError as e:
+                    # Survivable by design — see _enable_wal. Losing WAL costs some
+                    # read concurrency until the next launch; raising here would cost
+                    # the conversation.
+                    _log(f"memory: staying on the rollback journal for now ({e})")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS conversations ("
+                    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    " ts TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
+                    " summary TEXT, transcript TEXT)")
+                # Plain (manually-managed) FTS5 so UPDATEs stay trivial: rowid == conversations.id.
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts "
+                    "USING fts5(summary, transcript)")
+                # Durable learnings — the continuous-learning layer on top of raw conversations.
+                # strength*recency ranks them; corrections supersede instead of deleting.
+                # type is preference | fact | correction; status is active | superseded.
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS learnings ("
+                    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    " created_at TEXT NOT NULL, ts_epoch INTEGER NOT NULL,"
+                    " type TEXT NOT NULL,"
+                    " text TEXT NOT NULL,"
+                    " source_conv_id INTEGER,"
+                    " strength REAL NOT NULL DEFAULT 1.0,"
+                    " uses INTEGER NOT NULL DEFAULT 0,"
+                    " last_used_epoch INTEGER,"
+                    " superseded_by INTEGER,"
+                    " status TEXT NOT NULL DEFAULT 'active')")
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(text)")
+                # Belt-and-braces, and worth being honest about: sqlite3 runs DDL in
+                # autocommit (only DML opens an implicit transaction), so this is a
+                # no-op today — `in_transaction` is already False here. It is one cheap
+                # line that keeps "schema durable before the path is published" true if
+                # isolation_level is ever set, instead of resting on that default.
+                conn.commit()
+                _schema_done.add(DB_PATH)
     return conn
 
 
