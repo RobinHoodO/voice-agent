@@ -26,7 +26,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source /Users/robinsverd/Thrivbe-AI/execution/scripts/sentry-notify.sh
+source /Users/robinsverd/Thrivbe-AI/Thrivbe-OS/execution/scripts/sentry-notify.sh
 SENTRY_SERVICE=voice-agent-tool-drift
 
 # The venv interpreter, not system python3: /usr/bin/python3 is 3.9 and cannot import
