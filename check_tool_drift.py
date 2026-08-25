@@ -101,7 +101,7 @@ EXCLUSIONS_FIELD = "excluded_tools"
 DEFAULT_SURFACES = ("mac", "server")
 DEFAULT_MANIFEST_URL = "http://127.0.0.1:8790/tools"
 ENV_CANDIDATES = (
-    "/Users/robinsverd/Thrivbe-AI/.env",     # this Mac
+    "/Users/robinsverd/Thrivbe-AI/Thrivbe-OS/.env",     # this Mac
     "/opt/voice-bridge/.env",                # the legacy bridge host
     "/opt/Thrivbe-AI/.env",                  # Thrivbe-1
 )

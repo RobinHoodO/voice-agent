@@ -201,9 +201,10 @@
 
       <div class="row"><div class="ic">🤝</div><div class="body">
         <div class="lbl">Delegate tasks to</div>
-        <div class="desc">Which background agent runs the work she hands off. pi is fast (deepseek); Claude is more capable but slower. "Don't delegate" makes her do everything inline instead.</div>
+        <div class="desc">Which background agent runs the work she hands off. pi and prime-agent are fast (deepseek); Claude is more capable but slower. Only Claude lanes can be reused for follow-ups — the others always open a fresh lane. "Don't delegate" makes her do everything inline instead.</div>
         <div class="ctl"><select id="delegate" onchange="setVal('live.delegate', this.value)">
           <option value="pi">pi — deepseek-v4-flash (fast)</option>
+          <option value="prime">prime-agent — deepseek-v4-flash (fast)</option>
           <option value="claude">Claude (more capable)</option>
           <option value="off">Don't delegate</option>
         </select></div>

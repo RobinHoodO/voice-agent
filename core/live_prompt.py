@@ -70,8 +70,17 @@ def _delegation_line(cfg: dict) -> str:
     mode = live.get("delegate", "pi")
     if mode == "off":
         return ""
-    who = "claude" if mode == "claude" else f"pi ({live.get('pi_model', 'deepseek-v4-flash')})"
-    return f"The delegate tool hands work to {who}, a headless AI agent with file/bash tools."
+    if mode == "claude":
+        who = "claude"
+    elif mode == "prime":
+        who = f"prime-agent ({live.get('prime_model', 'deepseek-v4-flash')})"
+    else:
+        who = f"pi ({live.get('pi_model', 'deepseek-v4-flash')})"
+    # "file/bash" was wrong for prime-agent, which has an IPython tool and no shell.
+    # The voice model uses this line to describe the delegate out loud, so an
+    # inaccurate capability list becomes something it tells the user.
+    tools = "file and IPython tools" if mode == "prime" else "file/bash tools"
+    return f"The delegate tool hands work to {who}, a headless AI agent with {tools}."
 
 
 def _load_memory_tail(n: int = 30) -> str:
