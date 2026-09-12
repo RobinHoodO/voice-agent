@@ -405,6 +405,7 @@ def load_token(root):
         value = (value or "").strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
+        value = value.strip()
         return value if value and not value.startswith("op://") else None
 
     token = resolved(os.environ.get("VOICE_API_TOKEN"))

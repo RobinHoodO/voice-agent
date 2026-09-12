@@ -371,6 +371,9 @@ def test_no_hand_maintained_tool_name_list_came_back():
     ("", '"op://V/Item/credential"', None),
     ("", "'op://V/Item/credential'", None),
     ("", '"plain"', "plain"),
+    ("", '" op://V/Item/credential "', None),
+    ("' op://V/Item/credential '", "plain", "plain"),
+    ("", '" plain "', "plain"),
     ("op://V/Item/credential", "", None),
 ])
 def test_token_loader_rejects_addresses(tmp_path, monkeypatch, inherited, file_value, expected):
