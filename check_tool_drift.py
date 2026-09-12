@@ -399,6 +399,18 @@ def compare_descriptors(left_name, left, right_name, right):
 # --- kernel manifest ----------------------------------------------------------------
 
 def load_token(root):
+    # Phase 6: launchd supplies the resolved token through oprun. Plain files remain
+    # a fallback for manual use; an unresolved address must never reach the API.
+    def resolved(value):
+        value = (value or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        value = value.strip()
+        return value if value and not value.startswith("op://") else None
+
+    token = resolved(os.environ.get("VOICE_API_TOKEN"))
+    if token:
+        return token
     for path in (os.path.join(root, ".env"), *ENV_CANDIDATES):
         try:
             with open(path, encoding="utf-8") as env_file:
@@ -407,11 +419,13 @@ def load_token(root):
                     if not line or line.startswith("#") or "=" not in line:
                         continue
                     key, value = line.split("=", 1)
-                    if key.strip() == "VOICE_API_TOKEN" and value.strip():
-                        return value.strip()
+                    if key.strip() == "VOICE_API_TOKEN":
+                        token = resolved(value)
+                        if token:
+                            return token
         except OSError:
             continue
-    return os.environ.get("VOICE_API_TOKEN")
+    return None
 
 
 def fetch_manifest(token, url):
