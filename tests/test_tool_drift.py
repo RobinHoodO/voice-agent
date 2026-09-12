@@ -363,3 +363,22 @@ def test_no_hand_maintained_tool_name_list_came_back():
         "a module-level constant in the checker is keyed by tool name — that list has to "
         "be edited every time a tool is added, and it rots silently:\n  "
         + "\n  ".join(offenders))
+
+
+@pytest.mark.parametrize("inherited,file_value,expected", [
+    ("resolved", "older", "resolved"),
+    ("op://V/Item/credential", "plain", "plain"),
+    ("", '"op://V/Item/credential"', None),
+    ("", "'op://V/Item/credential'", None),
+    ("", '"plain"', "plain"),
+    ("op://V/Item/credential", "", None),
+])
+def test_token_loader_rejects_addresses(tmp_path, monkeypatch, inherited, file_value, expected):
+    spec = importlib.util.spec_from_file_location("phase6_checker", CHECKER)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "ENV_CANDIDATES", [])
+    monkeypatch.setenv("VOICE_API_TOKEN", inherited)
+    (tmp_path / ".env").write_text("VOICE_API_TOKEN=" + file_value + "\n")
+    assert module.load_token(str(tmp_path)) == expected
