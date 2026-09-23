@@ -20,7 +20,7 @@ import time
 import uuid
 
 from core import audit, capabilities, caps, config, confirm_gate, privacy
-from core import kernel_tools
+from core import hands, kernel_tools
 from core.audio_core import AudioCoreMixin
 from core.backends import base as events
 from core.backends.openai_backend import OpenAIBackend
@@ -107,6 +107,8 @@ HIGH_STAKES_EXECUTORS = {
     "gmail_send": lambda args: services.gmail_send(args),
     "kernel_decide": lambda args: kernel_tools.kernel_decide(args),
     "close_finished_tasks": lambda args: close_finished_tasks(args, confirmed=True),
+    "click": lambda args: hands.run("click", args),
+    "press_keys": lambda args: hands.run("press_keys", args),
 }
 
 
@@ -1240,6 +1242,16 @@ class LiveSession(AudioCoreMixin):
             out = memory.recall(q) or "nothing relevant in memory"
             _log(f"recall: {q!r}")
             config.activity(f"🧠  recalled: {q}")
+        elif name in hands.HAND_TOOLS:
+            risky = hands.needs_confirmation(name, args)
+            if risky:
+                out = self._stage_pending(
+                    name, args, f"CONFIRMATION REQUIRED: about to {risky} on "
+                    f"{capabilities.host(self.profile_name)}. Ask the user to confirm out loud.")
+            else:
+                out = await self._loop.run_in_executor(None, hands.run, name, args)
+                _log(f"{name}: {out}")
+                config.activity(f"🖐  {out[:60]}")
         elif name == "put_text":
             out = _put_text(args.get("text", ""), args.get("paste", True))
             _log(f"put_text (paste={args.get('paste', True)}): {out}")

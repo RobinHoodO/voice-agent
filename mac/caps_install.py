@@ -29,7 +29,7 @@ def install(log_sink=None) -> None:
 
     caps.set_notifier(_rumps_notify)
 
-    for mod in ("mac.keychain", "mac.clipboard", "mac.screen", "mac.audio"):
+    for mod in ("mac.keychain", "mac.clipboard", "mac.screen", "mac.hands", "mac.audio"):
         try:
             __import__(mod, fromlist=["install"]).install()
         except Exception as e:      # noqa: BLE001 — a missing capability degrades, never fatal
