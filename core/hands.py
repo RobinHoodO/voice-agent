@@ -9,7 +9,36 @@ import re
 
 from core import caps
 
-HAND_TOOLS = ("open_app", "click", "type_text", "press_keys")
+HAND_TOOLS = ("open_app", "click", "type_text", "press_keys", "scroll", "read_controls",
+              "browser_tabs", "fill_field")
+
+# Robin's systems by the name he says out loud. open_app resolves these first, so
+# "open Command Center" lands on the tailnet URL instead of a guess. Extend per machine
+# with config `live.places` ({"name": "url"}) — no code change.
+PLACES = {
+    "command center": "http://100.114.219.63:3002",
+    "bloom": "http://100.114.219.63:3005",
+    "fireflies live": "http://100.114.219.63:3017",
+    "kettlebell": "http://100.114.219.63:3019",
+    "openseo": "http://100.114.219.63:3022",
+    "wiki": "http://100.114.219.63:8451",
+    "notion": "https://www.notion.so",
+    "gmail": "https://mail.google.com",
+    "calendar": "https://calendar.google.com",
+    "google calendar": "https://calendar.google.com",
+    "drive": "https://drive.google.com",
+    "google drive": "https://drive.google.com",
+    "front": "https://app.frontapp.com",
+    "github": "https://github.com",
+    "sentry": "https://thrivbe.sentry.io",
+    "miro": "https://miro.com/app/dashboard/",
+}
+
+
+def resolve_place(target: str) -> str:
+    from core import config
+    places = {**PLACES, **{k.lower(): v for k, v in (config.get("live.places") or {}).items()}}
+    return places.get(target.strip().lower(), target)
 
 # A click on one of these words is outward-facing or destructive, so it stages behind
 # the spoken confirm gate like gmail_send. ponytail: word-list heuristic — an unlabeled
@@ -43,6 +72,11 @@ def needs_confirmation(name: str, args: dict) -> str:
             label = caps.hands().element_at(float(args["x"]), float(args["y"]))
         if RISKY_WORDS.search(label):
             return f"click '{label}'"
+    elif name == "fill_field" and args.get("submit"):
+        # Return in a form submits it; the form may be a payment or a post.
+        target = (args.get("label") or "") + " " + (args.get("text") or "")
+        if RISKY_WORDS.search(target):
+            return f"fill '{args.get('label')}' and submit"
     elif name == "press_keys":
         combo = normalize_keys(args.get("keys", ""))
         if combo in RISKY_KEYS:
@@ -59,7 +93,16 @@ def run(name: str, args: dict) -> str:
                        y=None if y is None else float(y),
                        double=bool(args.get("double")))
     if name == "open_app":
-        return h.open_app(args.get("target", ""))
+        return h.open_app(resolve_place(args.get("target", "")))
+    if name == "fill_field":
+        return h.fill_field(args.get("label", ""), args.get("text", ""),
+                            bool(args.get("submit")))
+    if name == "scroll":
+        return h.scroll(args.get("direction", "down"), int(args.get("amount") or 5))
+    if name == "read_controls":
+        return h.read_controls(args.get("filter", ""))
+    if name == "browser_tabs":
+        return h.browser_tabs(args.get("action", "list"), args.get("match", ""))
     if name == "type_text":
         return h.type_text(args.get("text", ""))
     if name == "press_keys":

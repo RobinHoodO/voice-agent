@@ -65,7 +65,7 @@ def _text(el) -> str:
     parts = []
     for a in _TEXT_ATTRS:
         v = ctx._ax(el, a)
-        if isinstance(v, str) and v.strip():
+        if isinstance(v, str) and v.strip() and v.strip() not in parts:
             parts.append(v.strip())
     return " ".join(parts)
 
@@ -82,15 +82,39 @@ def _geometry(el):
     return (p.x, p.y, s.width, s.height) if ok1 and ok2 else None
 
 
-def _find(label: str):
-    """Best AX element in the front app's focused window whose text matches `label`:
-    exact text beats a prefix beats a substring; a pressable role beats plain text."""
+def _web_area(win):
+    """The page content of a browser window (AXWebArea), or None for non-browsers."""
+    queue, n = [win], 0
+    while queue and n < 400:
+        el = queue.pop(0)
+        n += 1
+        if ctx._ax(el, "AXRole") == "AXWebArea":
+            return el
+        queue.extend(ctx._ax(el, "AXChildren") or [])
+    return None
+
+
+def _roots():
+    """Where to search, page content first: [web area?, focused window, menu bar]."""
     from ApplicationServices import AXUIElementCreateApplication
-    pid, _ = _front_pid_app()
+    pid, app = _front_pid_app()
     if pid < 0:
-        return None
+        return [], app
     root = AXUIElementCreateApplication(pid)
-    start = [w for w in (ctx._ax(root, "AXFocusedWindow"), ctx._ax(root, "AXMenuBar")) if w]
+    win = ctx._ax(root, "AXFocusedWindow")
+    web = _web_area(win) if win is not None else None
+    return [r for r in (web, win, ctx._ax(root, "AXMenuBar")) if r is not None], app
+
+
+_FIELDS = ("AXTextField", "AXTextArea", "AXSearchField", "AXComboBox")
+
+
+def _find(label: str, roles=None):
+    """Best AX element in the front app's focused window whose text matches `label`:
+    exact text beats a prefix beats a substring; a pressable role beats plain text.
+    Page content is searched before the browser's own toolbar."""
+    start, _ = _roots()
+    roles = roles or _PRESSABLE
     want = label.strip().lower()
     best, best_rank = None, 99
     queue, seen = list(start), 0
@@ -99,7 +123,7 @@ def _find(label: str):
         seen += 1
         role = ctx._ax(el, "AXRole") or ""
         text = _text(el).lower()
-        if text and role in _PRESSABLE:
+        if text and role in roles:
             rank = 0 if text == want else 1 if text.startswith(want) else 2 if want in text else 99
             if rank < 99 and role == "AXStaticText":
                 rank += 3            # prefer the button over the words next to it
@@ -235,6 +259,105 @@ class MacHands(caps.Hands):
             Quartz.CGEventSetFlags(ev, flags)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         return f"pressed {keys}"
+
+
+    def fill_field(self, label: str, text: str, submit: bool = False) -> str:
+        if (why := _blocked()):
+            return why
+        el = _find(label, roles=_FIELDS)
+        if el is None:
+            return (f"no field labelled '{label}' — try read_controls, or click the field "
+                    "and use type_text")
+        from ApplicationServices import AXUIElementSetAttributeValue
+        AXUIElementSetAttributeValue(el, "AXFocused", True)
+        geo = _geometry(el)
+        if geo:                       # a real click too: web fields often ignore AXFocused
+            gx, gy, gw, gh = geo
+            _mouse_click(gx + gw / 2, gy + gh / 2)
+        time.sleep(0.15)
+        self.press_keys("cmd+a")      # replace what was there, like a person would
+        self.type_text(text)
+        if submit:
+            self.press_keys("return")
+        return f"filled '{_text(el)[:50] or label}'" + (" and pressed return" if submit else "")
+
+    def scroll(self, direction: str, amount: int) -> str:
+        if (why := _blocked()):
+            return why
+        import Quartz
+        amount = max(1, min(int(amount), 60))
+        dy = {"up": amount, "down": -amount}.get(direction, 0)
+        dx = {"left": amount, "right": -amount}.get(direction, 0)
+        if not (dx or dy):
+            return f"unknown direction '{direction}'"
+        # Scroll events land under the pointer, so park it in the window's middle first.
+        cx, cy = _to_screen(500, 500)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(
+            None, Quartz.kCGEventMouseMoved, (cx, cy), Quartz.kCGMouseButtonLeft))
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateScrollWheelEvent(
+            None, Quartz.kCGScrollEventUnitLine, 2, dy, dx))
+        return f"scrolled {direction} {amount}"
+
+    def read_controls(self, filter: str = "") -> str:
+        if (why := _blocked()):
+            return why
+        roots, app = _roots()
+        if not roots:
+            return "no window in front"
+        want, lines, seen, queue = filter.strip().lower(), [], set(), roots[:1]
+        n = 0
+        while queue and n < _MAX_NODES and len(lines) < 80:
+            el = queue.pop(0)
+            n += 1
+            role = ctx._ax(el, "AXRole") or ""
+            text = _text(el)[:70]
+            if text and role in _PRESSABLE and role != "AXStaticText":
+                line = f"{role[2:].lower()}: {text}"
+                if line not in seen and (not want or want in line.lower()):
+                    seen.add(line)
+                    lines.append(line)
+            queue.extend(ctx._ax(el, "AXChildren") or [])
+        return f"{app} — {len(lines)} controls:\n" + "\n".join(lines) if lines else \
+            f"no labelled controls found in {app}; use the screenshot and click by x/y"
+
+    def browser_tabs(self, action: str, match: str = "") -> str:
+        _, front = _front_pid_app()
+        browser = "Safari" if front == "Safari" else "Google Chrome"
+        title = "name" if browser == "Safari" else "title"
+        # One line per tab: "<window>\t<tab>\t<title>\t<url>". Matching happens here in
+        # Python, not in AppleScript, so what gets switched is exactly what was listed.
+        raw = ctx.osa(
+            f'set sep to character id 9\n'   # `tab` means a browser tab inside the tell
+            f'tell application "{browser}"\nif not running then return ""\nset out to ""\n'
+            f'set wi to 0\nrepeat with w in windows\nset wi to wi + 1\nset ti to 0\n'
+            f'repeat with t in tabs of w\nset ti to ti + 1\n'
+            f'set out to out & wi & sep & ti & sep & ({title} of t) & sep & (URL of t) & linefeed\n'
+            f'end repeat\nend repeat\nreturn out\nend tell')
+        tabs = [r.split("\t", 3) for r in (raw or "").splitlines() if r.count("\t") >= 3]
+        if not tabs:
+            return f"{browser}: no open tabs (or not running, or no Automation permission)"
+        if action == "list":
+            return f"{browser}, {len(tabs)} tabs:\n" + "\n".join(
+                f"{t[2][:70]} | {t[3][:90]}" for t in tabs)
+        if action not in ("switch", "close"):
+            return f"unknown action '{action}'"
+        want = match.strip().lower()
+        if not want:
+            return "browser_tabs switch/close needs match"
+        hit = next((t for t in tabs if want in t[2].lower()), None) or \
+            next((t for t in tabs if want in t[3].lower()), None)
+        if hit is None:
+            return f"{browser}: no tab matches '{match}'"
+        w, i = int(hit[0]), int(hit[1])
+        if action == "close":
+            cmd = f"close tab {i} of window {w}"
+        elif browser == "Safari":
+            cmd = f"set current tab of window {w} to tab {i} of window {w}\nset index of window {w} to 1\nactivate"
+        else:
+            cmd = f"set active tab index of window {w} to {i}\nset index of window {w} to 1\nactivate"
+        ctx.osa(f'tell application "{browser}"\n{cmd}\nend tell')
+        done = "closed" if action == "close" else "switched to"
+        return f"{browser}: {done} '{hit[2][:70]}'"
 
 
 def install() -> None:

@@ -89,6 +89,12 @@ TOOL_NAME_LIMIT = 6
 # Absolute work ceiling for one genuine user utterance. Per-name and exact-args guards
 # can both be evaded by rotating tools; a user turn must never execute without bound.
 TOOL_TURN_LIMIT = 12
+# Screen work is many small steps by nature: booking a flight is ~30 clicks, types and
+# scrolls for ONE spoken request, and "scroll down" twice more is progress, not a loop.
+# So the hands get their own, wider ceilings. Still bounded — a stuck page still stops.
+HAND_TURN_LIMIT = 40
+HAND_NAME_LIMIT = 20
+HAND_REPEAT_LIMIT = 6
 # Writes to the SAME record with different values. 3 allows an honest change of mind
 # ("Backlog — actually, Next Up") and catches the guessing spiral on the third.
 TOOL_TARGET_LIMIT = 3
@@ -1157,8 +1163,9 @@ class LiveSession(AudioCoreMixin):
                 "again or describe it to the user — use os_delegate if the work has to "
                 "happen somewhere else, or say plainly that you cannot do it here.")
             return
+        is_hand = name in hands.HAND_TOOLS
         turn_calls = getattr(self, "_turn_tool_calls", 0)
-        if turn_calls >= TOOL_TURN_LIMIT:
+        if turn_calls >= (HAND_TURN_LIMIT if is_hand else TOOL_TURN_LIMIT):
             _log(f"turn tool limit: refused {name} — {turn_calls} calls this user turn")
             config.activity(f"⛔  turn tool limit: {turn_calls} calls — refused")
             self._journal("refused_turn_tool_limit", name, args,
@@ -1173,7 +1180,7 @@ class LiveSession(AudioCoreMixin):
         # Loop guard, before ANY dispatch: refuse the Nth identical call and say why, so
         # the model breaks out with an answer or a question instead of spinning silently.
         repeats = _tool_repeat_count(self._recent_tools, name, args, time.time())
-        if repeats >= TOOL_REPEAT_LIMIT:
+        if repeats >= (HAND_REPEAT_LIMIT if is_hand else TOOL_REPEAT_LIMIT):
             _log(f"loop guard: refused {name} — {repeats} identical calls in "
                  f"{int(TOOL_REPEAT_WINDOW_S)}s")
             config.activity(f"⛔  loop guard: {name.replace('_', ' ')} repeated {repeats}x — refused")
@@ -1187,7 +1194,7 @@ class LiveSession(AudioCoreMixin):
             return
         # Same tool NAME, spun on varying args — the loop the exact-args guard can't see.
         name_calls = _tool_name_count(self._recent_tools, name)
-        if name_calls >= TOOL_NAME_LIMIT:
+        if name_calls >= (HAND_NAME_LIMIT if is_hand else TOOL_NAME_LIMIT):
             _log(f"loop guard: refused {name} — {name_calls} calls (any args) in "
                  f"{int(TOOL_REPEAT_WINDOW_S)}s")
             config.activity(f"⛔  loop guard: {name.replace('_', ' ')} called {name_calls}x — refused")

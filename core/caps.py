@@ -142,6 +142,20 @@ class Hands:
     def press_keys(self, keys: str) -> str:
         return "no hands on this surface"
 
+    def scroll(self, direction: str, amount: int) -> str:
+        return "no hands on this surface"
+
+    def fill_field(self, label: str, text: str, submit: bool = False) -> str:
+        return "no hands on this surface"
+
+    def read_controls(self, filter: str = "") -> str:
+        """The clickable/typeable things in the front window, one per line."""
+        return "no hands on this surface"
+
+    def browser_tabs(self, action: str, match: str = "") -> str:
+        """list / switch / close tabs in the front browser (Chrome or Safari)."""
+        return "no hands on this surface"
+
 
 _hands = Hands()
 
