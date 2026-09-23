@@ -181,6 +181,25 @@ class MacHands(caps.Hands):
         except Exception:
             return ""
 
+    def open_app(self, target: str) -> str:
+        import subprocess
+        target = target.strip()
+        if not target:
+            return "open_app needs an app name or a web address"
+        # Only an app name (`open -a`, which can only launch apps) or an http(s) URL.
+        # Never a path: `open x.command` RUNS it (see confirm_gate's open_file note).
+        if target.lower().startswith(("http://", "https://")):
+            argv = ["open", target]
+        elif "/" in target or target.startswith("."):
+            return "open_app takes an app name or an http(s) address, not a file path"
+        else:
+            argv = ["open", "-a", target]
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return f"could not open {target}: {(r.stderr or '').strip()[:120]}"
+        time.sleep(0.8)              # let it come to the front before the next screenshot
+        return f"opened {target}"
+
     def type_text(self, text: str) -> str:
         if (why := _blocked()):
             return why

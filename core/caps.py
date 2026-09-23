@@ -132,6 +132,10 @@ class Hands:
         """The visible text of whatever a click at (x, y) would hit, or ''."""
         return ""
 
+    def open_app(self, target: str) -> str:
+        """Launch/focus an app by name, or open an http(s) URL in the default browser."""
+        return "no hands on this surface"
+
     def type_text(self, text: str) -> str:
         return "no hands on this surface"
 

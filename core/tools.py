@@ -81,6 +81,15 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "open_app",
+        "description": "Open or switch to any app on the Mac by name (Safari, Google Chrome, Mail, Notes, Finder, Spotify, Slack…), or open a web address in the browser. For a web search, open https://www.google.com/search?q=<words> directly. Then keep going with click, type_text and press_keys.",
+        "parameters": {"type": "object",
+                       "properties": {"target": {"type": "string",
+                                                 "description": "app name, or a full http(s) URL"}},
+                       "required": ["target"]},
+    },
+    {
+        "type": "function",
         "name": "click",
         "description": "Click something in the app in front. Prefer label: the visible text of the button, link, menu or field (e.g. 'New Message', 'Reply', 'Search'). Only if it has no text, give x and y from 0 to 1000 across the latest screenshot (0,0 top-left). Clicks on send/delete/pay-type buttons wait for the user's spoken yes.",
         "parameters": {"type": "object",

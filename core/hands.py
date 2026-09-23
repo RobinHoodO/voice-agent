@@ -9,7 +9,7 @@ import re
 
 from core import caps
 
-HAND_TOOLS = ("click", "type_text", "press_keys")
+HAND_TOOLS = ("open_app", "click", "type_text", "press_keys")
 
 # A click on one of these words is outward-facing or destructive, so it stages behind
 # the spoken confirm gate like gmail_send. ponytail: word-list heuristic — an unlabeled
@@ -58,6 +58,8 @@ def run(name: str, args: dict) -> str:
                        x=None if x is None else float(x),
                        y=None if y is None else float(y),
                        double=bool(args.get("double")))
+    if name == "open_app":
+        return h.open_app(args.get("target", ""))
     if name == "type_text":
         return h.type_text(args.get("text", ""))
     if name == "press_keys":

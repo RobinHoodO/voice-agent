@@ -54,3 +54,10 @@ def test_run_passes_normalized_args_through(fake):
     hands.run("click", {"x": "10", "y": 20})
     hands.run("press_keys", {"keys": "CMD+L"})
     assert fake.calls == [("click", None, 10.0, 20.0, False), ("keys", "cmd+l")]
+
+
+@pytest.mark.parametrize("target", ["/tmp/x.command", "~/evil.app", "./run.sh", "file:///tmp/x"])
+def test_open_app_never_opens_a_path(target):
+    """`open x.command` RUNS it — open_app takes an app name or an http(s) URL only."""
+    from mac.hands import MacHands
+    assert "not a file path" in MacHands().open_app(target)
