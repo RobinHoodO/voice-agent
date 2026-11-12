@@ -66,7 +66,10 @@ _SHELL_TOOLS = ("run_shell",)
 # The brain is on the Mac, so the paste would genuinely land — into whatever window
 # happens to be in front on a screen Robin is not looking at, which is worse than a
 # failure, because it succeeds silently in the wrong place.
-_DESK_CONTEXT_TOOLS = ("put_text",)
+# The hands (click / type_text / press_keys) drive that same front window, so they go
+# with it: on a screen nobody is watching, a click is a guess with consequences.
+_DESK_CONTEXT_TOOLS = ("put_text", "open_app", "click", "type_text", "press_keys", "scroll",
+                       "read_controls", "browser_tabs", "fill_field")
 
 # NOT excluded, deliberately, and this is the line that changed on 2026-08-10: the herdr
 # lanes (`delegate`, `continue_task`, `close_finished_tasks`, `fleet`) drive named panes

@@ -117,6 +117,58 @@ def clipboard() -> Clipboard:
     return _clipboard
 
 
+# --- hands: click / type / keys in the front window -------------------------
+class Hands:
+    """Drive the machine's own UI. Mac: Accessibility press + Quartz mouse/key events.
+
+    `x`/`y` are 0-1000 over the window the screenshot showed (Gemini's own box
+    convention), so the model never has to know the image's pixel size."""
+
+    def click(self, label: str | None = None, x: float | None = None,
+              y: float | None = None, double: bool = False) -> str:
+        return "no hands on this surface"
+
+    def element_at(self, x: float, y: float) -> str:
+        """The visible text of whatever a click at (x, y) would hit, or ''."""
+        return ""
+
+    def open_app(self, target: str) -> str:
+        """Launch/focus an app by name, or open an http(s) URL in the default browser."""
+        return "no hands on this surface"
+
+    def type_text(self, text: str) -> str:
+        return "no hands on this surface"
+
+    def press_keys(self, keys: str) -> str:
+        return "no hands on this surface"
+
+    def scroll(self, direction: str, amount: int) -> str:
+        return "no hands on this surface"
+
+    def fill_field(self, label: str, text: str, submit: bool = False) -> str:
+        return "no hands on this surface"
+
+    def read_controls(self, filter: str = "") -> str:
+        """The clickable/typeable things in the front window, one per line."""
+        return "no hands on this surface"
+
+    def browser_tabs(self, action: str, match: str = "") -> str:
+        """list / switch / close tabs in the front browser (Chrome or Safari)."""
+        return "no hands on this surface"
+
+
+_hands = Hands()
+
+
+def set_hands(impl: Hands) -> None:
+    global _hands
+    _hands = impl
+
+
+def hands() -> Hands:
+    return _hands
+
+
 # --- audio transport --------------------------------------------------------
 class AudioTransport:
     """Devices and streams. The VAD / turn-boundary logic is NOT here — that is
