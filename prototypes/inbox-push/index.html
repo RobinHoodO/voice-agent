@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PAM Inbox push test</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#07080b">
+<style>
+  body { font: 18px/1.5 -apple-system, system-ui, sans-serif; background: #07080b; color: #eee; margin: 0; padding: 24px 16px; }
+  button { font: inherit; width: 100%; padding: 16px; margin: 8px 0; border: 0; border-radius: 12px; background: #8b6cf6; color: #fff; }
+  button:disabled { opacity: .4; }
+  #status { margin: 16px 0; padding: 12px; border-radius: 12px; background: #16181f; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<h1>PAM Inbox push test</h1>
+<div id="status" role="status" aria-live="polite">Loading…</div>
+<button id="on" disabled>1. Turn on push</button>
+<button id="test" disabled>2. Send test push</button>
+<script>
+const $ = (id) => document.getElementById(id);
+const say = (text) => { $("status").textContent = text; };
+const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const iOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+
+function keyBytes(b64url) {
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function refresh() {
+  if (iOS && !standalone) return say("iPhone: push works only from the Home Screen.\nTap Share → Add to Home Screen. Then open the new icon.");
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return say("This browser has no web push.");
+  if (Notification.permission === "denied") return say("Notifications are blocked for this page. Allow them in the phone settings.");
+  const reg = await navigator.serviceWorker.register("/sw.js");
+  const sub = await reg.pushManager.getSubscription();
+  $("on").disabled = false;
+  $("test").disabled = !sub;
+  say(sub ? "Push is ON for this device.\nTap 2 to send a test." : "Push is off. Tap 1.");
+}
+
+$("on").onclick = async () => {
+  try {
+    // The permission prompt must come from a tap.
+    if (await Notification.requestPermission() !== "granted") return say("Permission was not given.");
+    const reg = await navigator.serviceWorker.ready;
+    const { key } = await (await fetch("/vapid-public-key")).json();
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
+    const r = await fetch("/subscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sub) });
+    if (!r.ok) throw new Error("subscribe route said " + r.status);
+    await refresh();
+  } catch (e) { say("Turn on failed: " + e.message); }
+};
+
+$("test").onclick = async () => {
+  try {
+    const r = await (await fetch("/test", { method: "POST" })).json();
+    say("Sent:\n" + r.results.map((x) => `${x.host} → ${x.status}${x.error ? " " + x.error : ""}`).join("\n") + "\n\nLock the phone. The push must show.");
+  } catch (e) { say("Test failed: " + e.message); }
+};
+
+refresh().catch((e) => say("Error: " + e.message));
+</script>
+</body>
+</html>
