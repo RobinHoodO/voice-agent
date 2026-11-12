@@ -47,6 +47,9 @@ def isolated_agent_log(monkeypatch, tmp_path_factory):
     agent_mod = sys.modules.get("mac.agent")
     if agent_mod is not None:
         monkeypatch.setattr(agent_mod, "LOG_PATH", str(target / "agent.log"), raising=False)
+        # Real config may have ui.show_terminal on: never pop a Terminal tailing a test log.
+        monkeypatch.setattr(agent_mod.VoiceAgent, "_open_activity_window", lambda self: None, raising=False)
+        monkeypatch.setattr(agent_mod.VoiceAgent, "_close_activity_window", lambda self: None, raising=False)
     return target
 
 
