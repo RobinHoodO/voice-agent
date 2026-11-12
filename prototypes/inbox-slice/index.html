@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PROTOTYPE inbox</title>
+<style>
+  body{font:16px -apple-system,sans-serif;margin:0;padding:16px;background:#111;color:#eee}
+  h1{font-size:15px;color:#f90;margin:0 0 12px}
+  .card{background:#1c1c1e;border-radius:12px;padding:14px;margin-bottom:14px}
+  .meta{font-size:12px;color:#999;margin-bottom:6px}
+  .q{font-weight:600;margin-bottom:10px}
+  button{display:block;width:100%;text-align:left;font:inherit;color:#eee;background:#2c2c2e;border:0;border-radius:10px;padding:12px;margin-bottom:8px}
+  button small{display:block;color:#aaa;font-size:13px}
+  input{width:100%;box-sizing:border-box;font:inherit;padding:12px;border-radius:10px;border:0;background:#2c2c2e;color:#eee}
+  .st{font-size:13px;margin-top:8px}
+  .open{color:#f90}.answered,.typed{color:#6cf}.delivered{color:#6c6}.not_delivered{color:#f66}.answered_at_desk{color:#999}
+  pre{font-size:11px;color:#888;white-space:pre-wrap;word-break:break-all}
+</style>
+<h1>PROTOTYPE inbox · throw away</h1>
+<div id="list"></div>
+<details><summary>Full state</summary><pre id="dump"></pre></details>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const post = (p, b) => fetch(p, {method:'POST', body: JSON.stringify(b)}).then(load);
+const label = {open:'Waits for you', answered:'Sent, waits for the typer', typed:'Typed, waits for the agent',
+  delivered:'Sent ✓', not_delivered:'Not delivered', answered_at_desk:'Answered at the desk'};
+let typing = false;
+async function load() {
+  if (typing) return;  // do not wipe a half-typed answer
+  const s = await (await fetch('/rows')).json();
+  document.getElementById('dump').textContent = JSON.stringify(s, null, 1);
+  document.getElementById('list').innerHTML = s.rows.slice().reverse().map(r => {
+    const q = r.questions[0] || {}, live = r.status === 'open';
+    return `<div class="card">
+      <div class="meta">${esc((r.cwd||'').split('/').pop())} · pane ${esc(r.pane)} · ${Math.round(s.now - r.raised_ts)} s ago${r.questions.length > 1 ? ' · ' + r.questions.length + ' questions (desk only)' : ''}</div>
+      <div class="q">${esc(q.question)}</div>
+      ${live ? (q.options||[]).map((o, i) => `<button onclick="post('/answer',{id:${r.id},option:${i}})">${esc(o.label)}<small>${esc(o.description)}</small></button>`).join('')
+        + `<input placeholder="Or type an answer, then Enter" onfocus="typing=true" onblur="typing=false" onkeydown="if(event.key==='Enter'&&this.value){typing=false;post('/answer',{id:${r.id},text:this.value})}">` : ''}
+      ${r.status === 'not_delivered' ? `<button onclick="post('/retry',{id:${r.id}})">Retry</button>` : ''}
+      <div class="st ${r.status}">${label[r.status]}${r.note ? ' · ' + esc(r.note) : ''}</div>
+    </div>`;
+  }).join('') || '<div class="meta">Nothing waits.</div>';
+}
+load(); setInterval(load, 1500);
+</script>
